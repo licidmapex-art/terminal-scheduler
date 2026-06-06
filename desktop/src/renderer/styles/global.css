@@ -730,6 +730,40 @@ body {
   color: #3730a3;
 }
 
+/* ── Transport rows (saved vs new) ── */
+.transport-row {
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  position: relative;
+}
+.transport-row--saved {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-left: 3px solid #94a3b8;
+}
+.transport-row--new {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-left: 3px solid #3b82f6;
+}
+.transport-row-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  background: #e2e8f0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-bottom: 8px;
+}
+.btn-sm {
+  font-size: 12px !important;
+  padding: 4px 10px !important;
+}
+
 .customer-form-sticky-actions {
   position: sticky;
   bottom: 0;

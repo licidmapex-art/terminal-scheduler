@@ -13,8 +13,7 @@ export default function Config() {
           <div>
             <h1 className="page-title">Terminal configuration</h1>
             <p className="page-subtitle">
-              Set the planning horizon, whether pipeline flow fills or drains tanks (rates are on each customer),
-              storage mode, and berth spacing.
+              Set the planning horizon, storage model, and berth spacing. Per-customer pipeline flows are configured on each customer.
             </p>
           </div>
         </div>

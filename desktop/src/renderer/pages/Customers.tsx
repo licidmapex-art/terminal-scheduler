@@ -238,6 +238,7 @@ export default function Customers() {
             chartColorPaletteIndex={
               adding ? customers.length : editing ? customers.findIndex((x) => x.id === editing.id) : 0
             }
+            configPipelineDirection={config?.pipelineDirection}
             onDirtyChange={setFormDirty}
             onSaved={() => {
               closeEditor();

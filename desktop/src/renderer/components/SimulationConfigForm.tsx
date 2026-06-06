@@ -231,9 +231,8 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
           <div>
             <div className="config-section-title">Simulation horizon</div>
             <p className="config-section-desc">
-              Defines the period the scheduler simulates hour-by-hour. Per-customer pipeline flow (tonnes/h) is set on
-              each customer; here you only set whether that flow <strong>fills</strong> or <strong>draws</strong> stock
-              at the terminal. Berth occupancy is evaluated inside this window.
+              Defines the period the scheduler simulates hour-by-hour. Per-customer inbound and outbound pipeline flows
+              (t/h) are set on each customer profile. Berth occupancy is evaluated inside this window.
             </p>
           </div>
         </div>
@@ -257,20 +256,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               onChange={(e) => setEndDate(e.target.value)}
               required
             />
-          </div>
-        </div>
-        <div className="form-group" style={{ marginTop: 16, marginBottom: 0, maxWidth: 360 }}>
-          <label className="form-label">Pipeline direction (terminal-wide)</label>
-          <select
-            className="form-select"
-            value={pipelineDirection}
-            onChange={(e) => setPipelineDirection(e.target.value as "inbound" | "outbound")}
-          >
-            <option value="inbound">Inbound — flow adds to inventory (magnitudes on each customer, t/h)</option>
-            <option value="outbound">Outbound — flow removes from inventory (magnitudes on each customer, t/h)</option>
-          </select>
-          <div className="form-helper" style={{ marginTop: 8 }}>
-            Rates are not entered here; they are inputs on each customer profile.
           </div>
         </div>
       </div>

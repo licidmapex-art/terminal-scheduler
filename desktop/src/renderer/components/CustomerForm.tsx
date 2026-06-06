@@ -52,6 +52,8 @@ interface CustomerFormProps {
   customer?: Customer | null;
   /** Index for palette fallback preview when chart color is automatic (new customer = list length). */
   chartColorPaletteIndex?: number;
+  /** Terminal pipeline direction, used to interpret existing unsigned pipelineFlowPerHour values. */
+  configPipelineDirection?: "inbound" | "outbound";
   onSaved?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }
@@ -68,7 +70,8 @@ type FormSnapshot = {
   declaredInboundThroughput: string;
   currentInventory: string;
   storageShare: string;
-  pipelineFlowPerHour: string;
+  inboundPipelineFlow: string;
+  outboundPipelineFlow: string;
   inboundRows: TransportRow[];
   outboundRows: TransportRow[];
   timeSharedMinBand: string;
@@ -77,36 +80,67 @@ type FormSnapshot = {
   chartColorPicker: string;
 };
 
+/**
+ * Normalize transport rows from existing data.
+ * Returns [] when no transport is configured (MEPS = 0 or no rows).
+ * Falls back to a single legacy row when the old flat MEPS fields were used.
+ */
 function normalizeRows(rows?: TransportRow[], fallback?: Partial<TransportRow>): TransportRow[] {
-  const base =
-    rows && rows.length > 0
-      ? rows.slice(0, 3)
-      : [
-          {
-            mode: (fallback?.mode ?? "ship") as TransportMode,
-            sharePct: 100,
-            meps: Math.max(0, fallback?.meps ?? 0),
-            roundtripHours: Math.max(0, fallback?.roundtripHours ?? 0)
-          }
-        ];
-  return base.map((r) => ({
-    mode: r.mode,
-    sharePct: Number.isFinite(r.sharePct) ? r.sharePct : 0,
-    meps: Number.isFinite(r.meps) ? r.meps : 0,
-    roundtripHours: Number.isFinite(r.roundtripHours) ? r.roundtripHours : 0
-  }));
+  if (rows && rows.length > 0) {
+    return rows.slice(0, 3).map((r) => ({
+      mode: r.mode,
+      sharePct: Number.isFinite(r.sharePct) ? r.sharePct : 0,
+      meps: Number.isFinite(r.meps) ? r.meps : 0,
+      roundtripHours: Number.isFinite(r.roundtripHours) ? r.roundtripHours : 0
+    }));
+  }
+  // Legacy: single row from old flat inboundMEPS/outboundMEPS fields
+  if (fallback && (fallback.meps ?? 0) > 0) {
+    return [
+      {
+        mode: (fallback.mode ?? "ship") as TransportMode,
+        sharePct: 100,
+        meps: Math.max(0, fallback.meps ?? 0),
+        roundtripHours: Math.max(0, fallback.roundtripHours ?? 0)
+      }
+    ];
+  }
+  return [];
+}
+
+/**
+ * Split the stored signed pipelineFlowPerHour into separate inbound/outbound display values.
+ * Old data (unsigned + pipelineDirection) and new data (signed, direction="inbound") both handled.
+ */
+function computePipelineFlows(
+  customer: Customer | null | undefined,
+  configPipelineDirection: "inbound" | "outbound"
+): { inbound: string; outbound: string } {
+  const net = customer?.pipelineFlowPerHour ?? 0;
+  if (net < 0) {
+    // New-style signed value: negative means outbound drain
+    return { inbound: "0", outbound: String(-net) };
+  }
+  if (configPipelineDirection === "outbound") {
+    // Old-style unsigned value with outbound terminal direction
+    return { inbound: "0", outbound: String(net) };
+  }
+  // Inbound (default or explicitly set)
+  return { inbound: String(net), outbound: "0" };
 }
 
 function snapshotFromCustomer(
   customer: Customer | null | undefined,
-  chartColorPaletteIndex: number
+  chartColorPaletteIndex: number,
+  configPipelineDirection: "inbound" | "outbound"
 ): FormSnapshot {
-  const inbound = normalizeRows(customer?.inboundTransports, {
+  const { inbound: ib, outbound: ob } = computePipelineFlows(customer, configPipelineDirection);
+  const inboundRows = normalizeRows(customer?.inboundTransports, {
     mode: customer?.inboundMode ?? "ship",
     meps: customer?.inboundMEPS ?? 0,
     roundtripHours: customer?.inboundRoundtripHours ?? 0
   });
-  const outbound = normalizeRows(customer?.outboundTransports, {
+  const outboundRows = normalizeRows(customer?.outboundTransports, {
     mode: customer?.outboundMode ?? "ship",
     meps: customer?.outboundMEPS ?? 0,
     roundtripHours: customer?.outboundRoundtripHours ?? 0
@@ -117,9 +151,10 @@ function snapshotFromCustomer(
     declaredInboundThroughput: String(customer?.declaredInboundThroughput ?? ""),
     currentInventory: String(customer?.currentInventory ?? ""),
     storageShare: String(customer?.storageShare ?? ""),
-    pipelineFlowPerHour: String(customer?.pipelineFlowPerHour ?? ""),
-    inboundRows: inbound,
-    outboundRows: outbound,
+    inboundPipelineFlow: ib,
+    outboundPipelineFlow: ob,
+    inboundRows,
+    outboundRows,
     timeSharedMinBand: String(customer?.timeSharedMinBand ?? 0),
     timeSharedDuration: String(customer?.timeSharedDuration ?? 24),
     useCustomChartColor: custom != null,
@@ -132,9 +167,20 @@ function snapshotsEqual(a: FormSnapshot, b: FormSnapshot): boolean {
 }
 
 const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function CustomerForm(
-  { customer, chartColorPaletteIndex = 0, onSaved, onDirtyChange },
+  { customer, chartColorPaletteIndex = 0, configPipelineDirection = "inbound", onSaved, onDirtyChange },
   ref
 ) {
+  const pipelines = computePipelineFlows(customer, configPipelineDirection);
+  const initialInboundRows = normalizeRows(customer?.inboundTransports, {
+    mode: customer?.inboundMode ?? "ship",
+    meps: customer?.inboundMEPS ?? 0,
+    roundtripHours: customer?.inboundRoundtripHours ?? 0
+  });
+  const initialOutboundRows = normalizeRows(customer?.outboundTransports, {
+    mode: customer?.outboundMode ?? "ship",
+    meps: customer?.outboundMEPS ?? 0,
+    roundtripHours: customer?.outboundRoundtripHours ?? 0
+  });
 
   const [name, setName] = useState(customer?.name ?? "");
   const [declaredInboundThroughput, setDeclaredInboundThroughput] = useState(
@@ -146,23 +192,10 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   const [storageShare, setStorageShare] = useState(
     String(customer?.storageShare ?? "")
   );
-  const [pipelineFlowPerHour, setPipelineFlowPerHour] = useState(
-    String(customer?.pipelineFlowPerHour ?? "")
-  );
-  const [inboundRows, setInboundRows] = useState<TransportRow[]>(
-    normalizeRows(customer?.inboundTransports, {
-      mode: customer?.inboundMode ?? "ship",
-      meps: customer?.inboundMEPS ?? 0,
-      roundtripHours: customer?.inboundRoundtripHours ?? 0
-    })
-  );
-  const [outboundRows, setOutboundRows] = useState<TransportRow[]>(
-    normalizeRows(customer?.outboundTransports, {
-      mode: customer?.outboundMode ?? "ship",
-      meps: customer?.outboundMEPS ?? 0,
-      roundtripHours: customer?.outboundRoundtripHours ?? 0
-    })
-  );
+  const [inboundPipelineFlow, setInboundPipelineFlow] = useState(pipelines.inbound);
+  const [outboundPipelineFlow, setOutboundPipelineFlow] = useState(pipelines.outbound);
+  const [inboundRows, setInboundRows] = useState<TransportRow[]>(initialInboundRows);
+  const [outboundRows, setOutboundRows] = useState<TransportRow[]>(initialOutboundRows);
   const [timeSharedMinBand, setTimeSharedMinBand] = useState(
     String(customer?.timeSharedMinBand ?? 0)
   );
@@ -187,6 +220,10 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     storage: true,
     timeShared: false
   });
+
+  // Track how many rows were loaded from saved data vs newly added this session
+  const [savedInboundCount] = useState(() => initialInboundRows.length);
+  const [savedOutboundCount] = useState(() => initialOutboundRows.length);
 
   useEffect(() => {
     if (window.dbAPI) {
@@ -216,7 +253,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   }, [customer?.id, customer?.chartColor, chartColorPaletteIndex]);
 
   const inboundThroughput = parseFloat(declaredInboundThroughput) || 0;
-  const pipelineTphVal = parseFloat(pipelineFlowPerHour) || 0;
+  const inboundPipelineVal = parseFloat(inboundPipelineFlow) || 0;
+  const outboundPipelineVal = parseFloat(outboundPipelineFlow) || 0;
+  const netPipelineFlowPerHour = inboundPipelineVal - outboundPipelineVal;
 
   const throughputOverview = useMemo(() => {
     if (!config) return null;
@@ -226,7 +265,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       declaredInboundThroughput: inboundThroughput,
       currentInventory: parseFloat(currentInventory) || 0,
       storageShare: parseFloat(storageShare) || 0,
-      pipelineFlowPerHour: pipelineTphVal,
+      pipelineFlowPerHour: netPipelineFlowPerHour,
       inboundTransports: inboundRows,
       outboundTransports: outboundRows,
       inboundMEPS: inboundRows[0]?.meps ?? 0,
@@ -242,7 +281,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       startDate: new Date(config.startDate),
       endDate: new Date(config.endDate),
       pipelineFlowRate: 0,
-      pipelineDirection: config.pipelineDirection,
+      pipelineDirection: "inbound", // net flow is already signed
       totalStorageCapacity: 100000,
       storageMode: "fixed_band",
       sharedInventoryCustomerDeficitLimitTonnes: 0,
@@ -260,7 +299,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     inboundThroughput,
     currentInventory,
     storageShare,
-    pipelineTphVal,
+    netPipelineFlowPerHour,
     inboundRows,
     outboundRows,
     timeSharedMinBand,
@@ -293,20 +332,23 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     const setter = direction === "inbound" ? setInboundRows : setOutboundRows;
     setter((prev) => {
       if (prev.length >= 3) return prev;
-      return [...prev, { mode: "ship", sharePct: 0, meps: 0, roundtripHours: 0 }];
+      const isFirst = prev.length === 0;
+      return [...prev, { mode: "ship", sharePct: isFirst ? 100 : 0, meps: 0, roundtripHours: 0 }];
     });
   };
 
   const removeRow = (direction: "inbound" | "outbound", idx: number) => {
     const setter = direction === "inbound" ? setInboundRows : setOutboundRows;
     setter((prev) => {
-      if (prev.length <= 1) return prev;
-      return prev.filter((_, i) => i !== idx);
+      const next = prev.filter((_, i) => i !== idx);
+      // Auto-fix share to 100 when only one row remains
+      if (next.length === 1) return [{ ...next[0], sharePct: 100 }];
+      return next;
     });
   };
 
   const validateTransportRows = (label: string, rows: TransportRow[]): string | null => {
-    if (rows.length === 0) return `${label} requires at least one mode row`;
+    if (rows.length === 0) return null; // No transport configured — OK
     const shareSum = rows.reduce((s, r) => s + r.sharePct, 0);
     if (Math.abs(shareSum - 100) > 0.01) {
       return `${label} shares must sum to 100%`;
@@ -326,7 +368,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   };
 
   const formKey = customer?.id ?? "__new__";
-  const initialSnapshotRef = useRef<FormSnapshot>(snapshotFromCustomer(customer, chartColorPaletteIndex));
+  const initialSnapshotRef = useRef<FormSnapshot>(
+    snapshotFromCustomer(customer, chartColorPaletteIndex, configPipelineDirection)
+  );
 
   const buildSnapshot = useCallback(
     (): FormSnapshot => ({
@@ -334,7 +378,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       declaredInboundThroughput,
       currentInventory,
       storageShare,
-      pipelineFlowPerHour,
+      inboundPipelineFlow,
+      outboundPipelineFlow,
       inboundRows,
       outboundRows,
       timeSharedMinBand,
@@ -347,7 +392,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       declaredInboundThroughput,
       currentInventory,
       storageShare,
-      pipelineFlowPerHour,
+      inboundPipelineFlow,
+      outboundPipelineFlow,
       inboundRows,
       outboundRows,
       timeSharedMinBand,
@@ -358,9 +404,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   );
 
   useEffect(() => {
-    initialSnapshotRef.current = snapshotFromCustomer(customer, chartColorPaletteIndex);
+    initialSnapshotRef.current = snapshotFromCustomer(customer, chartColorPaletteIndex, configPipelineDirection);
     onDirtyChange?.(false);
-  }, [formKey, chartColorPaletteIndex, customer, onDirtyChange]);
+  }, [formKey, chartColorPaletteIndex, customer, configPipelineDirection, onDirtyChange]);
 
   useEffect(() => {
     const dirty = !snapshotsEqual(initialSnapshotRef.current, buildSnapshot());
@@ -372,7 +418,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     const throughput = parseFloat(declaredInboundThroughput);
     const inventory = parseFloat(currentInventory);
     const storageShareVal = parseFloat(storageShare);
-    const pipelineTphParsed = parseFloat(pipelineFlowPerHour);
+    const inboundPipeline = parseFloat(inboundPipelineFlow) || 0;
+    const outboundPipeline = parseFloat(outboundPipelineFlow) || 0;
     if (!name.trim()) {
       setError("Name is required");
       return false;
@@ -389,8 +436,12 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       setError("Storage share must be between 0 and 100");
       return false;
     }
-    if (isNaN(pipelineTphParsed) || pipelineTphParsed < 0) {
-      setError("Pipeline flow must be a non-negative number (t/h)");
+    if (isNaN(inboundPipeline) || inboundPipeline < 0) {
+      setError("Inbound pipeline flow must be a non-negative number");
+      return false;
+    }
+    if (isNaN(outboundPipeline) || outboundPipeline < 0) {
+      setError("Outbound pipeline flow must be a non-negative number");
       return false;
     }
     const inboundError = validateTransportRows("Inbound", inboundRows);
@@ -421,13 +472,15 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     try {
       const inboundPrimary = inboundRows[0] ?? { mode: "ship" as TransportMode, meps: 0, roundtripHours: 0 };
       const outboundPrimary = outboundRows[0] ?? { mode: "ship" as TransportMode, meps: 0, roundtripHours: 0 };
+      // Store as signed net flow. Direction "inbound" + signed value is the new canonical form.
+      const netPipeline = inboundPipeline - outboundPipeline;
       const c = {
         id: customer?.id ?? crypto.randomUUID(),
         name: name.trim(),
         declaredInboundThroughput: throughput,
         currentInventory: inventory,
         storageShare: storageShareVal,
-        pipelineFlowPerHour: pipelineTphParsed,
+        pipelineFlowPerHour: netPipeline,
         inboundTransports: inboundRows,
         outboundTransports: outboundRows,
         inboundMEPS: inboundPrimary.meps,
@@ -457,7 +510,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     declaredInboundThroughput,
     currentInventory,
     storageShare,
-    pipelineFlowPerHour,
+    inboundPipelineFlow,
+    outboundPipelineFlow,
     inboundRows,
     outboundRows,
     timeSharedMinBand,
@@ -480,6 +534,77 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     e.preventDefault();
     void saveCustomer();
   };
+
+  const renderTransportRow = (
+    direction: "inbound" | "outbound",
+    idx: number,
+    row: TransportRow,
+    isSaved: boolean
+  ) => (
+    <div
+      key={`${direction}-${idx}`}
+      className={`transport-row ${isSaved ? "transport-row--saved" : "transport-row--new"}`}
+    >
+      {isSaved && (
+        <div className="transport-row-badge">saved</div>
+      )}
+      <div className="form-grid" style={{ alignItems: "end" }}>
+        <div className="form-group">
+          <label className="form-label">Mode</label>
+          <select
+            className="form-select"
+            value={row.mode}
+            onChange={(e) => updateRow(direction, idx, { mode: e.target.value as TransportMode })}
+          >
+            <option value="ship">Ship</option>
+            <option value="barge">Barge</option>
+            <option value="train">Train</option>
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Share (%)</label>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={0.1}
+            className="form-input"
+            value={row.sharePct}
+            onChange={(e) => updateRow(direction, idx, { sharePct: parseFloat(e.target.value || "0") })}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">MEPS (t)</label>
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            className="form-input"
+            value={row.meps}
+            onChange={(e) => updateRow(direction, idx, { meps: parseFloat(e.target.value || "0") })}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Roundtrip (h)</label>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            className="form-input"
+            value={row.roundtripHours}
+            onChange={(e) =>
+              updateRow(direction, idx, { roundtripHours: parseFloat(e.target.value || "0") })
+            }
+          />
+        </div>
+        <div className="form-group" style={{ alignSelf: "center" }}>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => removeRow(direction, idx)}>
+            Remove
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <form onSubmit={handleSubmit} className="customer-form-layout">
@@ -518,6 +643,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         )}
       </div>
 
+      {/* ── General ─────────────────────────────────────────────────── */}
       <section className="customer-form-section card">
         <button
           type="button"
@@ -558,7 +684,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                 }}
                 required
               />
-              <div className="form-helper">Stock at the start of the simulation window (same as Analytics “Starting”).</div>
+              <div className="form-helper">Stock at the start of the simulation window (same as Analytics "Starting").</div>
               {fieldErrors.currentInventory && <div className="form-error">{fieldErrors.currentInventory}</div>}
             </div>
             <div className="form-group">
@@ -615,18 +741,34 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         )}
       </section>
 
+      {/* ── Inbound ─────────────────────────────────────────────────── */}
       <section className="customer-form-section card">
         <button
           type="button"
           className="customer-form-section-toggle"
           onClick={() => toggleSection("inbound")}
         >
-          <span>Inbound transport</span>
+          <span>Inbound</span>
           <span>{openSections.inbound ? "Hide" : "Show"}</span>
         </button>
         {openSections.inbound && (
           <div className="customer-form-section-content">
             <div className="form-group">
+              <label className="form-label">Inbound pipeline flow (t/h)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                className="form-input"
+                value={inboundPipelineFlow}
+                onChange={(e) => setInboundPipelineFlow(e.target.value)}
+              />
+              <div className="form-helper">
+                Rate at which the pipeline continuously fills this customer's inventory (tonnes per hour). Use 0 if no inbound pipeline.
+              </div>
+            </div>
+
+            <div className="form-group" style={{ borderTop: "1px solid #e2e8f0", paddingTop: 16, marginTop: 4 }}>
               <label className="form-label">Inbound transport throughput (t)</label>
               <input
                 type="number"
@@ -642,162 +784,103 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
               {fieldErrors.declaredInboundThroughput && (
                 <div className="form-error">{fieldErrors.declaredInboundThroughput}</div>
               )}
-              <div className="form-helper">Exclude pipeline — transport units only</div>
+              <div className="form-helper">Total inbound transport volume (excluding pipeline) over the simulation period.</div>
             </div>
-            {inboundRows.map((row, idx) => (
-              <div key={`in-${idx}`} className="form-grid" style={{ alignItems: "end", marginBottom: 10 }}>
-                <div className="form-group">
-                  <label className="form-label">Mode</label>
-                  <select
-                    className="form-select"
-                    value={row.mode}
-                    onChange={(e) => updateRow("inbound", idx, { mode: e.target.value as TransportMode })}
-                  >
-                    <option value="ship">Ship</option>
-                    <option value="barge">Barge</option>
-                    <option value="train">Train</option>
-                  </select>
+
+            <div style={{ marginTop: 16 }}>
+              <div className="form-label" style={{ marginBottom: 8 }}>Inbound transport modes</div>
+              {inboundRows.length === 0 ? (
+                <p className="form-helper" style={{ margin: "0 0 10px" }}>
+                  No inbound transport modes configured. Inventory is filled by pipeline only.
+                </p>
+              ) : (
+                inboundRows.map((row, idx) =>
+                  renderTransportRow("inbound", idx, row, idx < savedInboundCount)
+                )
+              )}
+              {inboundRows.length < 3 && (
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => addRow("inbound")}>
+                  + Add inbound mode
+                </button>
+              )}
+              {inboundRows.length > 0 && (
+                <div className="form-helper" style={{ marginTop: 6 }}>
+                  Up to 3 modes; shares must total 100%.
                 </div>
-                <div className="form-group">
-                  <label className="form-label">Share (%)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={0.1}
-                    className="form-input"
-                    value={row.sharePct}
-                    onChange={(e) => updateRow("inbound", idx, { sharePct: parseFloat(e.target.value || "0") })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">MEPS (t)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    className="form-input"
-                    value={row.meps}
-                    onChange={(e) => updateRow("inbound", idx, { meps: parseFloat(e.target.value || "0") })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Roundtrip (h)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    className="form-input"
-                    value={row.roundtripHours}
-                    onChange={(e) =>
-                      updateRow("inbound", idx, { roundtripHours: parseFloat(e.target.value || "0") })
-                    }
-                  />
-                </div>
-                <div className="form-group" style={{ alignSelf: "center" }}>
-                  <button type="button" className="btn btn-secondary" onClick={() => removeRow("inbound", idx)}>
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-            <button type="button" className="btn btn-secondary" onClick={() => addRow("inbound")}>
-              Add inbound mode
-            </button>
-            <div className="form-helper">Up to 3 rows; shares must total 100%.</div>
+              )}
+            </div>
           </div>
         )}
       </section>
 
+      {/* ── Outbound ────────────────────────────────────────────────── */}
       <section className="customer-form-section card">
         <button
           type="button"
           className="customer-form-section-toggle"
           onClick={() => toggleSection("outbound")}
         >
-          <span>Outbound transport</span>
+          <span>Outbound</span>
           <span>{openSections.outbound ? "Hide" : "Show"}</span>
         </button>
         {openSections.outbound && (
           <div className="customer-form-section-content">
+            <div className="form-group">
+              <label className="form-label">Outbound pipeline flow (t/h)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                className="form-input"
+                value={outboundPipelineFlow}
+                onChange={(e) => setOutboundPipelineFlow(e.target.value)}
+              />
+              <div className="form-helper">
+                Rate at which the pipeline continuously drains this customer's inventory (tonnes per hour). Use 0 if no outbound pipeline.
+              </div>
+            </div>
+
             {calculatedOutboundThroughput != null && config && (
-              <p className="form-helper" style={{ marginTop: 0, marginBottom: 12 }}>
-                See the summary card above for the full calculated outbound breakdown (including pipeline).
+              <p className="form-helper" style={{ marginTop: 12 }}>
+                See the summary card above for the full calculated outbound breakdown.
                 Estimated outbound movements at current MEPS: <strong>{numOutboundShips}</strong>.
               </p>
             )}
-            {outboundRows.map((row, idx) => (
-              <div key={`out-${idx}`} className="form-grid" style={{ alignItems: "end", marginBottom: 10 }}>
-                <div className="form-group">
-                  <label className="form-label">Mode</label>
-                  <select
-                    className="form-select"
-                    value={row.mode}
-                    onChange={(e) => updateRow("outbound", idx, { mode: e.target.value as TransportMode })}
-                  >
-                    <option value="ship">Ship</option>
-                    <option value="barge">Barge</option>
-                    <option value="train">Train</option>
-                  </select>
+
+            <div style={{ marginTop: 16, borderTop: "1px solid #e2e8f0", paddingTop: 16 }}>
+              <div className="form-label" style={{ marginBottom: 8 }}>Outbound transport modes</div>
+              {outboundRows.length === 0 ? (
+                <p className="form-helper" style={{ margin: "0 0 10px" }}>
+                  No outbound transport modes configured. Inventory drains by pipeline only.
+                </p>
+              ) : (
+                outboundRows.map((row, idx) =>
+                  renderTransportRow("outbound", idx, row, idx < savedOutboundCount)
+                )
+              )}
+              {outboundRows.length < 3 && (
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => addRow("outbound")}>
+                  + Add outbound mode
+                </button>
+              )}
+              {outboundRows.length > 0 && (
+                <div className="form-helper" style={{ marginTop: 6 }}>
+                  Up to 3 modes; shares must total 100%.
                 </div>
-                <div className="form-group">
-                  <label className="form-label">Share (%)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={0.1}
-                    className="form-input"
-                    value={row.sharePct}
-                    onChange={(e) => updateRow("outbound", idx, { sharePct: parseFloat(e.target.value || "0") })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">MEPS (t)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    className="form-input"
-                    value={row.meps}
-                    onChange={(e) => updateRow("outbound", idx, { meps: parseFloat(e.target.value || "0") })}
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Roundtrip (h)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    className="form-input"
-                    value={row.roundtripHours}
-                    onChange={(e) =>
-                      updateRow("outbound", idx, { roundtripHours: parseFloat(e.target.value || "0") })
-                    }
-                  />
-                </div>
-                <div className="form-group" style={{ alignSelf: "center" }}>
-                  <button type="button" className="btn btn-secondary" onClick={() => removeRow("outbound", idx)}>
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-            <button type="button" className="btn btn-secondary" onClick={() => addRow("outbound")}>
-              Add outbound mode
-            </button>
-            <div className="form-helper">Up to 3 rows; shares must total 100%.</div>
+              )}
+            </div>
           </div>
         )}
       </section>
 
+      {/* ── Storage ─────────────────────────────────────────────────── */}
       <section className="customer-form-section card">
         <button
           type="button"
           className="customer-form-section-toggle"
           onClick={() => toggleSection("storage")}
         >
-          <span>Storage and pipeline</span>
+          <span>Storage</span>
           <span>{openSections.storage ? "Hide" : "Show"}</span>
         </button>
         {openSections.storage && (
@@ -818,35 +901,15 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   }}
                   required
                 />
+                <div className="form-helper">Percentage of the terminal's total storage allocated to this customer.</div>
                 {fieldErrors.storageShare && <div className="form-error">{fieldErrors.storageShare}</div>}
               </div>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Pipeline flow (t/h)</label>
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                className={`form-input${fieldErrors.pipelineFlowPerHour ? " form-input-invalid" : ""}`}
-                value={pipelineFlowPerHour}
-                onChange={(e) => {
-                  setPipelineFlowPerHour(e.target.value);
-                  if (fieldErrors.pipelineFlowPerHour)
-                    setFieldErrors((p) => ({ ...p, pipelineFlowPerHour: "" }));
-                }}
-                required
-              />
-              <div className="form-helper">
-                Tonnes per hour for this customer. Terminal net direction is set in Terminal config.
-              </div>
-              {fieldErrors.pipelineFlowPerHour && (
-                <div className="form-error">{fieldErrors.pipelineFlowPerHour}</div>
-              )}
             </div>
           </div>
         )}
       </section>
 
+      {/* ── Time-shared storage ─────────────────────────────────────── */}
       <section className="customer-form-section card">
         <button
           type="button"
