@@ -9,7 +9,8 @@ import {
   getGeminiApiKey,
   setGeminiApiKey,
   clearGeminiApiKey,
-  requestGeminiAnalysis
+  requestGeminiAnalysis,
+  testGeminiApiConnection
 } from "../lib/geminiApi";
 import type { SimulationLogRow } from "../../engine/simulationLog";
 
@@ -119,7 +120,10 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
   const [userNotes, setUserNotes] = useState("");
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
+  const [fromCache, setFromCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [testSuccess, setTestSuccess] = useState<string | null>(null);
   const [lastSentAt, setLastSentAt] = useState<string | null>(null);
 
   const summary: AnalyticsAiSummary | null = useMemo(
@@ -156,8 +160,32 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
     setShowKeyField(true);
   };
 
-  const handleAnalyse = async () => {
+  const handleTestConnection = async () => {
     setError(null);
+    setTestSuccess(null);
+    if (!getGeminiApiKey()) {
+      setShowKeyField(true);
+      setError("Save your Gemini API key first, then test the connection.");
+      return;
+    }
+
+    setLoading(true);
+    setLoadingStatus("Testing Gemini connection…");
+    try {
+      const result = await testGeminiApiConnection(setLoadingStatus);
+      setTestSuccess(`Connected via ${result.model}. Reply: "${result.reply.slice(0, 40)}"`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+      setLoadingStatus(null);
+    }
+  };
+
+  const handleAnalyse = async (forceRefresh = false) => {
+    setError(null);
+    setTestSuccess(null);
+    setFromCache(false);
     if (!summary) {
       setError("Run the scheduler first — there is no simulation data to analyse.");
       return;
@@ -169,16 +197,25 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
     }
 
     setLoading(true);
-    setAnalysis(null);
+    setLoadingStatus(forceRefresh ? "Requesting fresh analysis…" : "Sending summary to Gemini…");
     try {
       const promptText = summaryToPromptText(summary, userNotes);
-      const result = await requestGeminiAnalysis(promptText);
+      let usedCache = false;
+      const result = await requestGeminiAnalysis(promptText, {
+        forceRefresh,
+        onStatus: (msg) => {
+          if (msg.startsWith("Using cached")) usedCache = true;
+          setLoadingStatus(msg);
+        }
+      });
       setAnalysis(result);
+      setFromCache(usedCache);
       setLastSentAt(new Date().toLocaleString());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+      setLoadingStatus(null);
     }
   };
 
@@ -191,7 +228,9 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
           </div>
           <p className="ai-analysis-intro">
             Click <strong>Get AI analysis</strong> to send a compact summary of this run to Google Gemini.
-            Nothing is sent until you click. Your API key stays in this browser only (
+            Nothing is sent until you click. If you see rate-limit errors on a new key, open AI Studio → API Keys →{" "}
+            <strong>Set up billing</strong> on that project (free tier still applies). Use{" "}
+            <strong>Test connection</strong> after saving a key. Your key stays in this browser only (
             <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
               get a free key
             </a>
@@ -218,6 +257,14 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
             <button type="button" className="btn btn-secondary" onClick={handleSaveKey}>
               Save key
             </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleTestConnection}
+              disabled={loading || !apiKeyInput.trim()}
+            >
+              Test connection
+            </button>
           </div>
         </div>
       ) : (
@@ -228,6 +275,14 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
           </button>
           <button type="button" className="btn btn-secondary btn-sm" onClick={handleClearKey}>
             Remove key
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={handleTestConnection}
+            disabled={loading}
+          >
+            Test connection
           </button>
         </div>
       )}
@@ -250,11 +305,22 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
         <button
           type="button"
           className="btn btn-primary"
-          onClick={handleAnalyse}
+          onClick={() => handleAnalyse(false)}
           disabled={loading || !props.hasRunData}
         >
           {loading ? "Analysing…" : "Get AI analysis"}
         </button>
+        {analysis && !loading && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => handleAnalyse(true)}
+            disabled={loading || !props.hasRunData}
+            title="Bypass cache and call Gemini again"
+          >
+            Refresh analysis
+          </button>
+        )}
         {!props.hasRunData && (
           <span className="form-helper" style={{ margin: 0 }}>
             Run the scheduler on the Dashboard first.
@@ -262,19 +328,30 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
         )}
       </div>
 
-      {error && <div className="alert alert-error ai-analysis-alert">{error}</div>}
+      {error && (
+        <div className="alert alert-error ai-analysis-alert" style={{ whiteSpace: "pre-wrap" }}>
+          {error}
+        </div>
+      )}
+
+      {testSuccess && !error && (
+        <div className="alert alert-success ai-analysis-alert">{testSuccess}</div>
+      )}
 
       {loading && (
         <div className="ai-analysis-loading">
           <div className="ai-analysis-spinner" aria-hidden />
-          Sending summary to Gemini…
+          {loadingStatus ?? "Sending summary to Gemini…"}
         </div>
       )}
 
       {analysis && !loading && (
         <div className="ai-analysis-result">
           {lastSentAt && (
-            <div className="ai-analysis-meta">Generated {lastSentAt}</div>
+            <div className="ai-analysis-meta">
+              Generated {lastSentAt}
+              {fromCache ? " · from session cache (no API call)" : ""}
+            </div>
           )}
           <div className="ai-analysis-body">{renderMarkdownish(analysis)}</div>
         </div>

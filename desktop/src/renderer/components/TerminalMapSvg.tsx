@@ -24,7 +24,10 @@ const STROKE_DIM = "rgba(255,255,255,0.45)";
 const STROKE_SOFT = "rgba(255,255,255,0.35)";
 const STROKE_MUTED = "rgba(255,255,255,0.5)";
 const CAPACITY_STROKE = "#dc2626";
-const CAPACITY_DASH = "4 3";
+/** Longer gap so capacity reads clearly as dotted at schematic scale. */
+const CAPACITY_DASH = "8 6";
+const BORROW_STROKE = "#fbbf24";
+const BORROW_DASH = "6 5";
 const OVERLAY_GREY = "rgba(30,30,40,0.15)";
 /** Primary blueprint stroke */
 const SW = 0.9;
@@ -116,13 +119,15 @@ function TankBlueprintDetail({
   cy,
   r,
   surfaceY,
-  fillRatio,
+  invRatio,
+  borrowLimitY,
 }: {
   cx: number;
   cy: number;
   r: number;
   surfaceY: number;
-  fillRatio: number;
+  invRatio: number;
+  borrowLimitY?: number;
 }) {
   const tickA = (-60 * Math.PI) / 180;
   const cosT = Math.cos(tickA);
@@ -156,7 +161,7 @@ function TankBlueprintDetail({
         stroke={STROKE_DIM}
         strokeWidth={SW_HAIR}
       />
-      {fillRatio > 0 && (
+      {invRatio > 0.005 && (
         <line
           x1={cx - r + 4}
           y1={surfaceY}
@@ -165,21 +170,51 @@ function TankBlueprintDetail({
           stroke={STROKE}
           strokeWidth={SW_HAIR}
           strokeDasharray="3 2"
+          strokeLinecap="butt"
+          opacity={0.85}
+        />
+      )}
+      {invRatio < -0.005 && (
+        <line
+          x1={cx - r + 4}
+          y1={surfaceY}
+          x2={cx + r - 4}
+          y2={surfaceY}
+          stroke={BORROW_STROKE}
+          strokeWidth={SW_HAIR}
+          strokeDasharray="3 2"
+          strokeLinecap="butt"
           opacity={0.85}
         />
       )}
       <line
-        x1={cx - r + 4}
+        x1={cx - r + 5}
         y1={cy - r}
-        x2={cx + r - 4}
+        x2={cx + r - 5}
         y2={cy - r}
         stroke={CAPACITY_STROKE}
         strokeWidth={SW_HAIR}
         strokeDasharray={CAPACITY_DASH}
+        strokeLinecap="butt"
         opacity={0.95}
       >
         <title>Tank capacity (100%)</title>
       </line>
+      {borrowLimitY != null && (
+        <line
+          x1={cx - r + 5}
+          y1={borrowLimitY}
+          x2={cx + r - 5}
+          y2={borrowLimitY}
+          stroke={BORROW_STROKE}
+          strokeWidth={SW_HAIR}
+          strokeDasharray={BORROW_DASH}
+          strokeLinecap="butt"
+          opacity={0.95}
+        >
+          <title>Max borrowing limit (attributed deficit floor)</title>
+        </line>
+      )}
     </g>
   );
 }
@@ -458,12 +493,24 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
     const parts = customers
       .filter((c) => c.id)
       .map((c) => ({ id: c.id, color: customerColor(c.id), vol: getInventoryAtHour(c.id, currentHour) }))
-      .filter((p) => p.vol > 0);
-    const totalInv = parts.reduce((s, p) => s + p.vol, 0);
+      .filter((p) => p.vol !== 0);
+    const totalInv = customers
+      .filter((c) => c.id)
+      .reduce((s, c) => s + getInventoryAtHour(c.id, currentHour), 0);
     return { parts, totalInv, totalCap: totalCapacity };
   }, [customers, getInventoryAtHour, currentHour, customerColor, totalCapacity]);
 
-  const fillRatio = commingleStack.totalCap > 0 ? Math.min(1, commingleStack.totalInv / commingleStack.totalCap) : 0;
+  const storageMode = config?.storageMode ?? "fixed_band";
+  const borrowLimitTonnes =
+    storageMode === "shared_inventory"
+      ? Math.max(0, config?.sharedInventoryCustomerDeficitLimitTonnes ?? 0)
+      : 0;
+
+  const invRatio =
+    commingleStack.totalCap > 0 ? commingleStack.totalInv / commingleStack.totalCap : 0;
+
+  const invLevelY = (cy: number, r: number, tonnes: number) =>
+    cy + r - (2 * r * tonnes) / Math.max(commingleStack.totalCap, 1);
 
   const trunkX =
     tankLayout.centers.length >= 2
@@ -683,7 +730,9 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
         ))}
 
         {tankLayout.centers.map((t) => {
-          const surfaceY = t.cy + t.r - 2 * t.r * fillRatio;
+          const surfaceY = invLevelY(t.cy, t.r, commingleStack.totalInv);
+          const borrowLimitY =
+            borrowLimitTonnes > 0 ? invLevelY(t.cy, t.r, -borrowLimitTonnes) : undefined;
           return (
             <TankBlueprintDetail
               key={`t${t.i}`}
@@ -691,7 +740,8 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
               cy={t.cy}
               r={t.r}
               surfaceY={surfaceY}
-              fillRatio={fillRatio}
+              invRatio={invRatio}
+              borrowLimitY={borrowLimitY}
             />
           );
         })}
@@ -703,8 +753,23 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
           const cH = Math.max(80, TF_BOT - cTop - 24);
           const barW = 56;
           const barX = px + 8;
-          const filledH = cH * fillRatio;
-          let y = cTop + cH;
+          const borrowH =
+            borrowLimitTonnes > 0 && commingleStack.totalCap > 0
+              ? cH * (borrowLimitTonnes / commingleStack.totalCap)
+              : 0;
+          const zeroY = cTop + cH;
+          const positiveH =
+            commingleStack.totalInv > 0
+              ? Math.min(cH, cH * (commingleStack.totalInv / commingleStack.totalCap))
+              : 0;
+          const negativeH =
+            commingleStack.totalInv < 0 && borrowLimitTonnes > 0
+              ? Math.min(
+                  borrowH,
+                  borrowH * (Math.abs(commingleStack.totalInv) / borrowLimitTonnes)
+                )
+              : 0;
+          let y = zeroY;
           return (
             <g>
               <line
@@ -713,31 +778,66 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
                 x2={barX + barW + 2}
                 y2={cTop}
                 stroke={CAPACITY_STROKE}
-                strokeWidth={SW}
+                strokeWidth={SW_HAIR}
                 strokeDasharray={CAPACITY_DASH}
+                strokeLinecap="butt"
                 opacity={0.95}
               >
                 <title>
                   Terminal storage capacity ({Math.round(commingleStack.totalCap).toLocaleString()} t)
                 </title>
               </line>
-              {commingleStack.parts.map((p, si) => {
-                const h = commingleStack.totalInv > 0 ? (p.vol / commingleStack.totalInv) * filledH : 0;
-                y -= h;
-                return (
-                  <rect
-                    key={si}
-                    x={barX}
-                    y={y}
-                    width={barW}
-                    height={h}
-                    fill={p.color}
-                    fillOpacity={0.7}
-                    stroke={STROKE}
-                    strokeWidth={0.6}
-                  />
-                );
-              })}
+              {borrowH > 0 && (
+                <line
+                  x1={barX - 2}
+                  y1={zeroY + borrowH}
+                  x2={barX + barW + 2}
+                  y2={zeroY + borrowH}
+                  stroke={BORROW_STROKE}
+                  strokeWidth={SW_HAIR}
+                  strokeDasharray={BORROW_DASH}
+                  strokeLinecap="butt"
+                  opacity={0.95}
+                >
+                  <title>
+                    Max borrowing limit (−{Math.round(borrowLimitTonnes).toLocaleString()} t)
+                  </title>
+                </line>
+              )}
+              {commingleStack.totalInv > 0 &&
+                commingleStack.parts.map((p, si) => {
+                  const h =
+                    commingleStack.totalInv > 0
+                      ? (p.vol / commingleStack.totalInv) * positiveH
+                      : 0;
+                  y -= h;
+                  return (
+                    <rect
+                      key={si}
+                      x={barX}
+                      y={y}
+                      width={barW}
+                      height={h}
+                      fill={p.color}
+                      fillOpacity={0.7}
+                      stroke={STROKE}
+                      strokeWidth={0.6}
+                    />
+                  );
+                })}
+              {negativeH > 0 && (
+                <rect
+                  x={barX}
+                  y={zeroY}
+                  width={barW}
+                  height={negativeH}
+                  fill={BORROW_STROKE}
+                  fillOpacity={0.35}
+                  stroke={BORROW_STROKE}
+                  strokeWidth={0.6}
+                  strokeDasharray="3 2"
+                />
+              )}
             </g>
           );
         })()}
@@ -949,14 +1049,14 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
         <ZoneChipLabel x={MARGIN + 8} y={TF_TOP + 8} label="Tank Farm" />
 
         {tankLayout.centers.map((t) => {
-          const surfaceY = t.cy + t.r - 2 * t.r * fillRatio;
-          const pct = Math.round(fillRatio * 100);
+          const surfaceY = invLevelY(t.cy, t.r, commingleStack.totalInv);
+          const pct = Math.round(invRatio * 100);
           return (
             <g key={`tl${t.i}`}>
               <text x={t.cx} y={t.cy + 4} textAnchor="middle" style={LBL_SM}>
                 T{t.i + 1}
               </text>
-              {fillRatio > 0 && (
+              {Math.abs(invRatio) > 0.005 && (
                 <text x={t.cx + t.r + 10} y={surfaceY + 3} style={DIM_TEXT}>
                   {pct}%
                 </text>
@@ -972,15 +1072,20 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
           const barW = 56;
           const barX = px + 8;
           const legX = px + barW + 28;
+          const borrowH =
+            borrowLimitTonnes > 0 && commingleStack.totalCap > 0
+              ? cH * (borrowLimitTonnes / commingleStack.totalCap)
+              : 0;
           return (
             <g>
               <text x={px} y={cTop - 6} style={LBL}>
                 Stock
               </text>
-              <text x={barX} y={cTop + cH + 16} style={LBL_SM}>
+              <text x={barX} y={cTop + cH + (borrowH > 0 ? borrowH : 0) + 16} style={LBL_SM}>
                 {commingleStack.totalInv >= 1000
                   ? `${(commingleStack.totalInv / 1000).toFixed(1)} / ${(commingleStack.totalCap / 1000).toFixed(0)} kt`
                   : `${commingleStack.totalInv.toFixed(0)} / ${commingleStack.totalCap.toFixed(0)} t`}
+                {borrowLimitTonnes > 0 ? ` · borrow floor −${borrowLimitTonnes.toLocaleString()} t` : ""}
               </text>
               {commingleStack.parts.slice(0, 5).map((p, i) => (
                 <g key={p.id} transform={`translate(${legX}, ${cTop + 6 + i * 14})`}>

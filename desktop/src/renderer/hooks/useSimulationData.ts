@@ -36,6 +36,8 @@ export interface SimConfig {
   pipelineFlowRate?: number;
   pipelineDirection?: string;
   totalStorageCapacity?: number;
+  storageMode?: string;
+  sharedInventoryCustomerDeficitLimitTonnes?: number;
   preOpsHours?: number;
   postOpsHours?: number;
   tankCount?: number;

@@ -1417,6 +1417,8 @@ export default function GanttChart() {
                     stroke="#dc2626"
                     strokeWidth={2}
                     strokeOpacity={0.95}
+                    strokeDasharray="8 6"
+                    strokeLinecap="butt"
                   >
                     <title>
                       Terminal storage capacity ({Math.round(terminalStorageCap).toLocaleString()} t)
