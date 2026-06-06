@@ -28,6 +28,7 @@ import {
   updateSimulationConfig,
   listScenarios,
   saveScenario,
+  overwriteScenario,
   loadScenario,
   deleteScenario,
   renameScenario
@@ -434,6 +435,10 @@ ipcMain.handle("scenario:list", async () => listScenarios());
 
 ipcMain.handle("scenario:save", async (_e, name: string) => {
   saveScenario(String(name ?? ""));
+});
+
+ipcMain.handle("scenario:overwrite", async (_e, id: string) => {
+  overwriteScenario(String(id));
 });
 
 ipcMain.handle("scenario:load", async (_e, id: string) => {

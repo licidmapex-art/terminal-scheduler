@@ -5,6 +5,7 @@ declare global {
     scenarioAPI?: {
       list: () => Promise<Array<{ id: string; name: string; created_at: string }>>;
       save: (name: string) => Promise<void>;
+      overwrite: (id: string) => Promise<void>;
       load: (id: string) => Promise<void>;
       delete: (id: string) => Promise<void>;
       rename: (id: string, name: string) => Promise<void>;

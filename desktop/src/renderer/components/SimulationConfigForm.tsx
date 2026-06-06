@@ -53,7 +53,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
   const [minSlotIntervalHours, setMinSlotIntervalHours] = useState("0");
   const [preOpsHours, setPreOpsHours] = useState("0");
   const [postOpsHours, setPostOpsHours] = useState("0");
-  const [tankCount, setTankCount] = useState("4");
   const [error, setError] = useState<string | null>(null);
   const [configId, setConfigId] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -119,8 +118,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
           setPreOpsHours(String(typeof pre === "number" ? pre : 0));
           const post = c.postOpsHours;
           setPostOpsHours(String(typeof post === "number" ? post : 0));
-          const tc = c.tankCount;
-          setTankCount(String(typeof tc === "number" && tc >= 1 ? tc : 4));
         } catch {
           applyDefaults();
         }
@@ -177,15 +174,16 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
       setError("Post-ops must be between 0 and 48 hours");
       return;
     }
-    const tanks = parseInt(tankCount, 10);
-    if (isNaN(tanks) || tanks < 1 || !Number.isInteger(tanks)) {
-      setError("Number of tanks must be an integer ≥ 1");
-      return;
-    }
     const deficitXParsed = parseFloat(sharedInventoryCustomerDeficitLimitTonnes);
     if (storageMode === "shared_inventory" && (isNaN(deficitXParsed) || deficitXParsed < 0)) {
       setError("Customer deficit limit x must be a non-negative number");
       return;
+    }
+    let tanks = 4;
+    if (window.dbAPI?.getSimulationConfigs) {
+      const existing = (await window.dbAPI.getSimulationConfigs()) as Array<{ tankCount?: number }>;
+      const tc = existing[0]?.tankCount;
+      if (typeof tc === "number" && tc >= 1) tanks = tc;
     }
     const impliedPerTank = Math.max(1, Math.round(totalCap / tanks));
     try {
@@ -367,19 +365,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         </div>
         <div className="form-grid">
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Minimum gap between slots (hours)</label>
-            <input
-              type="number"
-              className="form-input"
-              min={0}
-              max={48}
-              step={1}
-              value={minSlotIntervalHours}
-              onChange={(e) => setMinSlotIntervalHours(e.target.value)}
-            />
-            <div className="form-helper">0–48 h. Cleared time after berth release before the next visit starts.</div>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
             <label className="form-label">Pre-ops (hours)</label>
             <input
               type="number"
@@ -391,6 +376,19 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               onChange={(e) => setPreOpsHours(e.target.value)}
             />
             <div className="form-helper">Alongside before pumping (e.g. mooring, hook-up). No inventory flow.</div>
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
+            <label className="form-label">Minimum gap between slots (hours)</label>
+            <input
+              type="number"
+              className="form-input"
+              min={0}
+              max={48}
+              step={1}
+              value={minSlotIntervalHours}
+              onChange={(e) => setMinSlotIntervalHours(e.target.value)}
+            />
+            <div className="form-helper">0–48 h. Cleared time after berth release before the next visit starts.</div>
           </div>
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
             <label className="form-label">Post-ops (hours)</label>
@@ -463,31 +461,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               customer yields the slot attempt (others may still book). Set 0 to disable.
             </div>
           </div>
-        </div>
-      </div>
-
-      <div className="card config-section">
-        <div className="config-section-header">
-          <span className="config-section-num">5</span>
-          <div>
-            <div className="config-section-title">Tank farm (visual)</div>
-            <p className="config-section-desc">
-              Number of tanks drawn on the Simulation schematic. Total storage for the chart and scheduler comes from
-              Storage model (section 2) above — not duplicated here.
-            </p>
-          </div>
-        </div>
-        <div className="form-group" style={{ marginBottom: 0, maxWidth: 280 }}>
-          <label className="form-label">Number of tanks</label>
-          <input
-            type="number"
-            min={1}
-            step={1}
-            className="form-input"
-            value={tankCount}
-            onChange={(e) => setTankCount(e.target.value)}
-            required
-          />
         </div>
       </div>
 

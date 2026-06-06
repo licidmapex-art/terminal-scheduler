@@ -67,16 +67,13 @@ export function listScenarios(): ScenarioListRow[] {
   return rows;
 }
 
-export function saveScenario(name: string): void {
-  const trimmed = name.trim();
-  if (!trimmed) throw new Error("Scenario name is required");
-
+function buildScenarioPayload(): ScenarioPayload {
   const customers = getAllCustomers();
   const resources = getAllResources();
   const configs = getAllSimulationConfigs();
   const cfg = configs[0] ?? null;
 
-  const payload: ScenarioPayload = {
+  return {
     v: DATA_VERSION,
     customers,
     resources: resources.map((r) => ({
@@ -111,13 +108,30 @@ export function saveScenario(name: string): void {
         }
       : null
   };
+}
+
+export function saveScenario(name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("Scenario name is required");
 
   const db = getDatabase();
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   db.prepare(
     "INSERT INTO scenarios (id, name, created_at, data) VALUES (?, ?, ?, ?)"
-  ).run(id, trimmed, createdAt, JSON.stringify(payload));
+  ).run(id, trimmed, createdAt, JSON.stringify(buildScenarioPayload()));
+}
+
+export function overwriteScenario(id: string): void {
+  const db = getDatabase();
+  const row = db.prepare("SELECT id FROM scenarios WHERE id = ?").get(id);
+  if (!row) throw new Error("Scenario not found");
+  const createdAt = new Date().toISOString();
+  db.prepare("UPDATE scenarios SET data = ?, created_at = ? WHERE id = ?").run(
+    JSON.stringify(buildScenarioPayload()),
+    createdAt,
+    id
+  );
 }
 
 function clearOperationalData(db: ReturnType<typeof getDatabase>): void {

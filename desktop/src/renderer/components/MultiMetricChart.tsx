@@ -139,7 +139,7 @@ export default function MultiMetricChart({
   useEffect(() => {
     if (customers.length === 0) return;
     setEnabledCustomers((prev) => {
-      const defaultIds = [...customers.map((c) => c.id), AVERAGE_CUSTOMER_ID];
+      const defaultIds = customers.map((c) => c.id);
       if (prev.size === 0) return new Set(defaultIds);
       const next = new Set<string>();
       for (const c of customers) {

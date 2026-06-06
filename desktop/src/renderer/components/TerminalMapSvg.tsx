@@ -23,6 +23,8 @@ const STROKE = "#ffffff";
 const STROKE_DIM = "rgba(255,255,255,0.45)";
 const STROKE_SOFT = "rgba(255,255,255,0.35)";
 const STROKE_MUTED = "rgba(255,255,255,0.5)";
+const CAPACITY_STROKE = "#dc2626";
+const CAPACITY_DASH = "4 3";
 const OVERLAY_GREY = "rgba(30,30,40,0.15)";
 /** Primary blueprint stroke */
 const SW = 0.9;
@@ -166,6 +168,18 @@ function TankBlueprintDetail({
           opacity={0.85}
         />
       )}
+      <line
+        x1={cx - r + 4}
+        y1={cy - r}
+        x2={cx + r - 4}
+        y2={cy - r}
+        stroke={CAPACITY_STROKE}
+        strokeWidth={SW_HAIR}
+        strokeDasharray={CAPACITY_DASH}
+        opacity={0.95}
+      >
+        <title>Tank capacity (100%)</title>
+      </line>
     </g>
   );
 }
@@ -693,16 +707,20 @@ export default function TerminalMapSvg(props: TerminalMapProps) {
           let y = cTop + cH;
           return (
             <g>
-              <rect
-                x={barX - 2}
-                y={cTop}
-                width={barW + 4}
-                height={cH}
-                rx={3}
-                fill="none"
-                stroke={STROKE_MUTED}
+              <line
+                x1={barX - 2}
+                y1={cTop}
+                x2={barX + barW + 2}
+                y2={cTop}
+                stroke={CAPACITY_STROKE}
                 strokeWidth={SW}
-              />
+                strokeDasharray={CAPACITY_DASH}
+                opacity={0.95}
+              >
+                <title>
+                  Terminal storage capacity ({Math.round(commingleStack.totalCap).toLocaleString()} t)
+                </title>
+              </line>
               {commingleStack.parts.map((p, si) => {
                 const h = commingleStack.totalInv > 0 ? (p.vol / commingleStack.totalInv) * filledH : 0;
                 y -= h;

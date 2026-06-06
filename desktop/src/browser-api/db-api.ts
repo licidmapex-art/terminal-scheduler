@@ -56,6 +56,10 @@ function persistStoreToLocalStorage(): void {
   }
 }
 
+export function syncAppStoreToLocalStorage(): void {
+  persistStoreToLocalStorage();
+}
+
 export function isValidAppSnapshot(raw: unknown): raw is AppSnapshot {
   if (!raw || typeof raw !== "object") return false;
   const s = raw as Record<string, unknown>;

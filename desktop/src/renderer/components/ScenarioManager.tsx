@@ -17,6 +17,7 @@ export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerPro
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [overwrittenId, setOverwrittenId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
 
@@ -61,6 +62,23 @@ export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerPro
       onScenarioLoaded?.();
       setLoaded(true);
       setTimeout(() => setLoaded(false), 2500);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOverwrite = async (id: string, label: string) => {
+    if (!window.scenarioAPI?.overwrite) return;
+    if (!confirm(`Overwrite "${label}" with the current setup?`)) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await window.scenarioAPI.overwrite(id);
+      setOverwrittenId(id);
+      setTimeout(() => setOverwrittenId(null), 2500);
       await refresh();
     } catch (err) {
       setError(String(err));
@@ -218,6 +236,16 @@ export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerPro
                     onClick={() => handleLoad(r.id)}
                   >
                     Load
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: "6px 12px", fontSize: 13, marginLeft: 8 }}
+                    disabled={busy}
+                    onClick={() => handleOverwrite(r.id, r.name)}
+                    title="Replace this scenario with the current customers, resources, and terminal config"
+                  >
+                    {overwrittenId === r.id ? "Saved ✓" : "Save"}
                   </button>
                   <button
                     type="button"

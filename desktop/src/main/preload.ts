@@ -21,6 +21,7 @@ export type ScheduleResult = {
 contextBridge.exposeInMainWorld("scenarioAPI", {
   list: () => ipcRenderer.invoke("scenario:list") as Promise<Array<{ id: string; name: string; created_at: string }>>,
   save: (name: string) => ipcRenderer.invoke("scenario:save", name) as Promise<void>,
+  overwrite: (id: string) => ipcRenderer.invoke("scenario:overwrite", id) as Promise<void>,
   load: (id: string) => ipcRenderer.invoke("scenario:load", id) as Promise<void>,
   delete: (id: string) => ipcRenderer.invoke("scenario:delete", id) as Promise<void>,
   rename: (id: string, name: string) =>
