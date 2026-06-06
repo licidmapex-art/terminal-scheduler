@@ -1,17 +1,23 @@
 import type { Customer, SimulationConfig } from "../../types";
-import { outboundThroughputTonnes } from "../../engine/customerLegTargets";
+import {
+  inboundTargetSlotsByLane,
+  outboundTargetSlotsByLane,
+  outboundThroughputTonnes
+} from "../../engine/customerLegTargets";
 import {
   customerDirectionTransports,
   splitTonnesByShares
 } from "../../engine/customerTransports";
 
 export interface ModeThroughputLine {
+  laneIndex: number;
   mode: "ship" | "barge" | "train";
   sharePct: number;
   meps: number;
   tonnes: number;
+  /** Expected berth slots over the simulation window (scheduler target). */
+  targetSlots: number;
 }
-
 export interface CustomerThroughputOverview {
   periodHours: number;
   storageShare: number;
@@ -35,18 +41,20 @@ function simulationPeriodHours(config: SimulationConfig): number {
 
 function modeLines(
   rows: ReturnType<typeof customerDirectionTransports>,
-  totalTonnes: number
+  totalTonnes: number,
+  targetSlotsByLane: number[]
 ): ModeThroughputLine[] {
   if (totalTonnes <= 0 || rows.length === 0) return [];
   const tonnesByLane = splitTonnesByShares(totalTonnes, rows);
   return rows.map((r, i) => ({
+    laneIndex: i,
     mode: r.mode,
     sharePct: r.sharePct,
     meps: r.meps,
-    tonnes: Math.max(0, tonnesByLane[i] ?? 0)
+    tonnes: Math.max(0, tonnesByLane[i] ?? 0),
+    targetSlots: targetSlotsByLane[i] ?? 0
   }));
 }
-
 export function buildCustomerThroughputOverview(
   customer: Customer,
   config: SimulationConfig
@@ -63,6 +71,8 @@ export function buildCustomerThroughputOverview(
   const outboundRows = customerDirectionTransports(customer, "outbound");
   const declaredInbound = Math.max(0, customer.declaredInboundThroughput ?? 0);
   const calculatedOutbound = outboundThroughputTonnes(customer, config, periodHours);
+  const inboundSlots = inboundTargetSlotsByLane(customer, periodHours).map((l) => l.targetSlots);
+  const outboundSlots = outboundTargetSlotsByLane(customer, config, periodHours).map((l) => l.targetSlots);
 
   return {
     periodHours,
@@ -73,7 +83,7 @@ export function buildCustomerThroughputOverview(
     outboundPipelineTonnes: pipelineOutbound,
     outboundPipelineRatePerHour: config.pipelineDirection === "outbound" ? pipelineRate : 0,
     calculatedOutboundTonnes: calculatedOutbound,
-    inboundModes: modeLines(inboundRows, declaredInbound),
-    outboundModes: modeLines(outboundRows, Math.max(0, calculatedOutbound))
+    inboundModes: modeLines(inboundRows, declaredInbound, inboundSlots),
+    outboundModes: modeLines(outboundRows, Math.max(0, calculatedOutbound), outboundSlots)
   };
 }

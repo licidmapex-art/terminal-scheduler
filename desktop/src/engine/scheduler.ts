@@ -18,6 +18,7 @@ import {
   type InventoryTimeline
 } from "./inventory";
 import { runFeasibilityChecks, type SchedulingLeg } from "./feasibility";
+import { runPostRunFeasibilityChecks } from "./postRunFeasibility";
 import {
   laytimeFromConfig,
   getCargoWindowMs,
@@ -894,10 +895,12 @@ export function runScheduler(
 
   const inventoryTimeline: InventoryTimeline = new Map(Object.entries(invTimeline));
 
+  const postRunWarnings = runPostRunFeasibilityChecks(customers, config, simulationLog);
+
   return {
     scheduledSlots: assignedSlots,
     simulationLog,
     inventoryTimeline,
-    feasibilityWarnings
+    feasibilityWarnings: [...feasibilityWarnings, ...postRunWarnings]
   };
 }

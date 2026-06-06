@@ -8,6 +8,7 @@ import {
   getProjectedInventory,
   simulationPeriodHoursFloored,
   tallyPipelineTonnesFromSimulationLog,
+  tallyRefusedTonnesAtTankExtremes,
   applySharedInventoryPipelineHour,
   theoreticalInventoryDeltaWithoutTankClamp
 } from "./inventory";
@@ -72,6 +73,101 @@ describe("tallyPipelineTonnesFromSimulationLog", () => {
     const m = tallyPipelineTonnesFromSimulationLog(rows);
     expect(m.get("c1")).toEqual({ inbound: 20, outbound: 0 });
     expect(m.get("c2")).toEqual({ inbound: 0, outbound: 10 });
+  });
+});
+
+describe("tallyRefusedTonnesAtTankExtremes", () => {
+  it("counts curtailed inbound pipeline at tank top (shared_inventory)", () => {
+    const config = makeConfig({
+      storageMode: "shared_inventory",
+      pipelineDirection: "inbound",
+      totalStorageCapacity: 1000
+    });
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 1000,
+        pipelineFlowPerHour: 100,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const log = [
+      {
+        hour: 0,
+        datetime: "2025-01-01T00:00:00.000Z",
+        customerInventories: { c1: 1000 },
+        terminalTotal: 1000,
+        pipelineFlow: { c1: 0 },
+        transportStatus: []
+      },
+      {
+        hour: 1,
+        datetime: "2025-01-01T01:00:00.000Z",
+        customerInventories: { c1: 1000 },
+        terminalTotal: 1000,
+        pipelineFlow: { c1: 0 },
+        transportStatus: []
+      }
+    ];
+    const m = tallyRefusedTonnesAtTankExtremes(customers, config, log);
+    expect(m.get("c1")?.refusedAtTopTonnes).toBe(200);
+    expect(m.get("c1")?.refusedAtBottomTonnes).toBe(0);
+  });
+
+  it("counts outbound pipeline refused at tank bottom interruption hours", () => {
+    const config = makeConfig({
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 1000
+    });
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 0,
+        pipelineFlowPerHour: 67,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const log = [
+      {
+        hour: 0,
+        datetime: "2025-01-01T00:00:00.000Z",
+        customerInventories: { c1: 0 },
+        terminalTotal: 0,
+        pipelineFlow: { c1: 0 },
+        transportStatus: []
+      },
+      {
+        hour: 1,
+        datetime: "2025-01-01T01:00:00.000Z",
+        customerInventories: { c1: 0 },
+        terminalTotal: 0,
+        pipelineFlow: { c1: 0 },
+        transportStatus: []
+      }
+    ];
+    const m = tallyRefusedTonnesAtTankExtremes(customers, config, log);
+    expect(m.get("c1")?.refusedAtBottomTonnes).toBe(134);
+    expect(m.get("c1")?.refusedAtTopTonnes).toBe(0);
   });
 });
 

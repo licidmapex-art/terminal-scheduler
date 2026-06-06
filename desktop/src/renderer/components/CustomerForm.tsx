@@ -11,9 +11,10 @@ import {
   normalizeChartColorHex,
   resolveCustomerChartColor
 } from "../lib/customerChartColor";
-import { buildCustomerThroughputOverview } from "../lib/customerThroughputOverview";
-import CustomerThroughputOverviewPanel from "./CustomerThroughputOverview";
-import type { Customer as EngineCustomer, SimulationConfig as EngineSimulationConfig } from "../../types";
+import {
+  computeStorageShareFromThroughput,
+  storageShareAppliesToCapacityBand
+} from "../lib/defaultStorageShare";
 
 interface Customer {
   id: string;
@@ -46,10 +47,14 @@ interface SimulationConfig {
   startDate: string;
   endDate: string;
   pipelineDirection: "inbound" | "outbound";
+  storageMode?: string;
+  totalStorageCapacity?: number;
 }
 
 interface CustomerFormProps {
   customer?: Customer | null;
+  /** All saved customers — used to default storage share from throughput weights. */
+  allCustomers?: Array<{ id: string; declaredInboundThroughput?: number }>;
   /** Index for palette fallback preview when chart color is automatic (new customer = list length). */
   chartColorPaletteIndex?: number;
   /** Terminal pipeline direction, used to interpret existing unsigned pipelineFlowPerHour values. */
@@ -132,7 +137,8 @@ function computePipelineFlows(
 function snapshotFromCustomer(
   customer: Customer | null | undefined,
   chartColorPaletteIndex: number,
-  configPipelineDirection: "inbound" | "outbound"
+  configPipelineDirection: "inbound" | "outbound",
+  allCustomers: Array<{ id: string; declaredInboundThroughput?: number }> = []
 ): FormSnapshot {
   const { inbound: ib, outbound: ob } = computePipelineFlows(customer, configPipelineDirection);
   const inboundRows = normalizeRows(customer?.inboundTransports, {
@@ -146,11 +152,20 @@ function snapshotFromCustomer(
     roundtripHours: customer?.outboundRoundtripHours ?? 0
   });
   const custom = normalizeChartColorHex(customer?.chartColor);
+  const storageShareStr =
+    customer?.id != null
+      ? String(customer.storageShare ?? "")
+      : String(
+          computeStorageShareFromThroughput(
+            Math.max(0, customer?.declaredInboundThroughput ?? 0),
+            allCustomers
+          )
+        );
   return {
     name: customer?.name ?? "",
     declaredInboundThroughput: String(customer?.declaredInboundThroughput ?? ""),
     currentInventory: String(customer?.currentInventory ?? ""),
-    storageShare: String(customer?.storageShare ?? ""),
+    storageShare: storageShareStr,
     inboundPipelineFlow: ib,
     outboundPipelineFlow: ob,
     inboundRows,
@@ -167,7 +182,14 @@ function snapshotsEqual(a: FormSnapshot, b: FormSnapshot): boolean {
 }
 
 const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function CustomerForm(
-  { customer, chartColorPaletteIndex = 0, configPipelineDirection = "inbound", onSaved, onDirtyChange },
+  {
+    customer,
+    allCustomers = [],
+    chartColorPaletteIndex = 0,
+    configPipelineDirection = "inbound",
+    onSaved,
+    onDirtyChange
+  },
   ref
 ) {
   const pipelines = computePipelineFlows(customer, configPipelineDirection);
@@ -189,9 +211,12 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   const [currentInventory, setCurrentInventory] = useState(
     String(customer?.currentInventory ?? "")
   );
-  const [storageShare, setStorageShare] = useState(
-    String(customer?.storageShare ?? "")
-  );
+  const [storageShare, setStorageShare] = useState(() => {
+    if (customer?.id != null) return String(customer.storageShare ?? "");
+    const tp = Math.max(0, customer?.declaredInboundThroughput ?? 0);
+    return String(computeStorageShareFromThroughput(tp, allCustomers));
+  });
+  const [storageShareTouched, setStorageShareTouched] = useState(false);
   const [inboundPipelineFlow, setInboundPipelineFlow] = useState(pipelines.inbound);
   const [outboundPipelineFlow, setOutboundPipelineFlow] = useState(pipelines.outbound);
   const [inboundRows, setInboundRows] = useState<TransportRow[]>(initialInboundRows);
@@ -232,12 +257,16 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           startDate: string;
           endDate: string;
           pipelineDirection: string;
+          storageMode?: string;
+          totalStorageCapacity?: number;
         } | undefined;
         if (c) {
           setConfig({
             startDate: c.startDate,
             endDate: c.endDate,
-            pipelineDirection: c.pipelineDirection as "inbound" | "outbound"
+            pipelineDirection: c.pipelineDirection as "inbound" | "outbound",
+            storageMode: c.storageMode ?? "fixed_band",
+            totalStorageCapacity: c.totalStorageCapacity ?? 100000
           });
         }
       });
@@ -252,72 +281,27 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     );
   }, [customer?.id, customer?.chartColor, chartColorPaletteIndex]);
 
-  const inboundThroughput = parseFloat(declaredInboundThroughput) || 0;
-  const inboundPipelineVal = parseFloat(inboundPipelineFlow) || 0;
-  const outboundPipelineVal = parseFloat(outboundPipelineFlow) || 0;
-  const netPipelineFlowPerHour = inboundPipelineVal - outboundPipelineVal;
+  const suggestedStorageShare = useMemo(() => {
+    const throughput = parseFloat(declaredInboundThroughput);
+    if (isNaN(throughput)) return null;
+    return computeStorageShareFromThroughput(throughput, allCustomers, customer?.id);
+  }, [declaredInboundThroughput, allCustomers, customer?.id]);
 
-  const throughputOverview = useMemo(() => {
-    if (!config) return null;
-    const preview: EngineCustomer = {
-      id: customer?.id ?? "preview",
-      name: name.trim() || "Preview",
-      declaredInboundThroughput: inboundThroughput,
-      currentInventory: parseFloat(currentInventory) || 0,
-      storageShare: parseFloat(storageShare) || 0,
-      pipelineFlowPerHour: netPipelineFlowPerHour,
-      inboundTransports: inboundRows,
-      outboundTransports: outboundRows,
-      inboundMEPS: inboundRows[0]?.meps ?? 0,
-      inboundMode: inboundRows[0]?.mode ?? "ship",
-      outboundMEPS: outboundRows[0]?.meps ?? 0,
-      outboundMode: outboundRows[0]?.mode ?? "ship",
-      inboundRoundtripHours: inboundRows[0]?.roundtripHours ?? 0,
-      outboundRoundtripHours: outboundRows[0]?.roundtripHours ?? 0,
-      timeSharedMinBand: parseFloat(timeSharedMinBand) || 0,
-      timeSharedDuration: parseFloat(timeSharedDuration) || 24
-    };
-    const engineConfig: EngineSimulationConfig = {
-      startDate: new Date(config.startDate),
-      endDate: new Date(config.endDate),
-      pipelineFlowRate: 0,
-      pipelineDirection: "inbound", // net flow is already signed
-      totalStorageCapacity: 100000,
-      storageMode: "fixed_band",
-      sharedInventoryCustomerDeficitLimitTonnes: 0,
-      minSlotIntervalHours: 0,
-      preOpsHours: 0,
-      postOpsHours: 0,
-      tankCount: 4,
-      tankCapacity: 7000
-    };
-    return buildCustomerThroughputOverview(preview, engineConfig);
-  }, [
-    config,
-    customer?.id,
-    name,
-    inboundThroughput,
-    currentInventory,
-    storageShare,
-    netPipelineFlowPerHour,
-    inboundRows,
-    outboundRows,
-    timeSharedMinBand,
-    timeSharedDuration
-  ]);
+  useEffect(() => {
+    if (customer?.id != null || storageShareTouched) return;
+    const throughput = parseFloat(declaredInboundThroughput);
+    if (isNaN(throughput)) return;
+    setStorageShare(String(computeStorageShareFromThroughput(throughput, allCustomers)));
+  }, [customer?.id, declaredInboundThroughput, allCustomers, storageShareTouched]);
 
-  const calculatedOutboundThroughput = throughputOverview?.calculatedOutboundTonnes ?? null;
+  const applyThroughputStorageShare = () => {
+    if (suggestedStorageShare == null) return;
+    setStorageShare(String(suggestedStorageShare));
+    setStorageShareTouched(true);
+  };
 
-  const numOutboundShips = (() => {
-    if (calculatedOutboundThroughput == null || calculatedOutboundThroughput <= 0) return 0;
-    const sumShare = outboundRows.reduce((s, r) => s + Math.max(0, r.sharePct), 0);
-    const den = sumShare > 0 ? sumShare : outboundRows.length || 1;
-    return outboundRows.reduce((sum, r) => {
-      if (r.meps <= 0) return sum;
-      const laneTonnes = calculatedOutboundThroughput * ((sumShare > 0 ? Math.max(0, r.sharePct) : 1) / den);
-      return sum + Math.ceil(Math.max(0, laneTonnes) / r.meps);
-    }, 0);
-  })();
+  const storageMode = config?.storageMode ?? "fixed_band";
+  const capacityBandMode = storageShareAppliesToCapacityBand(storageMode);
 
   const updateRow = (
     direction: "inbound" | "outbound",
@@ -369,7 +353,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
 
   const formKey = customer?.id ?? "__new__";
   const initialSnapshotRef = useRef<FormSnapshot>(
-    snapshotFromCustomer(customer, chartColorPaletteIndex, configPipelineDirection)
+    snapshotFromCustomer(customer, chartColorPaletteIndex, configPipelineDirection, allCustomers)
   );
 
   const buildSnapshot = useCallback(
@@ -404,9 +388,14 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   );
 
   useEffect(() => {
-    initialSnapshotRef.current = snapshotFromCustomer(customer, chartColorPaletteIndex, configPipelineDirection);
+    initialSnapshotRef.current = snapshotFromCustomer(
+      customer,
+      chartColorPaletteIndex,
+      configPipelineDirection,
+      allCustomers
+    );
     onDirtyChange?.(false);
-  }, [formKey, chartColorPaletteIndex, customer, configPipelineDirection, onDirtyChange]);
+  }, [formKey, chartColorPaletteIndex, customer, configPipelineDirection, allCustomers, onDirtyChange]);
 
   useEffect(() => {
     const dirty = !snapshotsEqual(initialSnapshotRef.current, buildSnapshot());
@@ -562,7 +551,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           </select>
         </div>
         <div className="form-group">
-          <label className="form-label">Share (%)</label>
+          <label className="form-label">
+            {direction === "outbound" ? "Share (%) of outbound" : "Share (%)"}
+          </label>
           <input
             type="number"
             min={0}
@@ -609,39 +600,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   return (
     <form onSubmit={handleSubmit} className="customer-form-layout">
       {error && <div className="alert alert-error">{error}</div>}
-
-      <div className="card customer-form-summary">
-        <div className="customer-form-summary-title">{customer ? "Editing customer" : "New customer"}</div>
-        <div className="customer-form-summary-grid" style={{ marginBottom: 10 }}>
-          <div>
-            <div className="customer-form-summary-label">Name</div>
-            <div className="customer-form-summary-value">{name.trim() || "—"}</div>
-          </div>
-          <div>
-            <div className="customer-form-summary-label">Starting inventory</div>
-            <div className="customer-form-summary-value">
-              {currentInventory.trim() !== ""
-                ? `${Math.round(parseFloat(currentInventory) || 0).toLocaleString()} t`
-                : "—"}
-            </div>
-          </div>
-        </div>
-        {throughputOverview ? (
-          <CustomerThroughputOverviewPanel overview={throughputOverview} />
-        ) : (
-          <p className="form-helper" style={{ margin: 0 }}>
-            Set the simulation window under Terminal to see inbound/outbound throughput breakdown.
-          </p>
-        )}
-        {calculatedOutboundThroughput != null && (
-          <div className="customer-form-summary-grid" style={{ marginTop: 12 }}>
-            <div>
-              <div className="customer-form-summary-label">Estimated outbound movements</div>
-              <div className="customer-form-summary-value">{numOutboundShips.toLocaleString()}</div>
-            </div>
-          </div>
-        )}
-      </div>
 
       {/* ── General ─────────────────────────────────────────────────── */}
       <section className="customer-form-section card">
@@ -840,13 +798,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
               </div>
             </div>
 
-            {calculatedOutboundThroughput != null && config && (
-              <p className="form-helper" style={{ marginTop: 12 }}>
-                See the summary card above for the full calculated outbound breakdown.
-                Estimated outbound movements at current MEPS: <strong>{numOutboundShips}</strong>.
-              </p>
-            )}
-
             <div style={{ marginTop: 16, borderTop: "1px solid #e2e8f0", paddingTop: 16 }}>
               <div className="form-label" style={{ marginBottom: 8 }}>Outbound transport modes</div>
               {outboundRows.length === 0 ? (
@@ -885,6 +836,19 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         </button>
         {openSections.storage && (
           <div className="customer-form-section-content">
+            {capacityBandMode ? (
+              <p className="form-helper" style={{ marginTop: 0, marginBottom: 12, lineHeight: 1.5 }}>
+                Used in <strong>Fixed band</strong>
+                {storageMode === "time_shared_storage" ? " and Time-shared" : ""} mode: this share × terminal
+                total storage sets this customer&apos;s dedicated capacity band (tank-full and inventory gates).
+              </p>
+            ) : (
+              <p className="form-helper" style={{ marginTop: 0, marginBottom: 12, lineHeight: 1.5 }}>
+                Terminal is in <strong>{storageMode.replace(/_/g, " ")}</strong> mode — storage share does not
+                set a capacity band. It only weights how reported inventory is split between customers on charts
+                and logs.
+              </p>
+            )}
             <div className="form-grid">
               <div className="form-group">
                 <label className="form-label">Storage share (%)</label>
@@ -897,11 +861,26 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   value={storageShare}
                   onChange={(e) => {
                     setStorageShare(e.target.value);
+                    setStorageShareTouched(true);
                     if (fieldErrors.storageShare) setFieldErrors((p) => ({ ...p, storageShare: "" }));
                   }}
                   required
                 />
-                <div className="form-helper">Percentage of the terminal's total storage allocated to this customer.</div>
+                <div className="form-helper">
+                  Default: this customer&apos;s declared inbound throughput ÷ total declared inbound throughput
+                  across all customers
+                  {suggestedStorageShare != null ? ` (${suggestedStorageShare}%)` : ""}.
+                </div>
+                {suggestedStorageShare != null && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ marginTop: 8 }}
+                    onClick={applyThroughputStorageShare}
+                  >
+                    Use throughput share ({suggestedStorageShare}%)
+                  </button>
+                )}
                 {fieldErrors.storageShare && <div className="form-error">{fieldErrors.storageShare}</div>}
               </div>
             </div>

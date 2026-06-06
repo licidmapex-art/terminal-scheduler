@@ -19,6 +19,7 @@ import { customerPacingPctByDirectionMode } from "../../engine/pacing";
 import {
   simulationPeriodHoursFloored,
   tallyPipelineTonnesFromSimulationLog,
+  tallyRefusedTonnesAtTankExtremes,
   theoreticalInventoryDeltaWithoutTankClamp
 } from "../../engine/inventory";
 import { tallyBerthTonnesByCustomerFromSlots } from "../../engine/simulationExcelExport";
@@ -165,6 +166,8 @@ interface TankExtremeRow {
   bottomOccurrences: number;
   topHours: number;
   topOccurrences: number;
+  refusedAtBottomTonnes: number;
+  refusedAtTopTonnes: number;
 }
 
 interface PartialLoadsRow {
@@ -599,10 +602,20 @@ export default function Analytics() {
 
   const tankExtremes = useMemo((): TankExtremeRow[] => {
     if (!timelineData?.timeline) return [];
+    const cfgEngine = config as EngineSimulationConfig | null;
+    const refusalByCustomer =
+      cfgEngine && simulationLog.length > 1
+        ? tallyRefusedTonnesAtTankExtremes(
+            customers as unknown as EngineCustomer[],
+            cfgEngine,
+            simulationLog
+          )
+        : new Map<string, { refusedAtTopTonnes: number; refusedAtBottomTonnes: number }>();
     const rows: TankExtremeRow[] = [];
     for (const c of customers) {
       const share = c.storageShare ?? 0;
       const maxCap = (totalStorageCap * share) / 100;
+      const refusal = refusalByCustomer.get(c.id);
       const vals = timelineData.timeline[c.id];
       if (!vals || vals.length === 0) {
         rows.push({
@@ -612,7 +625,9 @@ export default function Analytics() {
           bottomHours: 0,
           bottomOccurrences: 0,
           topHours: 0,
-          topOccurrences: 0
+          topOccurrences: 0,
+          refusedAtBottomTonnes: refusal?.refusedAtBottomTonnes ?? 0,
+          refusedAtTopTonnes: refusal?.refusedAtTopTonnes ?? 0
         });
         continue;
       }
@@ -625,11 +640,13 @@ export default function Analytics() {
         bottomHours: bottom.hours,
         bottomOccurrences: bottom.occurrences,
         topHours: top.hours,
-        topOccurrences: top.occurrences
+        topOccurrences: top.occurrences,
+        refusedAtBottomTonnes: refusal?.refusedAtBottomTonnes ?? 0,
+        refusedAtTopTonnes: refusal?.refusedAtTopTonnes ?? 0
       });
     }
     return rows;
-  }, [customers, timelineData, totalStorageCap]);
+  }, [customers, timelineData, totalStorageCap, config, simulationLog]);
 
   const partialLoads = useMemo((): PartialLoadsRow[] => {
     const rows: PartialLoadsRow[] = [];
@@ -866,7 +883,9 @@ export default function Analytics() {
           <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Tank bottoms and tank tops</h3>
           <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
             Bottom = inventory at 0 t; top = at customer max capacity (storage share × total capacity). Hours = total
-            hours in that state; occurrences = separate stretches (each consecutive run counts as one).
+            hours in that state; occurrences = separate stretches (each consecutive run counts as one). Refused tonnes
+            = that customer&apos;s pipeline flow (t/h) × terminal pipeline-interruption hours (tank top or tank bottom
+            on the Gantt — same rules).
           </p>
           <table className="data-table">
             <thead>
@@ -875,14 +894,16 @@ export default function Analytics() {
                 <th style={{ textAlign: "right" }}>Max cap (t)</th>
                 <th style={{ textAlign: "right" }}>Bottom hours</th>
                 <th style={{ textAlign: "right" }}>Bottom #</th>
+                <th style={{ textAlign: "right" }}>Refused at bottom (t)</th>
                 <th style={{ textAlign: "right" }}>Top hours</th>
                 <th style={{ textAlign: "right" }}>Top #</th>
+                <th style={{ textAlign: "right" }}>Refused at top (t)</th>
               </tr>
             </thead>
             <tbody>
               {tankExtremes.length === 0 ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "center", color: "#94a3b8", padding: 16 }}>
+                  <td colSpan={8} style={{ textAlign: "center", color: "#94a3b8", padding: 16 }}>
                     No customers
                   </td>
                 </tr>
@@ -893,12 +914,40 @@ export default function Analytics() {
                     <td style={{ textAlign: "right" }}>{row.maxCapacity.toLocaleString()}</td>
                     <td style={{ textAlign: "right" }}>{row.bottomHours}</td>
                     <td style={{ textAlign: "right" }}>{row.bottomOccurrences}</td>
+                    <td style={{ textAlign: "right" }}>{row.refusedAtBottomTonnes.toLocaleString()}</td>
                     <td style={{ textAlign: "right" }}>{row.topHours}</td>
                     <td style={{ textAlign: "right" }}>{row.topOccurrences}</td>
+                    <td style={{ textAlign: "right" }}>{row.refusedAtTopTonnes.toLocaleString()}</td>
                   </tr>
                 ))
               )}
             </tbody>
+            {tankExtremes.length > 0 && (
+              <tfoot>
+                <tr style={{ borderTop: "2px solid #e2e8f0", fontWeight: 600 }}>
+                  <td>Total</td>
+                  <td />
+                  <td style={{ textAlign: "right" }}>
+                    {tankExtremes.reduce((s, r) => s + r.bottomHours, 0)}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {tankExtremes.reduce((s, r) => s + r.bottomOccurrences, 0)}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {Math.round(tankExtremes.reduce((s, r) => s + r.refusedAtBottomTonnes, 0)).toLocaleString()}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {tankExtremes.reduce((s, r) => s + r.topHours, 0)}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {tankExtremes.reduce((s, r) => s + r.topOccurrences, 0)}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {Math.round(tankExtremes.reduce((s, r) => s + r.refusedAtTopTonnes, 0)).toLocaleString()}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       </div>

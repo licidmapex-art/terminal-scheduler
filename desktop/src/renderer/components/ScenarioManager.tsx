@@ -233,19 +233,19 @@ export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerPro
                     className="btn btn-primary"
                     style={{ padding: "6px 12px", fontSize: 13 }}
                     disabled={busy}
-                    onClick={() => handleLoad(r.id)}
+                    onClick={() => handleOverwrite(r.id, r.name)}
+                    title="Replace this scenario with the current customers, resources, and terminal config"
                   >
-                    Load
+                    {overwrittenId === r.id ? "Saved ✓" : "Save"}
                   </button>
                   <button
                     type="button"
                     className="btn btn-secondary"
                     style={{ padding: "6px 12px", fontSize: 13, marginLeft: 8 }}
                     disabled={busy}
-                    onClick={() => handleOverwrite(r.id, r.name)}
-                    title="Replace this scenario with the current customers, resources, and terminal config"
+                    onClick={() => handleLoad(r.id)}
                   >
-                    {overwrittenId === r.id ? "Saved ✓" : "Save"}
+                    Load
                   </button>
                   <button
                     type="button"

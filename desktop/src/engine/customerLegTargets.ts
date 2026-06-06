@@ -25,6 +25,30 @@ export function outboundThroughputTonnes(
   return customer.declaredInboundThroughput + pipelineInbound - pipelineOutbound;
 }
 
+/** Inbound tonnes for the period (declared transport + inbound pipeline). */
+export function inboundThroughputTonnes(
+  customer: Customer,
+  config: SimulationConfig,
+  periodHours: number
+): number {
+  const pipelineRatePerHour = customer.pipelineFlowPerHour ?? 0;
+  const pipelineInbound =
+    config.pipelineDirection === "inbound" ? pipelineRatePerHour * periodHours : 0;
+  return Math.max(0, customer.declaredInboundThroughput + pipelineInbound);
+}
+
+/** Max outbound volume when roundtrip is the binding limit: Σ floor(period ÷ roundtrip) × MEPS per lane. */
+export function outboundRoundtripCapacityTonnes(customer: Customer, periodHours: number): number {
+  const rows = customerDirectionTransports(customer, "outbound");
+  let total = 0;
+  for (const r of rows) {
+    const rt = r.roundtripHours ?? 0;
+    if (r.meps <= 0 || rt <= 0) continue;
+    total += Math.floor(periodHours / rt) * r.meps;
+  }
+  return total;
+}
+
 export function outboundTargetSlots(customer: Customer, config: SimulationConfig, periodHours: number): number {
   return outboundTargetSlotsByLane(customer, config, periodHours).reduce((s, r) => s + r.targetSlots, 0);
 }

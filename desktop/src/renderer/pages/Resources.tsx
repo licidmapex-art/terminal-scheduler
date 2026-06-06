@@ -41,7 +41,7 @@ export default function Resources() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Resources</h1>
-          <p className="page-subtitle">Manage berths, rail sidings, flow rates, and simulation tank layout</p>
+          <p className="page-subtitle">Manage berths, rail sidings, flow rates, and storage capacity</p>
         </div>
         <button className="btn btn-primary" onClick={() => setAdding(true)}>
           Add Resource

@@ -69,4 +69,18 @@ describe("buildCustomerThroughputOverview", () => {
     expect(overview.outboundPipelineTonnes).toBe(windowTonnes);
     expect(overview.calculatedOutboundTonnes).toBe(5000 - windowTonnes);
   });
+
+  it("includes expected slot counts per transport leg", () => {
+    const config = baseConfig();
+    const customer = baseCustomer({
+      declaredInboundThroughput: 10_000,
+      inboundMEPS: 2500,
+      inboundRoundtripHours: 0,
+      outboundMEPS: 5000,
+      outboundRoundtripHours: 0
+    });
+    const overview = buildCustomerThroughputOverview(customer, config);
+    expect(overview.inboundModes[0]?.targetSlots).toBe(4);
+    expect(overview.outboundModes[0]?.targetSlots).toBeGreaterThan(0);
+  });
 });

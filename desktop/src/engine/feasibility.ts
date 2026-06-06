@@ -5,6 +5,10 @@
 import type { Customer, Resource, SimulationConfig } from "../types";
 import { laytimeFromConfig } from "./slotLaytime";
 import { customerDirectionTransports } from "./customerTransports";
+import {
+  inboundThroughputTonnes,
+  outboundRoundtripCapacityTonnes
+} from "./customerLegTargets";
 
 /** Derived transport leg for feasibility + scheduler (no persisted requests). */
 export interface SchedulingLeg {
@@ -41,6 +45,8 @@ function totalBlackoutHours(resource: Resource, config: SimulationConfig): numbe
   }
   return total;
 }
+
+const OUTBOUND_INBOUND_CAPACITY_RATIO = 1.1;
 
 export function runFeasibilityChecks(
   customers: Customer[],
@@ -120,53 +126,6 @@ export function runFeasibilityChecks(
     }
   }
 
-  // Check if outbound slots are physically achievable within the period
-  for (const c of customers) {
-    const pipelineRatePerHour = c.pipelineFlowPerHour ?? 0;
-    const pipelineInbound =
-      config.pipelineDirection === "inbound" ? pipelineRatePerHour * periodHours : 0;
-    const pipelineOutbound =
-      config.pipelineDirection === "outbound" ? pipelineRatePerHour * periodHours : 0;
-
-    const outboundThroughput =
-      pipelineInbound + c.declaredInboundThroughput - pipelineOutbound;
-    const outboundRows = customerDirectionTransports(c, "outbound");
-    const outboundMeps = outboundRows.reduce((mx, row) => Math.max(mx, row.meps), 0);
-
-    if (outboundThroughput > 0 && outboundMeps > 0 && pipelineRatePerHour > 0) {
-      const numSlots = Math.ceil(outboundThroughput / outboundMeps);
-      const hoursToFillOneMEPS = outboundMeps / pipelineRatePerHour;
-      const totalHoursNeeded = numSlots * hoursToFillOneMEPS;
-
-      if (totalHoursNeeded > periodHours) {
-        const achievableSlots = Math.floor(periodHours / hoursToFillOneMEPS);
-        warnings.push(
-          `Customer ${c.name}: ${numSlots} outbound slots calculated but only ` +
-            `${achievableSlots} can physically fit in the simulation period. ` +
-            `Consider increasing MEPS to ${Math.ceil(
-              outboundThroughput / Math.max(achievableSlots, 1)
-            ).toLocaleString()}t ` +
-            `or extending the simulation period.`
-        );
-      }
-    }
-  }
-
-  // Days-of-cover: pipeline rate as throughput
-  for (const c of customers) {
-    const dailyPipelineRate = (c.pipelineFlowPerHour ?? 0) * 24;
-
-    if (config.pipelineDirection === "inbound" && dailyPipelineRate > 0) {
-      const customerMax = (config.totalStorageCapacity * c.storageShare) / 100;
-      const daysUntilFull = (customerMax - c.currentInventory) / dailyPipelineRate;
-      if (daysUntilFull < 2) {
-        warnings.push(
-          `Customer ${c.name} starts near full capacity: ${daysUntilFull.toFixed(1)} days until full`
-        );
-      }
-    }
-  }
-
   const totalStorageShare = customers.reduce((s, c) => s + c.storageShare, 0);
   if (Math.abs(totalStorageShare - 100) > 0.01) {
     warnings.push(`Storage shares sum to ${totalStorageShare.toFixed(1)}%, expected 100%`);
@@ -209,6 +168,27 @@ export function runFeasibilityChecks(
           );
         }
       }
+    }
+  }
+
+  for (const c of customers) {
+    const inbound = inboundThroughputTonnes(c, config, periodHours);
+    if (inbound <= 0) continue;
+
+    const outboundRows = customerDirectionTransports(c, "outbound");
+    const hasRoundtripOutbound = outboundRows.some(
+      (r) => r.meps > 0 && (r.roundtripHours ?? 0) > 0
+    );
+    if (!hasRoundtripOutbound) continue;
+
+    const outboundCap = outboundRoundtripCapacityTonnes(c, periodHours);
+    if (outboundCap < OUTBOUND_INBOUND_CAPACITY_RATIO * inbound) {
+      const ratioPct = ((outboundCap / inbound) * 100).toFixed(0);
+      warnings.push(
+        `Customer ${c.name}: outbound loading/unloading capacity (${outboundCap.toLocaleString()}t from period ÷ roundtrip × MEPS) ` +
+          `is less than 110% of inbound throughput (${inbound.toLocaleString()}t, ${ratioPct}%). ` +
+          `Increase outbound MEPS, shorten roundtrip, or reduce inbound.`
+      );
     }
   }
 

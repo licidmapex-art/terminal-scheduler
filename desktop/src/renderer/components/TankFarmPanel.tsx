@@ -3,9 +3,9 @@ import { useLocation } from "react-router-dom";
 
 export default function TankFarmPanel() {
   const location = useLocation();
-  const [tankCount, setTankCount] = useState("4");
+  const [totalStorageCapacity, setTotalStorageCapacity] = useState("100000");
+  const [tankCapacity, setTankCapacity] = useState("7000");
   const [configId, setConfigId] = useState<string | null>(null);
-  const [totalStorageCapacity, setTotalStorageCapacity] = useState(100000);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -21,8 +21,9 @@ export default function TankFarmPanel() {
       return;
     }
     setConfigId(typeof c.id === "string" ? c.id : null);
-    setTankCount(String(typeof c.tankCount === "number" && c.tankCount >= 1 ? c.tankCount : 4));
-    setTotalStorageCapacity(Number(c.totalStorageCapacity ?? 100000));
+    setTotalStorageCapacity(String(Number(c.totalStorageCapacity ?? 100000)));
+    const cap = c.tankCapacity;
+    setTankCapacity(String(typeof cap === "number" && cap > 0 ? cap : 7000));
   }, []);
 
   useEffect(() => {
@@ -33,12 +34,17 @@ export default function TankFarmPanel() {
     e.preventDefault();
     setError(null);
     if (!window.dbAPI || !configId) {
-      setError("Set the planning horizon and storage under Terminal first.");
+      setError("Set the planning horizon under Terminal first.");
       return;
     }
-    const tanks = parseInt(tankCount, 10);
-    if (isNaN(tanks) || tanks < 1 || !Number.isInteger(tanks)) {
-      setError("Number of tanks must be an integer ≥ 1");
+    const totalCap = parseFloat(totalStorageCapacity);
+    const capacity = parseFloat(tankCapacity);
+    if (isNaN(totalCap) || totalCap <= 0) {
+      setError("Total storage capacity must be a positive number");
+      return;
+    }
+    if (isNaN(capacity) || capacity <= 0) {
+      setError("Tank capacity must be a positive number");
       return;
     }
     setBusy(true);
@@ -51,7 +57,6 @@ export default function TankFarmPanel() {
         setError("No terminal configuration found.");
         return;
       }
-      const impliedPerTank = Math.max(1, Math.round(totalStorageCapacity / tanks));
       await window.dbAPI.updateSimulationConfig(configId, {
         startDate: c.startDate instanceof Date ? c.startDate : new Date(String(c.startDate)),
         endDate: c.endDate instanceof Date ? c.endDate : new Date(String(c.endDate)),
@@ -59,7 +64,7 @@ export default function TankFarmPanel() {
         pipelineDirection: (c.pipelineDirection === "outbound" ? "outbound" : "inbound") as
           | "inbound"
           | "outbound",
-        totalStorageCapacity: Number(c.totalStorageCapacity ?? 100000),
+        totalStorageCapacity: totalCap,
         storageMode: (c.storageMode as string) ?? "fixed_band",
         sharedInventoryCustomerDeficitLimitTonnes: Number(
           c.sharedInventoryCustomerDeficitLimitTonnes ?? 0
@@ -70,8 +75,8 @@ export default function TankFarmPanel() {
         minSlotIntervalHours: Number(c.minSlotIntervalHours ?? 0),
         preOpsHours: Number(c.preOpsHours ?? 0),
         postOpsHours: Number(c.postOpsHours ?? 0),
-        tankCount: tanks,
-        tankCapacity: impliedPerTank
+        tankCount: typeof c.tankCount === "number" && c.tankCount >= 1 ? c.tankCount : 4,
+        tankCapacity: capacity
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -84,22 +89,34 @@ export default function TankFarmPanel() {
 
   return (
     <div className="card" style={{ marginBottom: 24 }}>
-      <div className="card-title">Storage tanks (visual)</div>
-      <p style={{ margin: "0 0 16px", fontSize: 13, color: "#64748b", lineHeight: 1.5 }}>
-        Number of tanks drawn on the Simulation schematic. Total storage capacity used by the scheduler
-        is set under <strong>Terminal</strong> — not here.
+      <div className="card-title">Storage</div>
+      <p className="form-helper" style={{ margin: "0 0 14px" }}>
+        Terminal-wide capacity for scheduling and inventory gates. Per-tank capacity sets the red reference lines on the Simulation schematic.
       </p>
       {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
       <form onSubmit={handleSave} style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" }}>
-        <div className="form-group" style={{ marginBottom: 0, maxWidth: 200 }}>
-          <label className="form-label">Number of tanks</label>
+        <div className="form-group" style={{ marginBottom: 0, maxWidth: 220 }}>
+          <label className="form-label">Total storage capacity (tonnes)</label>
           <input
             type="number"
             min={1}
             step={1}
             className="form-input"
-            value={tankCount}
-            onChange={(e) => setTankCount(e.target.value)}
+            value={totalStorageCapacity}
+            onChange={(e) => setTotalStorageCapacity(e.target.value)}
+            disabled={busy || !configId}
+            required
+          />
+        </div>
+        <div className="form-group" style={{ marginBottom: 0, maxWidth: 220 }}>
+          <label className="form-label">Tank capacity (tonnes)</label>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            className="form-input"
+            value={tankCapacity}
+            onChange={(e) => setTankCapacity(e.target.value)}
             disabled={busy || !configId}
             required
           />
@@ -113,7 +130,7 @@ export default function TankFarmPanel() {
       </form>
       {!configId && (
         <p className="form-helper" style={{ marginTop: 10, marginBottom: 0 }}>
-          Open Terminal configuration and save once to enable tank settings.
+          Open Terminal configuration and save once to enable storage settings.
         </p>
       )}
     </div>

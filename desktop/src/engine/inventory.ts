@@ -8,6 +8,7 @@ import {
   getCargoWindowMs,
   hourOverlapsIntervalMs
 } from "./slotLaytime";
+import type { SimulationLogRow } from "./simulationLog";
 
 export type InventoryTimeline = Map<string, number[]>;
 
@@ -37,6 +38,62 @@ export function tallyPipelineTonnesFromSimulationLog(
     }
   }
   return m;
+}
+
+export interface TankExtremeRefusalTonnes {
+  refusedAtTopTonnes: number;
+  refusedAtBottomTonnes: number;
+}
+
+const EXTREME_EPS = 1;
+
+/** Count terminal pipeline-interruption hours (same rules as the Gantt pipeline row). */
+export function countPipelineInterruptionHours(
+  config: SimulationConfig,
+  log: SimulationLogRow[]
+): { tankTopHours: number; tankBottomHours: number } {
+  if (log.length === 0) return { tankTopHours: 0, tankBottomHours: 0 };
+  const cap = config.totalStorageCapacity ?? 100_000;
+  const isInbound = config.pipelineDirection === "inbound";
+  let tankTopHours = 0;
+  let tankBottomHours = 0;
+  for (const row of log) {
+    const total = row.terminalTotal ?? 0;
+    if (isInbound && total >= cap - EXTREME_EPS) tankTopHours++;
+    else if (!isInbound && total <= EXTREME_EPS) tankBottomHours++;
+  }
+  return { tankTopHours, tankBottomHours };
+}
+
+/**
+ * Pipeline product refused during terminal pipeline interruption: customer flow (t/h) × interrupted hours.
+ * Tank top blocks inbound pipeline; tank bottom blocks outbound pipeline (Gantt pipeline row).
+ */
+export function tallyRefusedTonnesAtTankExtremes(
+  customers: Customer[],
+  config: SimulationConfig,
+  log: SimulationLogRow[]
+): Map<string, TankExtremeRefusalTonnes> {
+  const out = new Map<string, TankExtremeRefusalTonnes>();
+  for (const c of customers) {
+    out.set(c.id, { refusedAtTopTonnes: 0, refusedAtBottomTonnes: 0 });
+  }
+
+  const hasPipeline = customers.some((c) => (c.pipelineFlowPerHour ?? 0) > 0);
+  if (!hasPipeline || log.length === 0) return out;
+
+  const { tankTopHours, tankBottomHours } = countPipelineInterruptionHours(config, log);
+  const isInbound = config.pipelineDirection === "inbound";
+
+  for (const c of customers) {
+    const rate = c.pipelineFlowPerHour ?? 0;
+    if (rate <= 0) continue;
+    out.set(c.id, {
+      refusedAtTopTonnes: isInbound ? Math.round(rate * tankTopHours * 10) / 10 : 0,
+      refusedAtBottomTonnes: isInbound ? 0 : Math.round(rate * tankBottomHours * 10) / 10
+    });
+  }
+  return out;
 }
 
 export function getCustomerMaxCapacity(customer: Customer, config: SimulationConfig): number {

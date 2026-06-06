@@ -22,6 +22,8 @@ export interface AiSummaryCustomer {
   outboundSlotsTarget: number;
   tankBottomHours: number;
   tankTopHours: number;
+  refusedAtBottomTonnes: number;
+  refusedAtTopTonnes: number;
   partialInboundSlots: number;
   partialOutboundSlots: number;
 }
@@ -88,6 +90,8 @@ interface TankExtremeRow {
   customerName: string;
   bottomHours: number;
   topHours: number;
+  refusedAtBottomTonnes: number;
+  refusedAtTopTonnes: number;
 }
 
 interface PartialLoadsRow {
@@ -198,6 +202,8 @@ export function buildAnalyticsAiSummary(input: {
       outboundSlotsTarget: tp?.targetOutboundSlots ?? 0,
       tankBottomHours: tank?.bottomHours ?? 0,
       tankTopHours: tank?.topHours ?? 0,
+      refusedAtBottomTonnes: tank?.refusedAtBottomTonnes ?? 0,
+      refusedAtTopTonnes: tank?.refusedAtTopTonnes ?? 0,
       partialInboundSlots: partial?.partialInboundSlots ?? 0,
       partialOutboundSlots: partial?.partialOutboundSlots ?? 0
     };

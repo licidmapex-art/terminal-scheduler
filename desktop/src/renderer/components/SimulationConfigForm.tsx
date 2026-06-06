@@ -43,7 +43,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
   const [startDate, setStartDate] = useState(defaults.start);
   const [endDate, setEndDate] = useState(defaults.end);
   const [pipelineDirection, setPipelineDirection] = useState<"inbound" | "outbound">("inbound");
-  const [totalStorageCapacity, setTotalStorageCapacity] = useState("100000");
   const [storageMode, setStorageMode] = useState<StorageMode>("fixed_band");
   const [sharedInventoryCustomerDeficitLimitTonnes, setSharedInventoryCustomerDeficitLimitTonnes] =
     useState("0");
@@ -66,7 +65,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
     const applyDefaults = () => {
       setStartDate(defaultStart);
       setEndDate(defaultEnd);
-      setTotalStorageCapacity("100000");
     };
 
     if (!window.dbAPI?.getSimulationConfigs) {
@@ -87,7 +85,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
           setStartDate(toDatetimeLocal(c.startDate, defaultStart));
           setEndDate(toDatetimeLocal(c.endDate, defaultEnd));
           setPipelineDirection((c.pipelineDirection === "outbound" ? "outbound" : "inbound") as "inbound" | "outbound");
-          setTotalStorageCapacity(String(c.totalStorageCapacity ?? 100000));
           setStorageMode(parseStorageMode(c.storageMode));
           const xLim = c.sharedInventoryCustomerDeficitLimitTonnes;
           const legacyMin = c.sharedInventoryMinStockTonnes as number | undefined;
@@ -136,7 +133,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
     setError(null);
     const start = new Date(startDate);
     const end = new Date(endDate);
-    const totalCap = parseFloat(totalStorageCapacity);
     const minInterval = parseFloat(minSlotIntervalHours);
     const pacerDecile = parseInt(pacerRoundAtDecile, 10);
     const optimizerMult = parseFloat(optimizerRelativeDocMultiplier);
@@ -148,10 +144,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
     }
     if (end.getTime() <= start.getTime()) {
       setError("End date must be after start date");
-      return;
-    }
-    if (isNaN(totalCap) || totalCap <= 0) {
-      setError("Total storage capacity must be a positive number");
       return;
     }
     if (isNaN(minInterval) || minInterval < 0 || minInterval > 48) {
@@ -180,12 +172,21 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
       return;
     }
     let tanks = 4;
+    let perTankCapacity = 7000;
+    let totalCap = 100_000;
     if (window.dbAPI?.getSimulationConfigs) {
-      const existing = (await window.dbAPI.getSimulationConfigs()) as Array<{ tankCount?: number }>;
+      const existing = (await window.dbAPI.getSimulationConfigs()) as Array<{
+        tankCount?: number;
+        tankCapacity?: number;
+        totalStorageCapacity?: number;
+      }>;
       const tc = existing[0]?.tankCount;
+      const cap = existing[0]?.tankCapacity;
+      const total = existing[0]?.totalStorageCapacity;
       if (typeof tc === "number" && tc >= 1) tanks = tc;
+      if (typeof cap === "number" && cap > 0) perTankCapacity = cap;
+      if (typeof total === "number" && total > 0) totalCap = total;
     }
-    const impliedPerTank = Math.max(1, Math.round(totalCap / tanks));
     try {
       const config = {
         startDate: start.toISOString(),
@@ -203,7 +204,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         preOpsHours: preOps,
         postOpsHours: postOps,
         tankCount: tanks,
-        tankCapacity: impliedPerTank
+        tankCapacity: perTankCapacity
       };
       if (configId) {
         await window.dbAPI.updateSimulationConfig(configId, config);
@@ -264,23 +265,9 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
           <div>
             <div className="config-section-title">Storage model</div>
             <p className="config-section-desc">
-              Total fungible capacity at the terminal. Choose how berth inventory gates and accounting interact with
-              the shared capacity.
+              Choose how berth inventory gates and accounting interact with terminal storage capacity. Set total and per-tank capacity under <strong>Resources</strong>.
             </p>
           </div>
-        </div>
-        <div className="form-group">
-          <label className="form-label">Total storage capacity (tonnes)</label>
-          <input
-            type="number"
-            min="1"
-            step="1"
-            className="form-input"
-            value={totalStorageCapacity}
-            onChange={(e) => setTotalStorageCapacity(e.target.value)}
-            required
-            style={{ maxWidth: 280 }}
-          />
         </div>
         <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">Allocation mode</label>

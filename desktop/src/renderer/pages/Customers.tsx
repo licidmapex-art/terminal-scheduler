@@ -27,9 +27,24 @@ interface SimulationConfig {
   endDate: string;
   pipelineFlowRate: number;
   pipelineDirection: "inbound" | "outbound";
+  storageMode?: string;
+  totalStorageCapacity?: number;
 }
 
 type PendingEditorAction = { type: "edit"; customer: Customer } | { type: "add" };
+
+function parseStorageMode(raw: unknown): EngineSimulationConfig["storageMode"] {
+  if (raw === "commingled") return "shared_shipping";
+  if (
+    raw === "fixed_band" ||
+    raw === "shared_shipping" ||
+    raw === "time_shared_storage" ||
+    raw === "shared_inventory"
+  ) {
+    return raw;
+  }
+  return "fixed_band";
+}
 
 function toEngineConfig(config: SimulationConfig): EngineSimulationConfig {
   return {
@@ -37,8 +52,8 @@ function toEngineConfig(config: SimulationConfig): EngineSimulationConfig {
     endDate: new Date(config.endDate),
     pipelineFlowRate: config.pipelineFlowRate ?? 0,
     pipelineDirection: config.pipelineDirection,
-    totalStorageCapacity: 100000,
-    storageMode: "fixed_band",
+    totalStorageCapacity: config.totalStorageCapacity ?? 100000,
+    storageMode: parseStorageMode(config.storageMode),
     sharedInventoryCustomerDeficitLimitTonnes: 0,
     minSlotIntervalHours: 0,
     preOpsHours: 0,
@@ -186,7 +201,7 @@ export default function Customers() {
                 </span>
               </div>
               {overview ? (
-                <CustomerThroughputOverviewPanel overview={overview} compact />
+                <CustomerThroughputOverviewPanel overview={overview} />
               ) : (
                 <div style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
                   Configure the simulation window under Terminal to see throughput breakdown.
@@ -235,6 +250,7 @@ export default function Customers() {
             key={formSessionKey}
             ref={formRef}
             customer={formCustomer}
+            allCustomers={customers}
             chartColorPaletteIndex={
               adding ? customers.length : editing ? customers.findIndex((x) => x.id === editing.id) : 0
             }
