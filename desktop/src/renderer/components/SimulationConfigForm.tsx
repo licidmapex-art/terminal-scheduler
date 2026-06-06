@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useLocation } from "react-router-dom";
 import type { StorageMode } from "../../types";
 
 function parseStorageMode(raw: unknown): StorageMode {
@@ -24,7 +25,20 @@ function getDefaultDates() {
   return { start: now.toISOString().slice(0, 16), end: week.toISOString().slice(0, 16) };
 }
 
+function toDatetimeLocal(value: unknown, fallback: string): string {
+  const d =
+    value instanceof Date
+      ? value
+      : typeof value === "string" || typeof value === "number"
+        ? new Date(value)
+        : new Date(NaN);
+  if (isNaN(d.getTime())) return fallback;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function SimulationConfigForm({ onSaved }: SimulationConfigFormProps) {
+  const location = useLocation();
   const defaults = getDefaultDates();
   const [startDate, setStartDate] = useState(defaults.start);
   const [endDate, setEndDate] = useState(defaults.end);
@@ -44,49 +58,35 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
   const [configId, setConfigId] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => {
-    let mounted = true;
+  const loadConfig = useCallback(() => {
     const now = new Date();
     const week = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const defaultStart = now.toISOString().slice(0, 16);
     const defaultEnd = week.toISOString().slice(0, 16);
 
     const applyDefaults = () => {
-      if (mounted) {
-        setStartDate(defaultStart);
-        setEndDate(defaultEnd);
-        setTotalStorageCapacity("100000");
-      }
+      setStartDate(defaultStart);
+      setEndDate(defaultEnd);
+      setTotalStorageCapacity("100000");
     };
 
     if (!window.dbAPI?.getSimulationConfigs) {
       applyDefaults();
-      return () => {
-        mounted = false;
-      };
+      return;
     }
 
     window.dbAPI
       .getSimulationConfigs()
       .then((configs: unknown[]) => {
-        if (!mounted) return;
         const c = (Array.isArray(configs) ? configs[0] : undefined) as Record<string, unknown> | undefined;
-        if (!c || typeof c.startDate !== "string" || typeof c.endDate !== "string") {
+        if (!c) {
           applyDefaults();
           return;
         }
         try {
-          const toDatetimeLocal = (s: string, fallback: string) => {
-            const d = new Date(s);
-            if (isNaN(d.getTime())) return fallback;
-            const pad = (n: number) => String(n).padStart(2, "0");
-            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-          };
-          const startStr = toDatetimeLocal(String(c.startDate), defaultStart);
-          const endStr = toDatetimeLocal(String(c.endDate), defaultEnd);
           setConfigId(typeof c.id === "string" ? c.id : null);
-          setStartDate(startStr);
-          setEndDate(endStr);
+          setStartDate(toDatetimeLocal(c.startDate, defaultStart));
+          setEndDate(toDatetimeLocal(c.endDate, defaultEnd));
           setPipelineDirection((c.pipelineDirection === "outbound" ? "outbound" : "inbound") as "inbound" | "outbound");
           setTotalStorageCapacity(String(c.totalStorageCapacity ?? 100000));
           setStorageMode(parseStorageMode(c.storageMode));
@@ -126,13 +126,13 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         }
       })
       .catch(() => {
-        if (mounted) applyDefaults();
+        applyDefaults();
       });
-
-    return () => {
-      mounted = false;
-    };
   }, []);
+
+  useEffect(() => {
+    loadConfig();
+  }, [loadConfig, location.pathname]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
