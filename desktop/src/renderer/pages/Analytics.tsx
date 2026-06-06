@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import MultiMetricChart from "../components/MultiMetricChart";
 import ConstraintTimelineChart from "../components/ConstraintTimelineChart";
+import AiAnalysisPanel from "../components/AiAnalysisPanel";
 import { useStore } from "../store";
 import type {
   Customer as EngineCustomer,
@@ -68,6 +69,9 @@ interface SimulationConfig {
   storageMode?: string;
   preOpsHours?: number;
   postOpsHours?: number;
+  optimizerRelativeDocMultiplier?: number;
+  pacerRoundingDirection?: string;
+  pacerRoundAtDecile?: number;
 }
 
 interface InventoryTimelineResponse {
@@ -678,6 +682,7 @@ export default function Analytics() {
   }, [resources, slots, periodHours, config]);
 
   const hasData = timelineData && Object.keys(timelineData.timeline ?? {}).length > 0;
+  const hasRunData = hasData || simulationLog.length > 0;
   const allThroughputPass =
     throughputCoverage.length > 0 && throughputCoverage.every((r) => r.passes);
 
@@ -1068,6 +1073,21 @@ export default function Analytics() {
           </tbody>
         </table>
       </div>
+
+      <AiAnalysisPanel
+        config={config}
+        periodHours={periodHours}
+        customers={customers}
+        feasibilityWarnings={feasibilityWarnings}
+        simulationLog={simulationLog}
+        inventorySummary={inventorySummary}
+        throughputCoverage={throughputCoverage}
+        tankExtremes={tankExtremes}
+        partialLoads={partialLoads}
+        resourceUtilization={resourceUtilization}
+        totalSlots={slots.length}
+        hasRunData={!!hasRunData}
+      />
     </div>
   );
 }
