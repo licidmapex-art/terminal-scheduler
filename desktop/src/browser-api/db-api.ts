@@ -23,6 +23,19 @@ export interface SimulationConfigRow extends SimulationConfig {
   id: string;
 }
 
+export interface AppSnapshot {
+  version: 1;
+  customers: Customer[];
+  resources: Array<{
+    id: string;
+    name: string;
+    type: string;
+    flowRate: number;
+    blackouts: Array<{ id: string; resourceId: string; start: string; end: string }>;
+  }>;
+  simulationConfigs: Array<SimulationConfigRow & { startDate: string; endDate: string }>;
+}
+
 const uuid = () => globalThis.crypto.randomUUID();
 
 // ── In-memory stores ─────────────────────────────────────────────────────────
@@ -33,6 +46,56 @@ export const _store = {
   simulationConfigs: [] as SimulationConfigRow[]
 };
 
+const LOCAL_STORAGE_KEY = "terminal-scheduler-app-snapshot";
+
+function persistStoreToLocalStorage(): void {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(serializeStore()));
+  } catch {
+    /* quota or private mode */
+  }
+}
+
+export function isValidAppSnapshot(raw: unknown): raw is AppSnapshot {
+  if (!raw || typeof raw !== "object") return false;
+  const s = raw as Record<string, unknown>;
+  return Array.isArray(s.customers) && Array.isArray(s.resources);
+}
+
+function initStoreFromLocalStorage(): void {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isValidAppSnapshot(parsed)) return;
+    applySnapshotToStore(parsed);
+  } catch {
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+  }
+}
+
+function applySnapshotToStore(snapshot: AppSnapshot): void {
+  _store.customers = snapshot.customers ?? [];
+  _store.resources = (snapshot.resources ?? []).map((r) => ({
+    id: r.id,
+    name: r.name,
+    type: r.type as Resource["type"],
+    flowRate: r.flowRate,
+    blackouts: (r.blackouts ?? []).map((b) => ({
+      id: b.id,
+      resourceId: b.resourceId,
+      start: new Date(b.start),
+      end: new Date(b.end)
+    }))
+  }));
+  _store.simulationConfigs = (snapshot.simulationConfigs ?? []).map((c) => ({
+    ...c,
+    storageMode: normalizeStorageMode(c.storageMode),
+    startDate: new Date(c.startDate as unknown as string),
+    endDate: new Date(c.endDate as unknown as string)
+  }));
+}
+
 // ── Customers ────────────────────────────────────────────────────────────────
 
 export const browserDbApi = {
@@ -41,6 +104,7 @@ export const browserDbApi = {
   createCustomer: (c: unknown): Promise<Customer> => {
     const customer = c as Customer;
     _store.customers.push(customer);
+    persistStoreToLocalStorage();
     return Promise.resolve(customer);
   },
 
@@ -48,11 +112,13 @@ export const browserDbApi = {
     const customer = c as Customer;
     const idx = _store.customers.findIndex((x) => x.id === customer.id);
     if (idx >= 0) _store.customers[idx] = customer;
+    persistStoreToLocalStorage();
     return Promise.resolve(customer);
   },
 
   deleteCustomer: (id: string): Promise<void> => {
     _store.customers = _store.customers.filter((c) => c.id !== id);
+    persistStoreToLocalStorage();
     return Promise.resolve();
   },
 
@@ -73,6 +139,7 @@ export const browserDbApi = {
   createResource: (r: unknown): Promise<Resource> => {
     const resource = r as Resource;
     _store.resources.push(resource);
+    persistStoreToLocalStorage();
     return Promise.resolve(resource);
   },
 
@@ -80,11 +147,13 @@ export const browserDbApi = {
     const resource = r as Resource;
     const idx = _store.resources.findIndex((x) => x.id === resource.id);
     if (idx >= 0) _store.resources[idx] = resource;
+    persistStoreToLocalStorage();
     return Promise.resolve(resource);
   },
 
   deleteResource: (id: string): Promise<void> => {
     _store.resources = _store.resources.filter((r) => r.id !== id);
+    persistStoreToLocalStorage();
     return Promise.resolve();
   },
 
@@ -108,6 +177,7 @@ export const browserDbApi = {
       storageMode: normalizeStorageMode(config.storageMode)
     };
     _store.simulationConfigs = [row]; // only one config at a time
+    persistStoreToLocalStorage();
     return Promise.resolve(row);
   },
 
@@ -124,24 +194,12 @@ export const browserDbApi = {
     } else {
       _store.simulationConfigs = [row];
     }
+    persistStoreToLocalStorage();
     return Promise.resolve(row);
   }
 };
 
 // ── Serialization helpers (used by Save / Load buttons) ──────────────────────
-
-export interface AppSnapshot {
-  version: 1;
-  customers: Customer[];
-  resources: Array<{
-    id: string;
-    name: string;
-    type: string;
-    flowRate: number;
-    blackouts: Array<{ id: string; resourceId: string; start: string; end: string }>;
-  }>;
-  simulationConfigs: Array<SimulationConfigRow & { startDate: string; endDate: string }>;
-}
 
 export function serializeStore(): AppSnapshot {
   return {
@@ -168,23 +226,9 @@ export function serializeStore(): AppSnapshot {
 }
 
 export function hydrateStore(snapshot: AppSnapshot): void {
-  _store.customers = snapshot.customers ?? [];
-  _store.resources = (snapshot.resources ?? []).map((r) => ({
-    id: r.id,
-    name: r.name,
-    type: r.type as Resource["type"],
-    flowRate: r.flowRate,
-    blackouts: (r.blackouts ?? []).map((b) => ({
-      id: b.id,
-      resourceId: b.resourceId,
-      start: new Date(b.start),
-      end: new Date(b.end)
-    }))
-  }));
-  _store.simulationConfigs = (snapshot.simulationConfigs ?? []).map((c) => ({
-    ...c,
-    storageMode: normalizeStorageMode(c.storageMode),
-    startDate: new Date(c.startDate as unknown as string),
-    endDate: new Date(c.endDate as unknown as string)
-  }));
+  applySnapshotToStore(snapshot);
+  persistStoreToLocalStorage();
 }
+
+// Restore last session on page load (web build only)
+initStoreFromLocalStorage();

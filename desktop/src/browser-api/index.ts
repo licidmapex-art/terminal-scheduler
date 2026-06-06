@@ -23,4 +23,4 @@ window.schedulerAPI = browserSchedulerApi;
 window.scenarioAPI = browserScenarioApi;
 
 export { browserDbApi, browserSchedulerApi, browserScenarioApi };
-export { serializeStore, hydrateStore } from "./db-api";
+export { serializeStore, hydrateStore, isValidAppSnapshot } from "./db-api";

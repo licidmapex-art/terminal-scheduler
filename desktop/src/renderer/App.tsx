@@ -43,12 +43,16 @@ function useDataIO() {
     if (!file) return;
     try {
       const text = await file.text();
-      const snapshot = JSON.parse(text);
-      const { hydrateStore } = await import("../browser-api/db-api");
+      const snapshot: unknown = JSON.parse(text);
+      const { hydrateStore, isValidAppSnapshot } = await import("../browser-api/db-api");
+      if (!isValidAppSnapshot(snapshot)) {
+        alert("Could not load file — it is not a valid Terminal Scheduler data export.");
+        return;
+      }
       hydrateStore(snapshot);
       window.location.reload();
     } catch {
-      alert("Could not load file — make sure it is a valid Terminal Scheduler data export.");
+      alert("Could not load file — make sure it is a valid Terminal Scheduler JSON export.");
     }
     if (fileRef.current) fileRef.current.value = "";
   };
