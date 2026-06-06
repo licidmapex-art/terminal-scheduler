@@ -1,7 +1,11 @@
 [build]
   base    = "desktop"
-  command = "npm ci && npm run build:web"
+  command = "npm ci --ignore-scripts && npm run build:web"
   publish = "dist/web"
+
+[build.environment]
+  ELECTRON_SKIP_BINARY_DOWNLOAD = "1"
+  NPM_FLAGS = "--ignore-scripts"
 
 [[redirects]]
   from   = "/*"
