@@ -1,0 +1,453 @@
+/**
+ * Inventory timeline behaviour (pipeline baseline vs physical floor).
+ */
+
+import { describe, it, expect } from "vitest";
+import {
+  buildTimeline,
+  getProjectedInventory,
+  simulationPeriodHoursFloored,
+  tallyPipelineTonnesFromSimulationLog,
+  applySharedInventoryPipelineHour,
+  theoreticalInventoryDeltaWithoutTankClamp
+} from "./inventory";
+import { runScheduler } from "./scheduler";
+import type { Customer, Resource, SimulationConfig } from "../types";
+
+describe("simulationPeriodHoursFloored", () => {
+  it("floors partial-hour ranges to match scheduler / buildTimeline", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-01T03:30:00Z");
+    const config = makeConfig({ startDate: start, endDate: end });
+    expect(simulationPeriodHoursFloored(config)).toBe(3);
+  });
+});
+
+describe("theoreticalInventoryDeltaWithoutTankClamp", () => {
+  it("matches pipeline + slot integral minus tank clamp effect on delta (fixed_band)", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-01T05:00:00Z");
+    const config = makeConfig({
+      startDate: start,
+      endDate: end,
+      pipelineDirection: "inbound",
+      storageMode: "fixed_band"
+    });
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 100,
+        pipelineFlowPerHour: 10,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 0
+      }
+    ];
+    const slots: import("../types").ScheduledSlot[] = [];
+    const clamped = buildTimeline(customers, config, slots);
+    const arr = clamped.get("c1")!;
+    const deltaClamped = arr[arr.length - 1]! - arr[0]!;
+    const theoryMap = theoreticalInventoryDeltaWithoutTankClamp(customers, config, slots);
+    const deltaTheory = theoryMap?.get("c1") ?? 0;
+    expect(deltaTheory).toBe(50);
+    expect(deltaClamped).toBe(50);
+  });
+});
+
+describe("tallyPipelineTonnesFromSimulationLog", () => {
+  it("skips hour 0 and splits signed flow into inbound vs outbound tonnes", () => {
+    const rows = [
+      { hour: 0, pipelineFlow: { c1: 100, c2: -50 } },
+      { hour: 1, pipelineFlow: { c1: 10, c2: -5 } },
+      { hour: 2, pipelineFlow: { c1: 10, c2: -5 } }
+    ];
+    const m = tallyPipelineTonnesFromSimulationLog(rows);
+    expect(m.get("c1")).toEqual({ inbound: 20, outbound: 0 });
+    expect(m.get("c2")).toEqual({ inbound: 0, outbound: 10 });
+  });
+});
+
+function makeConfig(overrides?: Partial<SimulationConfig>): SimulationConfig {
+  const start = new Date("2025-01-01T00:00:00Z");
+  const end = new Date("2026-01-01T00:00:00Z");
+  return {
+    startDate: start,
+    endDate: end,
+    pipelineFlowRate: 0,
+    pipelineDirection: "outbound",
+    totalStorageCapacity: 2_000_000,
+    storageMode: "fixed_band",
+    sharedInventoryCustomerDeficitLimitTonnes: 0,
+    minSlotIntervalHours: 0,
+    preOpsHours: 0,
+    postOpsHours: 0,
+    tankCount: 4,
+    tankCapacity: 7000,
+    ...overrides
+  };
+}
+
+describe("buildTimeline (fixed_band)", () => {
+  it("keeps hourly values >= 0 for a full year of outbound pipeline drain (no slots)", () => {
+    const config = makeConfig();
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 50_000,
+        pipelineFlowPerHour: 50,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "barge",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const tl = buildTimeline(customers, config, []);
+    const arr = tl.get("c1")!;
+    expect(arr.length).toBeGreaterThan(8000);
+    for (let h = 0; h < arr.length; h++) {
+      expect(arr[h]).toBeGreaterThanOrEqual(0);
+    }
+    expect(Math.min(...arr)).toBe(0);
+  });
+
+  it("after scheduling ships and barges, projected inventory never reads below zero", () => {
+    const config = makeConfig({
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound"
+    });
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 800_000,
+        currentInventory: 400_000,
+        pipelineFlowPerHour: 50,
+        storageShare: 100,
+        inboundMEPS: 800_000,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 4000,
+        outboundMode: "barge",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const resources: Resource[] = [
+      {
+        id: "bl",
+        name: "L",
+        type: "berth_large",
+        flowRate: 2000,
+        blackouts: []
+      },
+      {
+        id: "bs",
+        name: "S",
+        type: "berth_small",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const result = runScheduler(customers, resources, config);
+    const arr = result.inventoryTimeline.get("c1")!;
+    const simStart = config.startDate;
+    for (let h = 0; h < arr.length; h += 168) {
+      const dt = new Date(simStart.getTime() + h * 60 * 60 * 1000);
+      const inv = getProjectedInventory(
+        "c1",
+        dt,
+        result.inventoryTimeline,
+        config,
+        customers
+      );
+      expect(inv).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("hourly length is periodHours + 1 and per-customer pipeline rate scales outbound drain", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-03T00:00:00Z");
+    const config: SimulationConfig = {
+      startDate: start,
+      endDate: end,
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100000,
+      storageMode: "fixed_band",
+      sharedInventoryCustomerDeficitLimitTonnes: 0,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 10_000,
+        pipelineFlowPerHour: 50,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const tl = buildTimeline(customers, config, []);
+    const arr = tl.get("c1")!;
+    expect(arr.length).toBe(49);
+    expect(arr[0]).toBe(10_000);
+    expect(arr[1]).toBe(10_000 - 50);
+  });
+});
+
+describe("buildTimeline (shared_inventory)", () => {
+  it("hourly attributed inventories sum to at most terminal capacity under inbound pipeline", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-03T00:00:00Z");
+    const capacity = 100_000;
+    const config: SimulationConfig = {
+      startDate: start,
+      endDate: end,
+      pipelineFlowRate: 0,
+      pipelineDirection: "inbound",
+      totalStorageCapacity: capacity,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 0,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 45_000,
+        pipelineFlowPerHour: 250,
+        storageShare: 60,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "c2",
+        name: "B",
+        declaredInboundThroughput: 0,
+        currentInventory: 40_000,
+        pipelineFlowPerHour: 250,
+        storageShare: 40,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const tl = buildTimeline(customers, config, []);
+    const a1 = tl.get("c1")!;
+    const a2 = tl.get("c2")!;
+    for (let h = 0; h < a1.length; h++) {
+      expect(a1[h]! + a2[h]!).toBeLessThanOrEqual(capacity + 1e-6);
+    }
+  });
+
+  it("at full terminal pool inbound pipeline adds no inventory", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-02T00:00:00Z");
+    const capacity = 100_000;
+    const config: SimulationConfig = {
+      startDate: start,
+      endDate: end,
+      pipelineFlowRate: 0,
+      pipelineDirection: "inbound",
+      totalStorageCapacity: capacity,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 0,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 60_000,
+        pipelineFlowPerHour: 500,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "c2",
+        name: "B",
+        declaredInboundThroughput: 0,
+        currentInventory: 40_000,
+        pipelineFlowPerHour: 500,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const tl = buildTimeline(customers, config, []);
+    const a1 = tl.get("c1")!;
+    const a2 = tl.get("c2")!;
+    for (let h = 1; h < a1.length; h++) {
+      expect(a1[h]!).toBe(60_000);
+      expect(a2[h]!).toBe(40_000);
+    }
+  });
+
+  it("outbound pipeline preserves borrower deficits instead of zeroing all attributions", () => {
+    const config: SimulationConfig = {
+      startDate: new Date("2025-01-01T00:00:00Z"),
+      endDate: new Date("2025-01-02T00:00:00Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100_000,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 0,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "Creditor",
+        declaredInboundThroughput: 0,
+        currentInventory: 5600,
+        pipelineFlowPerHour: 600,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "c2",
+        name: "Borrower",
+        declaredInboundThroughput: 0,
+        currentInventory: -5000,
+        pipelineFlowPerHour: 0,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const invById: Record<string, number> = { c1: 5600, c2: -5000 };
+    applySharedInventoryPipelineHour(invById, customers, config);
+    // Terminal total reaches zero, but borrower deficit remains visible.
+    expect(Math.round((invById.c1 + invById.c2) * 1000) / 1000).toBe(0);
+    expect(invById.c2).toBe(-5000);
+    expect(invById.c1).toBe(5000);
+  });
+});
+
+describe("buildTimeline cargo window (pre/post ops)", () => {
+  it("applies inbound flow only during cargo hours, not full occupation", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-02T00:00:00Z");
+    const config = makeConfig({
+      startDate: start,
+      endDate: end,
+      preOpsHours: 2,
+      postOpsHours: 1
+    });
+    const customers: Customer[] = [
+      {
+        id: "c1",
+        name: "A",
+        declaredInboundThroughput: 0,
+        currentInventory: 10_000,
+        pipelineFlowPerHour: 0,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const slot = {
+      id: "s1",
+      customerId: "c1",
+      resourceId: "r1",
+      direction: "inbound" as const,
+      mode: "ship" as const,
+      volume: 1000,
+      start: start,
+      end: new Date(start.getTime() + 4 * 60 * 60 * 1000),
+      status: "scheduled" as const,
+      conflictReason: null
+    };
+    const tl = buildTimeline(customers, config, [slot]);
+    const arr = tl.get("c1")!;
+    expect(arr[0]).toBe(10_000);
+    expect(arr[1]).toBe(10_000);
+    expect(arr[2]).toBe(11_000);
+    expect(arr[3]).toBe(11_000);
+  });
+});

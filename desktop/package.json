@@ -1,0 +1,38 @@
+{
+  "name": "terminal-scheduler-desktop",
+  "version": "1.0.0",
+  "description": "Standalone desktop application for terminal scheduling and inventory tracking",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "tsc && vite build",
+    "build:web": "cross-env WEB_BUILD=1 vite build",
+    "start": "electron .",
+    "dev": "tsc && vite build && electron .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.6.0",
+    "gsap": "^3.14.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.0.1",
+    "recharts": "^3.8.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/react-router-dom": "^5.3.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^10.1.0",
+    "electron": "^33.4.11",
+    "electron-rebuild": "^3.2.9",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.9"
+  }
+}
