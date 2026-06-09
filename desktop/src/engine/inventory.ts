@@ -9,6 +9,12 @@ import {
   hourOverlapsIntervalMs
 } from "./slotLaytime";
 import type { SimulationLogRow } from "./simulationLog";
+import {
+  resolveCustomerPipelineRates,
+  totalInboundPipelineTph,
+  totalOutboundPipelineTph,
+  customerPipelineNetDeltaPerHour
+} from "./pipelineFlows";
 
 export type InventoryTimeline = Map<string, number[]>;
 
@@ -49,18 +55,20 @@ const EXTREME_EPS = 1;
 
 /** Count terminal pipeline-interruption hours (same rules as the Gantt pipeline row). */
 export function countPipelineInterruptionHours(
+  customers: Customer[],
   config: SimulationConfig,
   log: SimulationLogRow[]
 ): { tankTopHours: number; tankBottomHours: number } {
   if (log.length === 0) return { tankTopHours: 0, tankBottomHours: 0 };
   const cap = config.totalStorageCapacity ?? 100_000;
-  const isInbound = config.pipelineDirection === "inbound";
+  const hasInboundPipe = totalInboundPipelineTph(customers, config) > 0;
+  const hasOutboundPipe = totalOutboundPipelineTph(customers, config) > 0;
   let tankTopHours = 0;
   let tankBottomHours = 0;
   for (const row of log) {
     const total = row.terminalTotal ?? 0;
-    if (isInbound && total >= cap - EXTREME_EPS) tankTopHours++;
-    else if (!isInbound && total <= EXTREME_EPS) tankBottomHours++;
+    if (hasInboundPipe && total >= cap - EXTREME_EPS) tankTopHours++;
+    if (hasOutboundPipe && total <= EXTREME_EPS) tankBottomHours++;
   }
   return { tankTopHours, tankBottomHours };
 }
@@ -79,18 +87,20 @@ export function tallyRefusedTonnesAtTankExtremes(
     out.set(c.id, { refusedAtTopTonnes: 0, refusedAtBottomTonnes: 0 });
   }
 
-  const hasPipeline = customers.some((c) => (c.pipelineFlowPerHour ?? 0) > 0);
+  const hasPipeline =
+    totalInboundPipelineTph(customers, config) > 0 ||
+    totalOutboundPipelineTph(customers, config) > 0;
   if (!hasPipeline || log.length === 0) return out;
 
-  const { tankTopHours, tankBottomHours } = countPipelineInterruptionHours(config, log);
-  const isInbound = config.pipelineDirection === "inbound";
+  const { tankTopHours, tankBottomHours } = countPipelineInterruptionHours(customers, config, log);
 
   for (const c of customers) {
-    const rate = c.pipelineFlowPerHour ?? 0;
-    if (rate <= 0) continue;
+    const { inboundTph, outboundTph } = resolveCustomerPipelineRates(c, config);
     out.set(c.id, {
-      refusedAtTopTonnes: isInbound ? Math.round(rate * tankTopHours * 10) / 10 : 0,
-      refusedAtBottomTonnes: isInbound ? 0 : Math.round(rate * tankBottomHours * 10) / 10
+      refusedAtTopTonnes:
+        inboundTph > 0 ? Math.round(inboundTph * tankTopHours * 10) / 10 : 0,
+      refusedAtBottomTonnes:
+        outboundTph > 0 ? Math.round(outboundTph * tankBottomHours * 10) / 10 : 0
     });
   }
   return out;
@@ -129,39 +139,41 @@ export function applySharedInventoryPipelineHour(
   config: SimulationConfig
 ): Record<string, number> {
   const cap = config.totalStorageCapacity ?? 100000;
-  const S = customers.reduce((s, c) => s + (invById[c.id] ?? 0), 0);
-  const R = customers.reduce((s, c) => s + (c.pipelineFlowPerHour ?? 0), 0);
+  let S = customers.reduce((s, c) => s + (invById[c.id] ?? 0), 0);
+  const inboundTotal = totalInboundPipelineTph(customers, config);
+  const outboundTotal = totalOutboundPipelineTph(customers, config);
   const effective: Record<string, number> = Object.fromEntries(customers.map((c) => [c.id, 0]));
 
-  if (config.pipelineDirection === "inbound") {
+  if (inboundTotal > 0) {
     const headroom = Math.max(0, cap - S);
-    const deltaTotal = R > 0 ? Math.min(headroom, R) : 0;
+    const deltaTotal = Math.min(headroom, inboundTotal);
     for (const c of customers) {
-      const r = c.pipelineFlowPerHour ?? 0;
-      const add = R > 0 ? (deltaTotal * r) / R : 0;
+      const { inboundTph } = resolveCustomerPipelineRates(c, config);
+      const add = inboundTotal > 0 ? (deltaTotal * inboundTph) / inboundTotal : 0;
       invById[c.id] = (invById[c.id] ?? 0) + add;
-      effective[c.id] = add;
-    }
-  } else {
-    // Outbound pipeline drains the terminal pool; preserve borrower deficits by removing
-    // tonnes from positive attributions only (pro-rata on positive balances).
-    const newT = Math.max(0, Math.min(cap, S - R));
-    if (S <= 0) return effective;
-    const delta = S - newT;
-    const positiveTotal = customers.reduce((sum, c) => sum + Math.max(0, invById[c.id] ?? 0), 0);
-    if (positiveTotal <= 0 || delta <= 0) return effective;
-    for (const c of customers) {
-      const before = invById[c.id] ?? 0;
-      if (before <= 0) {
-        effective[c.id] = 0;
-        continue;
-      }
-      const take = (delta * before) / positiveTotal;
-      const after = before - take;
-      invById[c.id] = after;
-      effective[c.id] = after - before;
+      effective[c.id] += add;
+      S += add;
     }
   }
+
+  if (outboundTotal > 0) {
+    const newT = Math.max(0, Math.min(cap, S - outboundTotal));
+    const delta = S - newT;
+    const positiveTotal = customers.reduce((sum, c) => sum + Math.max(0, invById[c.id] ?? 0), 0);
+    if (positiveTotal > 0 && delta > 0) {
+      for (const c of customers) {
+        const { outboundTph } = resolveCustomerPipelineRates(c, config);
+        if (outboundTph <= 0) continue;
+        const before = invById[c.id] ?? 0;
+        if (before <= 0) continue;
+        const take = (delta * before) / positiveTotal;
+        const after = before - take;
+        invById[c.id] = after;
+        effective[c.id] += after - before;
+      }
+    }
+  }
+
   return effective;
 }
 
@@ -192,14 +204,14 @@ export function buildTimeline(
     }
 
     let terminal = customers.reduce((s, c) => s + c.currentInventory, 0);
-    const terminalPipelineSign = config.pipelineDirection === "inbound" ? 1 : -1;
-    const totalPipelinePerHour = customers.reduce((s, c) => s + (c.pipelineFlowPerHour ?? 0), 0);
+    const inboundTotal = totalInboundPipelineTph(customers, config);
+    const outboundTotal = totalOutboundPipelineTph(customers, config);
     const simStartMs = simStart.getTime();
     const { preOps, postOps } = laytimeFromConfig(config);
 
     for (let h = 0; h <= periodHours; h++) {
       if (h > 0) {
-        terminal += terminalPipelineSign * totalPipelinePerHour;
+        terminal += inboundTotal - outboundTotal;
         terminal = Math.max(0, Math.min(capacity, terminal));
       }
 
@@ -257,9 +269,7 @@ export function buildTimeline(
 
   for (const customer of customers) {
     const customerMax = getCustomerMaxCapacity(customer, config);
-    const pipelineRatePerHour = customer.pipelineFlowPerHour ?? 0;
-    const pipelineSign = config.pipelineDirection === "inbound" ? 1 : -1;
-    const pipelineDelta = pipelineSign * pipelineRatePerHour;
+    const pipelineDelta = customerPipelineNetDeltaPerHour(customer, config);
 
     const customerSlots = assignedSlots.filter((s) => s.customerId === customer.id);
     const arr: number[] = [];
@@ -341,9 +351,7 @@ export function theoreticalInventoryDeltaWithoutTankClamp(
 
   const out = new Map<string, number>();
   for (const customer of customers) {
-    const pipelineRatePerHour = customer.pipelineFlowPerHour ?? 0;
-    const pipelineSign = config.pipelineDirection === "inbound" ? 1 : -1;
-    const pipelineDelta = pipelineSign * pipelineRatePerHour;
+    const pipelineDelta = customerPipelineNetDeltaPerHour(customer, config);
 
     const customerSlots = assignedSlots.filter((s) => s.customerId === customer.id);
     let runningInventory = customer.currentInventory;

@@ -22,8 +22,8 @@ export function createCustomer(customer: Customer): Customer {
   const legacyIn = legacyDirectionTransport(customer, "inbound");
   const legacyOut = legacyDirectionTransport(customer, "outbound");
   const stmt = db.prepare(`
-    INSERT INTO customers (id, name, declared_inbound_throughput, current_inventory, pipeline_flow_per_hour, storage_share, inbound_meps, inbound_mode, outbound_meps, outbound_mode, inbound_roundtrip_hours, outbound_roundtrip_hours, inbound_transports_json, outbound_transports_json, time_shared_min_band, time_shared_duration, chart_color)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO customers (id, name, declared_inbound_throughput, current_inventory, pipeline_flow_per_hour, pipeline_inbound_per_hour, pipeline_outbound_per_hour, storage_share, inbound_meps, inbound_mode, outbound_meps, outbound_mode, inbound_roundtrip_hours, outbound_roundtrip_hours, inbound_transports_json, outbound_transports_json, time_shared_min_band, time_shared_duration, chart_color)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   stmt.run(
     customer.id,
@@ -31,6 +31,8 @@ export function createCustomer(customer: Customer): Customer {
     customer.declaredInboundThroughput,
     customer.currentInventory,
     customer.pipelineFlowPerHour,
+    customer.pipelineInboundPerHour ?? 0,
+    customer.pipelineOutboundPerHour ?? 0,
     customer.storageShare,
     legacyIn.meps,
     legacyIn.mode,
@@ -55,6 +57,8 @@ export function getAllCustomers(): Customer[] {
     declared_inbound_throughput: number;
     current_inventory: number;
     pipeline_flow_per_hour: number;
+    pipeline_inbound_per_hour?: number;
+    pipeline_outbound_per_hour?: number;
     storage_share: number;
     inbound_meps: number;
     inbound_mode: string;
@@ -77,6 +81,8 @@ export function getAllCustomers(): Customer[] {
       declaredInboundThroughput: r.declared_inbound_throughput,
       currentInventory: r.current_inventory,
       pipelineFlowPerHour: r.pipeline_flow_per_hour ?? 0,
+      pipelineInboundPerHour: r.pipeline_inbound_per_hour ?? 0,
+      pipelineOutboundPerHour: r.pipeline_outbound_per_hour ?? 0,
       storageShare: r.storage_share,
       inboundTransports,
       outboundTransports,
@@ -101,6 +107,8 @@ export function getCustomerById(id: string): Customer | null {
     declared_inbound_throughput: number;
     current_inventory: number;
     pipeline_flow_per_hour: number;
+    pipeline_inbound_per_hour?: number;
+    pipeline_outbound_per_hour?: number;
     storage_share: number;
     inbound_meps?: number;
     inbound_mode?: string;
@@ -123,6 +131,8 @@ export function getCustomerById(id: string): Customer | null {
     declaredInboundThroughput: row.declared_inbound_throughput,
     currentInventory: row.current_inventory,
     pipelineFlowPerHour: row.pipeline_flow_per_hour ?? 0,
+    pipelineInboundPerHour: row.pipeline_inbound_per_hour ?? 0,
+    pipelineOutboundPerHour: row.pipeline_outbound_per_hour ?? 0,
     storageShare: row.storage_share,
     inboundTransports,
     outboundTransports,
@@ -150,6 +160,8 @@ export function updateCustomer(customer: Customer): Customer {
       declared_inbound_throughput = ?,
       current_inventory = ?,
       pipeline_flow_per_hour = ?,
+      pipeline_inbound_per_hour = ?,
+      pipeline_outbound_per_hour = ?,
       storage_share = ?,
       inbound_meps = ?,
       inbound_mode = ?,
@@ -169,6 +181,8 @@ export function updateCustomer(customer: Customer): Customer {
     customer.declaredInboundThroughput,
     customer.currentInventory,
     customer.pipelineFlowPerHour,
+    customer.pipelineInboundPerHour ?? 0,
+    customer.pipelineOutboundPerHour ?? 0,
     customer.storageShare,
     legacyIn.meps,
     legacyIn.mode,

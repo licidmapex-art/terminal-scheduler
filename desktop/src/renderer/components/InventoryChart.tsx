@@ -1,3 +1,4 @@
+import { BarChart2 } from "lucide-react";
 import { useState, useEffect, useMemo } from "react";
 import {
   LineChart,
@@ -142,7 +143,9 @@ export default function InventoryChart() {
   if (chartData.length === 0 || simulationLog.length === 0) {
     return (
       <div className="empty-state">
-        <div className="empty-state-icon">📊</div>
+        <div className="empty-state-icon">
+          <BarChart2 size={48} strokeWidth={1.5} />
+        </div>
         <div className="empty-state-title">No inventory data</div>
         <div className="empty-state-text">Run the scheduler first to see inventory timeline</div>
       </div>

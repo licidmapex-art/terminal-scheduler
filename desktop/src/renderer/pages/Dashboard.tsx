@@ -1,7 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
 import { NavLink } from "react-router-dom";
+import { CalendarDays, Warehouse } from "lucide-react";
 import { useStore } from "../store";
 import { slotBerthOccupationHours } from "../../engine/slotLaytime";
+import { outboundThroughputTonnes } from "../../engine/customerLegTargets";
+import type { Customer as EngineCustomer, SimulationConfig as EngineSimulationConfig } from "../../types";
 
 interface Slot {
   id: string;
@@ -109,16 +112,14 @@ export default function Dashboard() {
     if (!config || periodHours <= 0 || customers.length === 0) {
       return { allPass: true, rows: [] as { name: string; pass: boolean }[] };
     }
-    const pipeDir = config.pipelineDirection ?? "inbound";
     const EPS = 0.5;
+    const simCfg = config as EngineSimulationConfig;
     const rows: { name: string; pass: boolean }[] = [];
     for (const c of customers) {
-      const pipelineRatePerHour = c.pipelineFlowPerHour ?? 0;
-      const pipelineContribution = pipelineRatePerHour * periodHours;
-      const pipelineInbound = pipeDir === "inbound" ? pipelineContribution : 0;
-      const pipelineOutbound = pipeDir === "outbound" ? pipelineContribution : 0;
-      const declared = c.declaredInboundThroughput ?? 0;
-      const expectedOutbound = Math.max(0, declared + pipelineInbound - pipelineOutbound);
+      const expectedOutbound = Math.max(
+        0,
+        outboundThroughputTonnes(c as EngineCustomer, simCfg, periodHours)
+      );
       const scheduledOutbound = slots
         .filter((sl) => sl.customerId === c.id && sl.direction === "outbound")
         .reduce((sum, sl) => sum + sl.volume, 0);
@@ -277,7 +278,9 @@ export default function Dashboard() {
           <div className="card-title">Recent movements</div>
           {recentSlots.length === 0 ? (
             <div className="empty-state" style={{ padding: 40 }}>
-              <div className="empty-state-icon">📅</div>
+              <div className="empty-state-icon">
+                <CalendarDays size={48} strokeWidth={1.5} />
+              </div>
               <div className="empty-state-title">No schedule yet</div>
               <div className="empty-state-text">
                 Run the scheduler on the Schedule page after setting customers, resources, and terminal dates.
@@ -324,7 +327,9 @@ export default function Dashboard() {
           <div className="card-title">Resource utilization</div>
           {resourceUtilization.length === 0 ? (
             <div className="empty-state" style={{ padding: 40 }}>
-              <div className="empty-state-icon">🏗️</div>
+              <div className="empty-state-icon">
+                <Warehouse size={48} strokeWidth={1.5} />
+              </div>
               <div className="empty-state-title">No resources</div>
               <div className="empty-state-text">Add berths or sidings under Resources.</div>
             </div>

@@ -7,6 +7,7 @@ import type { Customer, SimulationConfig } from "../types";
 import type { SchedulingLeg } from "./feasibility";
 import { customerRepresentativeDaysOfCover } from "./customerLegTargets";
 import { getCustomerMaxCapacity } from "./inventory";
+import { resolveCustomerPipelineRates } from "./pipelineFlows";
 
 const SORT_METRIC_EPS = 1e-6;
 
@@ -17,13 +18,11 @@ export function normalizedOptimizerRelativeDocMultiplier(config: SimulationConfi
 }
 
 function pipelineInboundPerDayCustomer(customer: Customer, config: SimulationConfig): number {
-  const r = customer.pipelineFlowPerHour ?? 0;
-  return config.pipelineDirection === "inbound" ? r * 24 : 0;
+  return resolveCustomerPipelineRates(customer, config).inboundTph * 24;
 }
 
 function pipelineOutboundPerDayCustomer(customer: Customer, config: SimulationConfig): number {
-  const r = customer.pipelineFlowPerHour ?? 0;
-  return config.pipelineDirection === "outbound" ? r * 24 : 0;
+  return resolveCustomerPipelineRates(customer, config).outboundTph * 24;
 }
 
 function customerOutboundPressurePerDay(

@@ -1,3 +1,4 @@
+import { Bug } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
@@ -214,7 +215,9 @@ export default function Debugging() {
           </div>
         ) : (
           <div className="empty-state">
-            <div className="empty-state-icon">🧪</div>
+            <div className="empty-state-icon">
+              <Bug size={48} strokeWidth={1.5} />
+            </div>
             <div className="empty-state-title">No debug series yet</div>
             <div className="empty-state-text">
               Run scheduler to populate transport statuses and optimizer days-of-cover snapshots.

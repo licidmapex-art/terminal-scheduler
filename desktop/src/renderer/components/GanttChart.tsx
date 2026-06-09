@@ -1,28 +1,68 @@
-import { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  useLayoutEffect,
+  type CSSProperties
+} from "react";
+import { Loader2, Zap } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { setLastSchedulerRun } from "../store";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
+import {
+  totalInboundPipelineTph,
+  totalOutboundPipelineTph
+} from "../lib/pipelineFlows";
+import {
+  buildConstraintHourData,
+  buildDocTrendByCustomer,
+  buildPacingByCustomerMode,
+  buildPacingLegOptions,
+  SAMPLE_HOUR_STEP
+} from "../lib/timelineChartData";
+import {
+  SCHEDULING_CONSTRAINTS,
+  type BlockingConstraintKey
+} from "../lib/schedulingConstraints";
+import type { Customer as EngineCustomer, ScheduledSlot, SimulationConfig as EngineSimulationConfig } from "../../types";
+import {
+  inboundTargetSlots,
+  outboundTargetSlots
+} from "../../engine/customerLegTargets";
+import { ConstraintIcon } from "./ConstraintIcon";
+import TimelineChartLegend, { type LegendEntry } from "./TimelineChartLegend";
 
 // Single source of truth for all positioning
 const LABEL_WIDTH = 140;
-const ROW_HEIGHT = 58;
+/** Berth / rail rows — 40% shorter than the original 58px layout. */
+const RESOURCE_ROW_SCALE = 0.6;
+const ROW_HEIGHT = Math.round(58 * RESOURCE_ROW_SCALE);
 /** Stacked roundtrip duration bars under each berth row (timeline scale). */
-const RT_LEGEND_LINE_H = 8;
-const RT_LEGEND_GAP = 4;
-const RT_LEGEND_PAD_TOP = 6;
-const RT_LEGEND_PAD_BOTTOM = 4;
-/** Time-shared storage triangle layer under berth rows */
-const TS_LAYER_H = 14;
-const TS_LEGEND_GAP = 4;
+const RT_LEGEND_LINE_H = Math.round(8 * RESOURCE_ROW_SCALE);
+const RT_LEGEND_GAP = Math.round(4 * RESOURCE_ROW_SCALE);
+const RT_LEGEND_PAD_TOP = Math.round(6 * RESOURCE_ROW_SCALE);
+const RT_LEGEND_PAD_BOTTOM = Math.round(4 * RESOURCE_ROW_SCALE);
+const SLOT_BAND_MIN_H = Math.round(16 * RESOURCE_ROW_SCALE);
+const SLOT_BAND_MIN_H_RT = Math.round(13 * RESOURCE_ROW_SCALE);
 const HOUR_MS = 60 * 60 * 1000;
-const CHART_HEIGHT = 200;
+const CHART_HEIGHT = 260;
 const INV_Y_AXIS_STEP_T = 5000;
 const PIPELINE_ROW_H = 28;
+/** Constraint band — taller than berth rows for readable hourly stacks. */
+const CONSTRAINT_ROW_H = 80;
+const CHART_END_PAD_PX = 16;
+const INV_PLOT_PAD_TOP = 10;
+const INV_PLOT_PAD_BOTTOM = 10;
 const HEADER_HEIGHT = 32;
 const AXIS_WIDTH = 60;
+const OVERLAY_AXIS_WIDTH = 44;
 const MIN_PIXELS_PER_DAY = 3;
 const MAX_PIXELS_PER_DAY = 300;
 const DEFAULT_PIXELS_PER_DAY = 20;
+/** Visual floor only — keeps sub-pixel slots hoverable without distorting duration when zoomed out. */
+const SLOT_MIN_WIDTH_PX = 2;
 const ONE_DAY_MS = 1000 * 60 * 60 * 24;
 /** Delay before hiding slot tooltip so the cursor can reach the fixed panel without clearing hover. */
 const SLOT_TOOLTIP_LEAVE_MS = 400;
@@ -50,10 +90,7 @@ function generateMonthMarkers(startDate: Date, endDate: Date, pixelsPerDay: numb
   while (current.getTime() <= end.getTime()) {
     const dayOffset = (current.getTime() - simStart) / ONE_DAY_MS;
     const x = dayOffset * pixelsPerDay;
-    const label = current.toLocaleDateString("en-GB", {
-      month: "short",
-      year: current.getMonth() === 0 ? "2-digit" : undefined
-    });
+    const label = current.toLocaleDateString("en-GB", { month: "short" });
     markers.push({ x, label, key: `${current.getFullYear()}-${current.getMonth()}` });
     current.setMonth(current.getMonth() + 1);
   }
@@ -159,10 +196,24 @@ function collectImportantInventoryHours(
     .sort((a, b) => a - b);
 }
 
+function rgbaFromHex(hex: string, alpha: number): string {
+  if (!hex.startsWith("#") || hex.length !== 7) return `rgba(100,116,139,${alpha})`;
+  return `rgba(${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)},${alpha})`;
+}
+
 function invY(value: number, lo: number, hi: number): number {
   const span = hi - lo || 1;
   const t = (value - lo) / span;
-  return CHART_HEIGHT - Math.max(0, Math.min(1, t)) * (CHART_HEIGHT - 8);
+  const plotH = CHART_HEIGHT - INV_PLOT_PAD_TOP - INV_PLOT_PAD_BOTTOM;
+  return (
+    CHART_HEIGHT -
+    INV_PLOT_PAD_BOTTOM -
+    Math.max(0, Math.min(1, t)) * plotH
+  );
+}
+
+function overlayY(value: number, lo: number, hi: number): number {
+  return invY(value, lo, hi);
 }
 
 /** ~1–2–5 × 10^n step for readable ticks */
@@ -196,33 +247,19 @@ function legTargetSlots(
   config: SimulationConfig,
   periodHours: number
 ): number {
-  const pipelineRatePerHour = c.pipelineFlowPerHour ?? 0;
-  const pipeDir = config.pipelineDirection ?? "inbound";
-  const pipelineContribution = pipelineRatePerHour * periodHours;
-  const pipelineInbound = pipeDir === "inbound" ? pipelineContribution : 0;
-  const pipelineOutbound = pipeDir === "outbound" ? pipelineContribution : 0;
-  const outboundThroughput = (c.declaredInboundThroughput ?? 0) + pipelineInbound - pipelineOutbound;
-
-  if (direction === "inbound") {
-    const meps = c.inboundMEPS ?? 0;
-    const declared = c.declaredInboundThroughput ?? 0;
-    if (meps <= 0 || declared <= 0) return 0;
-    const byThroughput = Math.ceil(declared / meps);
-    const rt = c.inboundRoundtripHours ?? 0;
-    if (rt > 0) return Math.min(byThroughput, Math.floor(periodHours / rt));
-    return byThroughput;
-  }
-
-  const meps = c.outboundMEPS ?? 0;
-  if (meps <= 0 || outboundThroughput <= 0) return 0;
-  const byThroughput = Math.ceil(outboundThroughput / meps);
-  const rt = c.outboundRoundtripHours ?? 0;
-  if (rt > 0) return Math.min(byThroughput, Math.floor(periodHours / rt));
-  return byThroughput;
+  const engineC = c as EngineCustomer;
+  const engineCfg = config as EngineSimulationConfig;
+  return direction === "inbound"
+    ? inboundTargetSlots(engineC, periodHours)
+    : outboundTargetSlots(engineC, engineCfg, periodHours);
 }
 
 function slotStartHour(slot: Slot, simStartMs: number): number {
   return Math.round((new Date(slot.start).getTime() - simStartMs) / HOUR_MS);
+}
+
+function slotEndHour(slot: Slot, simStartMs: number): number {
+  return Math.round((new Date(slot.end).getTime() - simStartMs) / HOUR_MS);
 }
 
 /** Counts starts for same leg with start hour index <= h (matches scheduler loadsStartedByHour). */
@@ -266,9 +303,18 @@ export default function GanttChart() {
   const [simulationLog, setSimulationLog] = useState<SimLogRow[]>([]);
   const [feasibilityWarnings, setFeasibilityWarnings] = useState<string[]>([]);
   const [pixelsPerDay, setPixelsPerDay] = useState(DEFAULT_PIXELS_PER_DAY);
+  const [showInventory, setShowInventory] = useState(true);
   const [showRoundtrip, setShowRoundtrip] = useState(true);
   const [showTimeshared, setShowTimeshared] = useState(true);
   const [showStorageCapLine, setShowStorageCapLine] = useState(true);
+  const [showDoc, setShowDoc] = useState(false);
+  const [showPacing, setShowPacing] = useState(false);
+  const [showConstraints, setShowConstraints] = useState(false);
+  const [enabledConstraints, setEnabledConstraints] = useState<Set<BlockingConstraintKey>>(
+    () => new Set(SCHEDULING_CONSTRAINTS.map((c) => c.key))
+  );
+  const [enabledCustomers, setEnabledCustomers] = useState<Set<string>>(() => new Set());
+  const [selectedPacingLeg, setSelectedPacingLeg] = useState<string | null>(null);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportClientW, setViewportClientW] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -385,28 +431,48 @@ export default function GanttChart() {
     }
   };
 
+  const applyWheelZoom = useCallback(
+    (clientX: number, deltaY: number) => {
+      const container = scrollRef.current;
+      if (!container) return;
+
+      const rect = container.getBoundingClientRect();
+      const cursorXInView = clientX - rect.left;
+      const cursorXInContent = cursorXInView + container.scrollLeft;
+      const dayAtCursor = cursorXInContent / pixelsPerDay;
+
+      const factor = deltaY < 0 ? 1.25 : 0.8;
+      const newPPD = Math.max(MIN_PIXELS_PER_DAY, Math.min(MAX_PIXELS_PER_DAY, pixelsPerDay * factor));
+
+      setPixelsPerDay(newPPD);
+
+      requestAnimationFrame(() => {
+        if (!scrollRef.current) return;
+        const newCursorXInContent = dayAtCursor * newPPD;
+        scrollRef.current.scrollLeft = newCursorXInContent - cursorXInView;
+        setScrollLeft(scrollRef.current.scrollLeft);
+      });
+    },
+    [pixelsPerDay]
+  );
+
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    const container = scrollRef.current;
-    if (!container) return;
-
-    const rect = container.getBoundingClientRect();
-    const cursorXInView = e.clientX - rect.left;
-    const cursorXInContent = cursorXInView + container.scrollLeft;
-    const dayAtCursor = cursorXInContent / pixelsPerDay;
-
-    const factor = e.deltaY < 0 ? 1.25 : 0.8;
-    const newPPD = Math.max(MIN_PIXELS_PER_DAY, Math.min(MAX_PIXELS_PER_DAY, pixelsPerDay * factor));
-
-    setPixelsPerDay(newPPD);
-
-    requestAnimationFrame(() => {
-      if (!scrollRef.current) return;
-      const newCursorXInContent = dayAtCursor * newPPD;
-      scrollRef.current.scrollLeft = newCursorXInContent - cursorXInView;
-      setScrollLeft(scrollRef.current.scrollLeft);
-    });
+    e.stopPropagation();
+    applyWheelZoom(e.clientX, e.deltaY);
   };
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      applyWheelZoom(e.clientX, e.deltaY);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [applyWheelZoom]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -434,6 +500,10 @@ export default function GanttChart() {
   };
   const simStart = new Date(cfg.startDate).getTime();
   const terminalStorageCap = cfg.totalStorageCapacity ?? timelineData?.totalStorageCapacity ?? 100000;
+  const periodHoursSafe = Math.max(
+    (new Date(cfg.endDate).getTime() - new Date(cfg.startDate).getTime()) / HOUR_MS,
+    1
+  );
 
   const dayOffset = useCallback(
     (date: Date | string) => (new Date(date).getTime() - simStart) / ONE_DAY_MS,
@@ -473,13 +543,13 @@ export default function GanttChart() {
 
   const slotX = useCallback((date: Date | string) => dayOffset(date) * pixelsPerDay, [dayOffset, pixelsPerDay]);
   const slotWidth = useCallback(
-    (start: Date | string, end: Date | string) => Math.max(24, (dayOffset(end) - dayOffset(start)) * pixelsPerDay),
+    (start: Date | string, end: Date | string) =>
+      Math.max(SLOT_MIN_WIDTH_PX, (dayOffset(end) - dayOffset(start)) * pixelsPerDay),
     [dayOffset, pixelsPerDay]
   );
-  /** Timeline width from sim start→end (pixels). */
-  const totalWidth = dayOffset(new Date(cfg.endDate)) * pixelsPerDay + 100;
-  /** When zoomed out, totalWidth can be narrower than the scroll viewport; fill the viewport so tracks align with the minimap. */
-  const contentWidth = Math.max(totalWidth, viewportClientW || 0);
+  /** Timeline width from sim start→end (pixels); do not stretch to viewport when zoomed out. */
+  const totalWidth = dayOffset(new Date(cfg.endDate)) * pixelsPerDay + CHART_END_PAD_PX;
+  const contentWidth = Math.max(totalWidth, 1);
 
   const resourceRows = useMemo(() => {
     const berths = resources
@@ -527,6 +597,136 @@ export default function GanttChart() {
   const customerColor = (id: string) => customerColorMap.get(id) ?? "#64748b";
 
   const customerById = useMemo(() => new Map(customers.map((c) => [c.id, c])), [customers]);
+
+  useEffect(() => {
+    if (customers.length === 0) return;
+    setEnabledCustomers((prev) => {
+      if (prev.size === 0) return new Set(customers.map((c) => c.id));
+      const next = new Set<string>();
+      for (const c of customers) {
+        if (prev.has(c.id)) next.add(c.id);
+      }
+      if (next.size === 0) return new Set(customers.map((c) => c.id));
+      return next;
+    });
+  }, [customers]);
+
+  const pipeDir = (cfg.pipelineDirection ?? "inbound") as "inbound" | "outbound";
+
+  const hasRoundtripConfig = useMemo(
+    () =>
+      customers.some(
+        (c) => (c.inboundRoundtripHours ?? 0) > 0 || (c.outboundRoundtripHours ?? 0) > 0
+      ),
+    [customers]
+  );
+
+  const hasTimeShareConfig = (cfg.storageMode ?? "fixed_band") === "time_shared_storage";
+
+  const hasStorageCapConfig = terminalStorageCap > 0;
+
+  const inboundPipelineTph = useMemo(
+    () => totalInboundPipelineTph(customers, pipeDir),
+    [customers, pipeDir]
+  );
+
+  const outboundPipelineTph = useMemo(
+    () => totalOutboundPipelineTph(customers, pipeDir),
+    [customers, pipeDir]
+  );
+
+  const docTrendByCustomer = useMemo(
+    () =>
+      buildDocTrendByCustomer(
+        simulationLog as unknown as import("../../engine/simulationLog").SimulationLogRow[],
+        customers,
+        timelineData,
+        cfg as EngineSimulationConfig,
+        customerById as Map<string, EngineCustomer>
+      ),
+    [simulationLog, customers, timelineData, cfg, customerById]
+  );
+
+  const pacingByCustomerMode = useMemo(
+    () =>
+      buildPacingByCustomerMode(
+        customers as EngineCustomer[],
+        cfg as EngineSimulationConfig,
+        periodHoursSafe,
+        slots as unknown as ScheduledSlot[],
+        simulationLog as unknown as import("../../engine/simulationLog").SimulationLogRow[]
+      ),
+    [customers, cfg, periodHoursSafe, slots, simulationLog]
+  );
+
+  const pacingLegOptions = useMemo(
+    () => buildPacingLegOptions(customers, pacingByCustomerMode),
+    [customers, pacingByCustomerMode]
+  );
+
+  const hasPacingConfig = pacingLegOptions.length > 0;
+
+  const hasDocConfig =
+    simulationLog.length > 0 && Object.keys(docTrendByCustomer).length > 0;
+
+  useEffect(() => {
+    if (!hasPacingConfig) {
+      setSelectedPacingLeg(null);
+      return;
+    }
+    setSelectedPacingLeg((prev) => {
+      if (prev && pacingLegOptions.some((o) => o.key === prev)) return prev;
+      return pacingLegOptions[0]?.key ?? null;
+    });
+  }, [hasPacingConfig, pacingLegOptions]);
+
+  const constraintData = useMemo(
+    () =>
+      buildConstraintHourData(
+        simulationLog as unknown as import("../../engine/simulationLog").SimulationLogRow[],
+        enabledCustomers
+      ),
+    [simulationLog, enabledCustomers]
+  );
+
+  const hasConstraintData = constraintData.activeConstraintKeys.length > 0;
+
+  useEffect(() => {
+    if (!hasConstraintData) return;
+    setEnabledConstraints((prev) => {
+      const active = new Set(constraintData.activeConstraintKeys);
+      const next = new Set<BlockingConstraintKey>();
+      for (const key of prev) {
+        if (active.has(key)) next.add(key);
+      }
+      if (next.size === 0) return active;
+      return next;
+    });
+  }, [hasConstraintData, constraintData.activeConstraintKeys]);
+
+  const toggleCustomer = useCallback((id: string) => {
+    setEnabledCustomers((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        if (next.size > 1) next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleConstraint = useCallback((key: BlockingConstraintKey) => {
+    setEnabledConstraints((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        if (next.size > 1) next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
 
   /**
    * Per berth: one bar per scheduled slot with roundtrip > 0 at that slot’s start.
@@ -606,20 +806,8 @@ export default function GanttChart() {
     );
   };
 
-  const tsExtraHeightForBerth = useCallback(
-    (resourceId: string): number => {
-      if (!showTimeshared) return 0;
-      if ((cfg.storageMode ?? "fixed_band") !== "time_shared_storage") return 0;
-      if (!resources.find((x) => x.id === resourceId)?.type?.startsWith("berth")) return 0;
-      if (!slots.some((s) => s.resourceId === resourceId)) return 0;
-      return TS_LAYER_H + TS_LEGEND_GAP;
-    },
-    [showTimeshared, cfg.storageMode, resources, slots]
-  );
-
   const ganttRowHeight = (r: Resource) =>
-    ROW_HEIGHT +
-    (r.type?.startsWith("berth") ? berthLegendExtraHeight(r.id) + tsExtraHeightForBerth(r.id) : 0);
+    ROW_HEIGHT + (r.type?.startsWith("berth") ? berthLegendExtraHeight(r.id) : 0);
 
   const slotLoadHourMap = useMemo(() => {
     const m = new Map<string, number>();
@@ -634,11 +822,6 @@ export default function GanttChart() {
   }, [simulationLog]);
 
   const slotsForResource = (resourceId: string) => slots.filter((s) => s.resourceId === resourceId);
-
-  const periodHoursSafe = Math.max(
-    (new Date(cfg.endDate).getTime() - new Date(cfg.startDate).getTime()) / HOUR_MS,
-    1
-  );
 
   /** Prefer simulation log customer inventories / terminalTotal so Gantt matches Simulation Log UI. */
   const ganttInventorySeries = useMemo(() => {
@@ -801,38 +984,170 @@ export default function GanttChart() {
 
   interface PipelineSegment { startH: number; endH: number; status: "flowing" | "tank_top" | "tank_bottom" }
 
-  const totalCustomerPipelineTph = useMemo(
-    () => customers.reduce((s, c) => s + (c.pipelineFlowPerHour ?? 0), 0),
-    [customers]
+  const buildPipelineSegments = useCallback(
+    (direction: "inbound" | "outbound"): PipelineSegment[] => {
+      if (!terminalTotalByHour.length) return [];
+      const cap = cfg.totalStorageCapacity ?? 100000;
+      const EPS = 1;
+      const segments: PipelineSegment[] = [];
+      let curStatus: PipelineSegment["status"] | null = null;
+      let segStart = 0;
+      for (let h = 0; h < terminalTotalByHour.length; h++) {
+        const total = terminalTotalByHour[h] ?? 0;
+        let status: PipelineSegment["status"];
+        if (direction === "inbound") {
+          status = total >= cap - EPS ? "tank_top" : "flowing";
+        } else {
+          status = total <= EPS ? "tank_bottom" : "flowing";
+        }
+        if (status !== curStatus) {
+          if (curStatus !== null) segments.push({ startH: segStart, endH: h, status: curStatus });
+          curStatus = status;
+          segStart = h;
+        }
+      }
+      if (curStatus !== null) {
+        segments.push({ startH: segStart, endH: terminalTotalByHour.length, status: curStatus });
+      }
+      return segments;
+    },
+    [terminalTotalByHour, cfg]
   );
 
-  const pipelineSegments = useMemo((): PipelineSegment[] => {
-    if (!terminalTotalByHour.length || totalCustomerPipelineTph <= 0) return [];
-    const cap = cfg.totalStorageCapacity ?? 100000;
-    const EPS = 1;
-    const isInbound = (cfg.pipelineDirection ?? "inbound") === "inbound";
-    const segments: PipelineSegment[] = [];
-    let curStatus: PipelineSegment["status"] | null = null;
-    let segStart = 0;
-    for (let h = 0; h < terminalTotalByHour.length; h++) {
-      const total = terminalTotalByHour[h] ?? 0;
-      let status: PipelineSegment["status"];
-      if (isInbound && total >= cap - EPS) status = "tank_top";
-      else if (!isInbound && total <= EPS) status = "tank_bottom";
-      else status = "flowing";
-      if (status !== curStatus) {
-        if (curStatus !== null) segments.push({ startH: segStart, endH: h, status: curStatus });
-        curStatus = status;
-        segStart = h;
+  const inboundPipelineSegments = useMemo(
+    () => buildPipelineSegments("inbound"),
+    [buildPipelineSegments]
+  );
+
+  const outboundPipelineSegments = useMemo(
+    () => buildPipelineSegments("outbound"),
+    [buildPipelineSegments]
+  );
+
+  const selectedPacingOption = useMemo(
+    () => pacingLegOptions.find((o) => o.key === selectedPacingLeg) ?? null,
+    [pacingLegOptions, selectedPacingLeg]
+  );
+
+  const docYAxis = useMemo(() => {
+    if (!showDoc) return null;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    for (const [cid, series] of Object.entries(docTrendByCustomer)) {
+      if (!enabledCustomers.has(cid)) continue;
+      for (const v of series) {
+        if (v != null && Number.isFinite(v)) {
+          minV = Math.min(minV, v);
+          maxV = Math.max(maxV, v);
+        }
       }
     }
-    if (curStatus !== null) segments.push({ startH: segStart, endH: terminalTotalByHour.length, status: curStatus });
-    return segments;
-  }, [terminalTotalByHour, cfg, totalCustomerPipelineTph]);
+    if (!Number.isFinite(minV)) return null;
+    if (maxV === minV) maxV = minV + 1;
+    return { lo: Math.max(0, minV * 0.95), hi: maxV * 1.05 };
+  }, [showDoc, docTrendByCustomer, enabledCustomers]);
 
-  const hasPipeline = totalCustomerPipelineTph > 0;
+  const pacingYAxis = useMemo(() => {
+    if (!showPacing || !selectedPacingOption) return null;
+    const series =
+      pacingByCustomerMode[selectedPacingOption.customerId]?.[selectedPacingOption.directionMode];
+    if (!series) return null;
+    const finite = series.filter((v) => Number.isFinite(v));
+    if (finite.length === 0) return null;
+    const minV = Math.min(...finite, 0);
+    const maxV = Math.max(...finite, 100);
+    return { lo: Math.min(0, minV * 0.9), hi: Math.max(110, maxV * 1.05) };
+  }, [showPacing, selectedPacingOption, pacingByCustomerMode]);
+
+  const extraAxisWidth =
+    (showDoc && docYAxis ? OVERLAY_AXIS_WIDTH : 0) +
+    (showPacing && pacingYAxis ? OVERLAY_AXIS_WIDTH : 0);
+
+  const labelColumnWidth = LABEL_WIDTH + extraAxisWidth;
+
+  const constraintRowVisible = hasRun && showConstraints && hasConstraintData;
+
+  const docOverlayPoints = useCallback(
+    (customerId: string): string => {
+      const series = docTrendByCustomer[customerId];
+      const axis = docYAxis;
+      if (!series || !axis) return "";
+      const pts: string[] = [];
+      for (let h = 0; h < series.length; h += SAMPLE_HOUR_STEP) {
+        const v = series[h];
+        if (v == null || !Number.isFinite(v)) continue;
+        const x = (h / 24) * pixelsPerDay;
+        const y = overlayY(v, axis.lo, axis.hi);
+        pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      }
+      return pts.join(" ");
+    },
+    [docTrendByCustomer, docYAxis, pixelsPerDay]
+  );
+
+  const pacingOverlayPoints = useCallback((): string => {
+    const opt = selectedPacingOption;
+    const axis = pacingYAxis;
+    if (!opt || !axis) return "";
+    const series = pacingByCustomerMode[opt.customerId]?.[opt.directionMode];
+    if (!series) return "";
+    const pts: string[] = [];
+    for (let h = 0; h < series.length; h += SAMPLE_HOUR_STEP) {
+      const v = series[h];
+      if (!Number.isFinite(v)) continue;
+      const x = (h / 24) * pixelsPerDay;
+      const y = overlayY(v, axis.lo, axis.hi);
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    return pts.join(" ");
+  }, [selectedPacingOption, pacingYAxis, pacingByCustomerMode, pixelsPerDay]);
 
   const hasInventoryData = timelineData?.timeline && Object.keys(timelineData.timeline).length > 0;
+
+  const timeSharedOverlayTriangles = useMemo(() => {
+    if (!showTimeshared) return [];
+    if ((cfg.storageMode ?? "fixed_band") !== "time_shared_storage") return [];
+    if (!hasInventoryData) return [];
+    const { lo, hi } = ganttInvYAxis;
+    const out: Array<{ slotId: string; points: string; fill: string; title: string }> = [];
+    for (const slot of slots) {
+      const cust = customerById.get(slot.customerId);
+      const m = slot.volume;
+      if (!cust || m <= 0) continue;
+      const rate = Math.abs(cust.pipelineFlowPerHour ?? 0);
+      if (rate <= 0) continue;
+      const durationHours = m / rate;
+      if (durationHours <= 0) continue;
+      const dir = parseSlotDirection(String(slot.direction));
+      if (!dir) continue;
+      const isIn = dir === "inbound";
+      const anchorDate = isIn ? slot.end : slot.start;
+      const xAnchor = slotX(anchorDate);
+      const w = Math.max(2, (durationHours / 24) * pixelsPerDay);
+      const col = customerColor(slot.customerId);
+      const fill = rgbaFromHex(col, 0.35);
+      // Entitlement: starts at cargo size (t), decreases to 0 over cargo ÷ pipeline flow.
+      const yTop = invY(m, lo, hi);
+      const yZero = invY(0, lo, hi);
+      const points = `${xAnchor - w},${yTop} ${xAnchor},${yZero} ${xAnchor - w},${yZero}`;
+      out.push({
+        slotId: slot.id,
+        points,
+        fill,
+        title: `${cust.name} · time-shared · ${m.toLocaleString()} t → 0 over ${durationHours.toFixed(1)} h (= ${m}/${rate} t/h) · anchor ${isIn ? "slot end" : "slot start"}`
+      });
+    }
+    return out;
+  }, [
+    showTimeshared,
+    cfg.storageMode,
+    hasInventoryData,
+    ganttInvYAxis,
+    slots,
+    customerById,
+    slotX,
+    customerColor
+  ]);
 
   const handleInvChartMouseMove = useCallback(
     (e: React.MouseEvent) => {
@@ -869,6 +1184,181 @@ export default function GanttChart() {
 
   const dateRangeLabel = `${formatDDMMYYYY(new Date(cfg.startDate))} – ${formatDDMMYYYY(new Date(cfg.endDate))}`;
 
+  const legendEntries = useMemo((): LegendEntry[] => {
+    const entries: LegendEntry[] = [];
+    if (showInventory && hasInventoryData) {
+      for (const c of legendCustomers) {
+        if (!enabledCustomers.has(c.id)) continue;
+        entries.push({
+          id: `inv-${c.id}`,
+          label: `${c.name} · inventory`,
+          kind: "line",
+          color: customerColor(c.id)
+        });
+      }
+      entries.push({
+        id: "terminal-total",
+        label: "Terminal total",
+        kind: "dashed-line",
+        color: "#0f172a",
+        dashArray: "6 3"
+      });
+    }
+    if (showDoc && docYAxis) {
+      for (const c of legendCustomers) {
+        if (!enabledCustomers.has(c.id) || !docTrendByCustomer[c.id]) continue;
+        entries.push({
+          id: `doc-${c.id}`,
+          label: `${c.name} · days of cover`,
+          kind: "dashed-line",
+          color: customerColor(c.id),
+          dashArray: "8 4"
+        });
+      }
+    }
+    if (showPacing && pacingYAxis && selectedPacingOption) {
+      entries.push({
+        id: "pacing-leg",
+        label: `${selectedPacingOption.label} · pacing %`,
+        kind: "dashed-line",
+        color: customerColor(selectedPacingOption.customerId),
+        dashArray: "2 6"
+      });
+      entries.push({
+        id: "pacing-100",
+        label: "On pace (100%)",
+        kind: "dashed-line",
+        color: "#94a3b8",
+        dashArray: "4 4"
+      });
+    }
+    if (showRoundtrip && hasRoundtripConfig) {
+      entries.push({
+        id: "roundtrip",
+        label: "Round-trip duration",
+        kind: "rect",
+        color: "rgba(100,116,139,0.25)"
+      });
+    }
+    if (showTimeshared && hasTimeShareConfig) {
+      entries.push({
+        id: "timeshare",
+        label: "Time-share entitlement",
+        kind: "triangle",
+        color: "rgba(59,130,246,0.35)"
+      });
+    }
+    if (showStorageCapLine && hasStorageCapConfig) {
+      entries.push({
+        id: "storage-cap",
+        label: "Storage capacity",
+        kind: "dashed-line",
+        color: "#dc2626",
+        dashArray: "4 4"
+      });
+    }
+    if (inboundPipelineTph > 0) {
+      entries.push({ id: "pipe-in-flow", label: "Pipeline inbound · flowing", kind: "rect", color: "#d1d5db" });
+      entries.push({
+        id: "pipe-in-block",
+        label: "Pipeline inbound · interrupted (tank top)",
+        kind: "rect",
+        color: "#ef4444"
+      });
+    }
+    if (outboundPipelineTph > 0) {
+      entries.push({ id: "pipe-out-flow", label: "Pipeline outbound · flowing", kind: "rect", color: "#d1d5db" });
+      entries.push({
+        id: "pipe-out-block",
+        label: "Pipeline outbound · interrupted (tank bottom)",
+        kind: "rect",
+        color: "#ef4444"
+      });
+    }
+    if (constraintRowVisible) {
+      for (const def of SCHEDULING_CONSTRAINTS) {
+        if (!enabledConstraints.has(def.key)) continue;
+        if (!constraintData.activeConstraintKeys.includes(def.key)) continue;
+        entries.push({
+          id: def.key,
+          label: def.label,
+          kind: "constraint",
+          color: def.color,
+          icon: def.icon
+        });
+      }
+    }
+    return entries;
+  }, [
+    showInventory,
+    hasInventoryData,
+    legendCustomers,
+    enabledCustomers,
+    showDoc,
+    docYAxis,
+    docTrendByCustomer,
+    showPacing,
+    pacingYAxis,
+    selectedPacingOption,
+    showRoundtrip,
+    hasRoundtripConfig,
+    showTimeshared,
+    hasTimeShareConfig,
+    showStorageCapLine,
+    hasStorageCapConfig,
+    inboundPipelineTph,
+    outboundPipelineTph,
+    constraintRowVisible,
+    enabledConstraints,
+    constraintData.activeConstraintKeys,
+    customerColor
+  ]);
+
+  const renderPipelineRow = (
+    segments: PipelineSegment[],
+    hasFlow: boolean,
+    keyPrefix: string
+  ) => {
+    if (!hasFlow) return null;
+    return (
+      <div
+        style={{
+          height: PIPELINE_ROW_H,
+          position: "relative",
+          borderTop: "1px solid #e2e8f0",
+          background: "#ffffff"
+        }}
+      >
+        {monthMarkers.map((m) => (
+          <div
+            key={`${keyPrefix}-${m.key}`}
+            style={{ position: "absolute", left: m.x, top: 0, bottom: 0, borderLeft: "1px solid #f1f5f9" }}
+          />
+        ))}
+        {segments.length > 0 && (
+          <svg style={{ position: "absolute", top: 0, left: 0 }} width={contentWidth} height={PIPELINE_ROW_H}>
+            {segments.map((seg, i) => {
+              const x = (seg.startH / 24) * pixelsPerDay;
+              const w = Math.max(1, ((seg.endH - seg.startH) / 24) * pixelsPerDay);
+              const fill = seg.status === "flowing" ? "#d1d5db" : "#ef4444";
+              const label =
+                seg.status === "tank_top"
+                  ? "Tank top — pipeline blocked"
+                  : seg.status === "tank_bottom"
+                    ? "Tank bottom — pipeline blocked"
+                    : "Flowing";
+              return (
+                <rect key={i} x={x} y={8} width={w} height={12} fill={fill} fillOpacity={0.85} rx={2}>
+                  <title>{label}</title>
+                </rect>
+              );
+            })}
+          </svg>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div
       style={{
@@ -879,61 +1369,195 @@ export default function GanttChart() {
         overflow: "hidden"
       }}
     >
-      {/* Toolbar */}
-      <div style={{ marginBottom: 24, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+      <div className="dashboard-hero" style={{ marginBottom: 16 }}>
+        <div>
+          <div className="dashboard-hero-title">Simulation window</div>
+          <div className="dashboard-hero-meta">
+            <strong style={{ color: "#e2e8f0", fontSize: 15 }}>{dateRangeLabel}</strong>
+            <span style={{ marginLeft: 8 }}>· {Math.round(periodHoursSafe).toLocaleString()} h</span>
+          </div>
+        </div>
+        <div className="dashboard-hero-actions">
+          <span className="chart-hour-zoom-hint" style={{ color: "#94a3b8" }}>
+            Scroll wheel to zoom (cursor-centered)
+          </span>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <button className="btn btn-primary" disabled={isRunning} onClick={handleRunScheduler}>
           {isRunning ? (
             <>
-              <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⏳</span>
+              <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
               Scheduling...
             </>
           ) : (
             <>
-              <span>⚡</span>
+              <Zap size={16} strokeWidth={2} />
               Run Scheduler
             </>
           )}
         </button>
         <button
           type="button"
-          className="btn btn-secondary"
+          className="btn btn-secondary chart-hour-zoom-btn"
           onClick={() => setPixelsPerDay((p) => Math.min(p * 1.2, MAX_PIXELS_PER_DAY))}
         >
           ＋
         </button>
         <button
           type="button"
-          className="btn btn-secondary"
+          className="btn btn-secondary chart-hour-zoom-btn"
           onClick={() => setPixelsPerDay((p) => Math.max(p / 1.2, MIN_PIXELS_PER_DAY))}
         >
           －
         </button>
-        <button
-          type="button"
-          className={`btn ${showRoundtrip ? "btn-primary" : "btn-secondary"}`}
-          onClick={() => setShowRoundtrip((v) => !v)}
-          title="Show roundtrip duration as colored bars under each berth row (timeline scale)"
-        >
-          RT
-        </button>
-        <button
-          type="button"
-          className={`btn ${showTimeshared ? "btn-primary" : "btn-secondary"}`}
-          onClick={() => setShowTimeshared((v) => !v)}
-          title="Time-shared storage: show entitlement triangles (x, y) under each berth when mode is time-shared"
-        >
-          TS
-        </button>
-        <button
-          type="button"
-          className={`btn ${showStorageCapLine ? "btn-primary" : "btn-secondary"}`}
-          onClick={() => setShowStorageCapLine((v) => !v)}
-          title="Show terminal storage capacity as a horizontal red reference line on the inventory chart"
-        >
-          Cap
-        </button>
-        <span style={{ fontSize: 12, color: "#94a3b8" }}>Scroll wheel to zoom (cursor-centered)</span>
-        <span style={{ fontSize: 13, color: "#64748b" }}>{dateRangeLabel}</span>
+      </div>
+
+      <div className="multi-metric-toolbar" style={{ marginBottom: 16 }}>
+        <div className="multi-metric-toolbar-group">
+          <span className="multi-metric-toolbar-label">Layers</span>
+          <div className="multi-metric-toggles">
+            {hasRun && (
+              <button
+                type="button"
+                className={`metric-toggle${showInventory ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowInventory((v) => !v)}
+              >
+                Inventory
+              </button>
+            )}
+            {hasRoundtripConfig && (
+              <button
+                type="button"
+                className={`metric-toggle${showRoundtrip ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowRoundtrip((v) => !v)}
+              >
+                Round-trip
+              </button>
+            )}
+            {hasTimeShareConfig && (
+              <button
+                type="button"
+                className={`metric-toggle${showTimeshared ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowTimeshared((v) => !v)}
+              >
+                Time-share
+              </button>
+            )}
+            {hasStorageCapConfig && (
+              <button
+                type="button"
+                className={`metric-toggle${showStorageCapLine ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowStorageCapLine((v) => !v)}
+              >
+                Storage cap
+              </button>
+            )}
+            {hasDocConfig && (
+              <button
+                type="button"
+                className={`metric-toggle${showDoc ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowDoc((v) => !v)}
+              >
+                Days of cover
+              </button>
+            )}
+            {hasPacingConfig && (
+              <button
+                type="button"
+                className={`metric-toggle${showPacing ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowPacing((v) => !v)}
+              >
+                Pacing %
+              </button>
+            )}
+            {hasConstraintData && (
+              <button
+                type="button"
+                className={`metric-toggle${showConstraints ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowConstraints((v) => !v)}
+              >
+                Constraints
+              </button>
+            )}
+          </div>
+        </div>
+        {hasConstraintData && showConstraints && (
+          <div className="multi-metric-toolbar-group">
+            <span className="multi-metric-toolbar-label">Constraints</span>
+            <div className="multi-metric-toggles">
+              {SCHEDULING_CONSTRAINTS.map((def) => {
+                const total =
+                  constraintData.summaries.find((s) => s.key === def.key)?.legHours ?? 0;
+                const inactive = total === 0;
+                const on = enabledConstraints.has(def.key);
+                return (
+                  <button
+                    key={def.key}
+                    type="button"
+                    disabled={inactive}
+                    className={`constraint-toggle-chip${on ? " constraint-toggle-chip--on" : ""}${
+                      inactive ? " constraint-toggle-chip--inactive" : ""
+                    }`}
+                    style={
+                      on && !inactive
+                        ? ({ "--chip-color": def.color } as CSSProperties)
+                        : undefined
+                    }
+                    onClick={() => !inactive && toggleConstraint(def.key)}
+                  >
+                    <span className="constraint-toggle-chip-icon">
+                      <ConstraintIcon constraintKey={def.key} size={13} />
+                    </span>
+                    {def.label}
+                    <span className="constraint-toggle-chip-count">{total}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {customers.length > 0 && (
+          <div className="multi-metric-toolbar-group">
+            <span className="multi-metric-toolbar-label">Customers</span>
+            <div className="multi-metric-toggles">
+              {customers.map((c, i) => {
+                const on = enabledCustomers.has(c.id);
+                const color = resolveCustomerChartColor(c.chartColor, i);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className={`customer-toggle-chip${on ? " customer-toggle-chip--on" : ""}`}
+                    style={on ? ({ "--chip-color": color } as CSSProperties) : undefined}
+                    onClick={() => toggleCustomer(c.id)}
+                  >
+                    <span className="customer-toggle-chip-dot" style={{ background: color }} />
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {showPacing && hasPacingConfig && (
+          <div className="multi-metric-toolbar-group">
+            <span className="multi-metric-toolbar-label">Pacing leg</span>
+            <select
+              className="form-input"
+              style={{ maxWidth: 320, fontSize: 13 }}
+              value={selectedPacingLeg ?? ""}
+              onChange={(e) => setSelectedPacingLeg(e.target.value || null)}
+            >
+              {pacingLegOptions.map((opt) => (
+                <option key={opt.key} value={opt.key}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {/* Main chart area */}
@@ -959,39 +1583,63 @@ export default function GanttChart() {
           }}
         >
         {/* Fixed left labels */}
-        <div style={{ width: LABEL_WIDTH, flexShrink: 0, borderRight: "1px solid #e2e8f0", zIndex: 2, background: "#f8fafc" }}>
+        <div style={{ width: labelColumnWidth, flexShrink: 0, borderRight: "1px solid #e2e8f0", zIndex: 2, background: "#f8fafc" }}>
           <div style={{ height: HEADER_HEIGHT, borderBottom: "1px solid #e2e8f0", background: "#f8fafc" }} />
           {hasRun && resourceRows.map((r) => (
             <div
               key={r.id}
+              className="timeline-row-label"
               style={{
                 height: ganttRowHeight(r),
                 display: "flex",
                 alignItems: "center",
                 padding: "0 16px",
-                borderBottom: "1px solid #f1f5f9",
-                fontSize: 14,
-                fontWeight: 500
+                borderBottom: "1px solid #f1f5f9"
               }}
             >
               {r.name}
             </div>
           ))}
-          {hasRun && (
+          {constraintRowVisible && (
             <div
+              className="timeline-row-label"
+              style={{
+                height: CONSTRAINT_ROW_H,
+                display: "flex",
+                alignItems: "center",
+                padding: "0 16px",
+                borderTop: "1px solid #e2e8f0"
+              }}
+            >
+              Constraints
+            </div>
+          )}
+          {hasRun && inboundPipelineTph > 0 && (
+            <div
+              className="timeline-row-label"
               style={{
                 height: PIPELINE_ROW_H,
                 display: "flex",
                 alignItems: "center",
                 padding: "0 16px",
-                fontSize: 11,
-                color: "#64748b",
-                fontWeight: 600,
-                letterSpacing: "0.04em",
                 borderTop: "1px solid #e2e8f0"
               }}
             >
-              PIPELINE
+              Pipeline inbound
+            </div>
+          )}
+          {hasRun && outboundPipelineTph > 0 && (
+            <div
+              className="timeline-row-label"
+              style={{
+                height: PIPELINE_ROW_H,
+                display: "flex",
+                alignItems: "center",
+                padding: "0 16px",
+                borderTop: outboundPipelineTph > 0 && inboundPipelineTph === 0 ? "1px solid #e2e8f0" : undefined
+              }}
+            >
+              Pipeline outbound
             </div>
           )}
           {hasRun && (
@@ -1007,21 +1655,19 @@ export default function GanttChart() {
               }}
             >
               <div
+                className="timeline-row-label"
                 style={{
                   flex: 1,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   textAlign: "center",
-                  fontSize: 12,
-                  color: "#64748b",
-                  fontWeight: 600,
                   minWidth: 0,
                   lineHeight: 1.2,
                   padding: "0 4px"
                 }}
               >
-                INVENTORY (T)
+                Inventory
               </div>
               <div
                 style={{
@@ -1040,25 +1686,80 @@ export default function GanttChart() {
                   buildInventoryAxisTicks(ganttInvYAxis.lo, ganttInvYAxis.hi).map((v) => (
                     <span
                       key={String(v)}
+                      className="timeline-axis-tick"
                       style={{
                         position: "absolute",
                         left: 2,
                         right: 4,
                         top: invY(v, ganttInvYAxis.lo, ganttInvYAxis.hi),
-                        transform: "translateY(-50%)",
-                        fontSize: 10,
-                        color: "#475569",
-                        lineHeight: 1.1,
-                        textAlign: "right",
-                        whiteSpace: "nowrap",
-                        textShadow:
-                          "1px 0 0 #f8fafc, -1px 0 0 #f8fafc, 0 1px 0 #f8fafc, 0 -1px 0 #f8fafc, 1px 1px 0 #f8fafc, -1px -1px 0 #f8fafc, 1px -1px 0 #f8fafc, -1px 1px 0 #f8fafc"
+                        transform: "translateY(-50%)"
                       }}
                     >
                       {Math.round(v).toLocaleString()}
                     </span>
                   ))}
               </div>
+              {showDoc && docYAxis && (
+                <div
+                  className="timeline-overlay-axis"
+                  style={{
+                    position: "relative",
+                    width: OVERLAY_AXIS_WIDTH,
+                    flexShrink: 0,
+                    height: CHART_HEIGHT,
+                    pointerEvents: "none",
+                    borderRight: "1px solid #e2e8f0",
+                    boxSizing: "border-box",
+                    paddingRight: 4
+                  }}
+                >
+                  {buildInventoryAxisTicks(docYAxis.lo, docYAxis.hi).map((v) => (
+                    <span
+                      key={`doc-${v}`}
+                      className="timeline-axis-tick timeline-axis-tick--doc"
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 4,
+                        top: overlayY(v, docYAxis.lo, docYAxis.hi),
+                        transform: "translateY(-50%)"
+                      }}
+                    >
+                      {v >= 10 ? v.toFixed(0) : v.toFixed(1)}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {showPacing && pacingYAxis && (
+                <div
+                  className="timeline-overlay-axis"
+                  style={{
+                    position: "relative",
+                    width: OVERLAY_AXIS_WIDTH,
+                    flexShrink: 0,
+                    height: CHART_HEIGHT,
+                    pointerEvents: "none",
+                    boxSizing: "border-box",
+                    paddingRight: 4
+                  }}
+                >
+                  {buildInventoryAxisTicks(pacingYAxis.lo, pacingYAxis.hi).map((v) => (
+                    <span
+                      key={`pace-${v}`}
+                      className="timeline-axis-tick timeline-axis-tick--pace"
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 4,
+                        top: overlayY(v, pacingYAxis.lo, pacingYAxis.hi),
+                        transform: "translateY(-50%)"
+                      }}
+                    >
+                      {Math.round(v)}%
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1070,14 +1771,15 @@ export default function GanttChart() {
           onScroll={handleScroll}
           className="gantt-scroll-area"
           style={{
-            overflowX: "scroll",
+            overflowX: "auto",
             overflowY: "hidden",
             flex: 1,
             minWidth: 0,
-            userSelect: "none"
+            userSelect: "none",
+            background: "#f8fafc"
           }}
         >
-          <div style={{ width: Math.max(contentWidth, 400), position: "relative", minWidth: "100%" }}>
+          <div style={{ width: contentWidth, position: "relative" }}>
             {/* Month header row */}
             <div
               style={{
@@ -1123,7 +1825,7 @@ export default function GanttChart() {
                   gap: 8
                 }}
               >
-                <span style={{ fontSize: 28 }}>⚡</span>
+                <Zap size={28} strokeWidth={1.5} color="#94a3b8" />
                 <span>Run the scheduler to see results</span>
               </div>
             )}
@@ -1132,12 +1834,11 @@ export default function GanttChart() {
             {hasRun && resourceRows.map((r, ri) => {
               const rowH = ganttRowHeight(r);
               const rtExtra = r.type?.startsWith("berth") ? berthLegendExtraHeight(r.id) : 0;
-              const tsEx = r.type?.startsWith("berth") ? tsExtraHeightForBerth(r.id) : 0;
-              const bottomExtras = rtExtra + tsEx;
               const slotBandH =
-                bottomExtras > 0
-                  ? Math.max(26, rowH - bottomExtras - 10)
-                  : Math.max(32, ROW_HEIGHT - 8);
+                rtExtra > 0
+                  ? Math.max(SLOT_BAND_MIN_H_RT, Math.floor((rowH - rtExtra - 6) / 2))
+                  : Math.max(SLOT_BAND_MIN_H, Math.floor((ROW_HEIGHT - 6) / 2));
+              const slotTop = Math.max(2, (rowH - rtExtra - slotBandH) / 2);
               const rtLegend = berthRoundtripLegendsByResource.get(r.id) ?? [];
               return (
                 <div
@@ -1175,87 +1876,33 @@ export default function GanttChart() {
                           position: "absolute",
                           left: slotX(slot.start),
                           width: slotWidth(slot.start, slot.end),
-                          top: 4,
+                          top: slotTop,
                           height: slotBandH,
-                          background: col,
+                          background: rgbaFromHex(col, 0.2),
+                          border: `1px solid ${rgbaFromHex(col, 0.45)}`,
                           borderRadius: 6,
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "center",
-                          fontSize: 12,
+                          fontSize: 10,
                           fontWeight: 600,
-                          color: "white",
+                          color: "#0f172a",
                           overflow: "hidden",
                           cursor: "pointer",
-                          zIndex: 1,
-                          boxShadow: "0 1px 3px rgba(0,0,0,0.2)"
+                          zIndex: 1
                         }}
                       >
                         {slotLabel(slot)}
                       </div>
                     );
                   })}
-                  {/* Time-shared triangles (bottom strip) */}
-                  {showTimeshared &&
-                    (cfg.storageMode ?? "fixed_band") === "time_shared_storage" &&
-                    tsEx > 0 && (
-                      <svg
-                        style={{
-                          position: "absolute",
-                          left: 0,
-                          bottom: 0,
-                          pointerEvents: "none",
-                          zIndex: 0
-                        }}
-                        width={contentWidth}
-                        height={tsEx}
-                      >
-                        {slotsForResource(r.id).map((slot) => {
-                          const cust = customerById.get(slot.customerId);
-                          const yHours = Math.max(0.01, cust?.timeSharedDuration ?? 24);
-                          const xBand = cust?.timeSharedMinBand ?? 0;
-                          const m = slot.volume;
-                          if (m <= 0) return null;
-                          const w = Math.max(2, (yHours / 24) * pixelsPerDay);
-                          const x0 = slotX(slot.start);
-                          const yTop = 2;
-                          const yBot = TS_LAYER_H - 1;
-                          const Htri = yBot - yTop;
-                          const volToY = (v: number) =>
-                            yBot - ((v - xBand) / m) * Htri;
-                          const dir = parseSlotDirection(String(slot.direction));
-                          const isIn = dir === "inbound";
-                          const col = customerColor(slot.customerId);
-                          const fill =
-                            col.startsWith("#") && col.length === 7
-                              ? `rgba(${parseInt(col.slice(1, 3), 16)},${parseInt(col.slice(3, 5), 16)},${parseInt(col.slice(5, 7), 16)},0.35)`
-                              : "rgba(100,116,139,0.35)";
-                          const yLo = volToY(xBand);
-                          const yHi = volToY(m + xBand);
-                          const ptsFix = isIn
-                            ? `${x0},${yLo} ${x0},${yHi} ${x0 + w},${yLo}`
-                            : `${x0},${yLo} ${x0 + w},${yLo} ${x0 + w},${yHi}`;
-                          return (
-                            <polygon
-                              key={`${slot.id}-ts`}
-                              points={ptsFix}
-                              fill={fill}
-                              stroke="rgba(15,23,42,0.2)"
-                              strokeWidth={0.5}
-                            >
-                              <title>{`${cust?.name ?? slot.customerId} · time-shared · x=${xBand} t, y=${yHours} h, MEPS=${m} t`}</title>
-                            </polygon>
-                          );
-                        })}
-                      </svg>
-                    )}
                   {showRoundtrip && rtLegend.length > 0 && (
                     <div
                       style={{
                         position: "absolute",
                         left: 0,
                         right: 0,
-                        bottom: tsEx,
+                        bottom: 0,
                         height: rtExtra,
                         paddingTop: RT_LEGEND_PAD_TOP,
                         paddingBottom: RT_LEGEND_PAD_BOTTOM,
@@ -1267,6 +1914,7 @@ export default function GanttChart() {
                         const nm = customerById.get(e.customerId)?.name ?? e.customerId;
                         const w = Math.max(3, (e.hours / 24) * pixelsPerDay);
                         const leftPx = slotX(new Date(e.anchorStartMs));
+                        const rtCol = customerColor(e.customerId);
                         return (
                           <div
                             key={`${e.slotId}-rt`}
@@ -1277,9 +1925,9 @@ export default function GanttChart() {
                               top: RT_LEGEND_PAD_TOP + e.lane * (RT_LEGEND_LINE_H + RT_LEGEND_GAP),
                               width: w,
                               height: RT_LEGEND_LINE_H,
-                              background: customerColor(e.customerId),
-                              borderRadius: 3,
-                              boxShadow: "inset 0 0 0 1px rgba(15,23,42,0.12)"
+                              background: rgbaFromHex(rtCol, 0.2),
+                              border: `1px solid ${rgbaFromHex(rtCol, 0.45)}`,
+                              borderRadius: 3
                             }}
                           />
                         );
@@ -1291,47 +1939,65 @@ export default function GanttChart() {
             })}
 
             {hasRun && <>
-            {/* Pipeline status row */}
-            <div
-              style={{
-                height: PIPELINE_ROW_H,
-                position: "relative",
-                borderTop: "1px solid #e2e8f0",
-                background: "#ffffff"
-              }}
-            >
-              {monthMarkers.map((m) => (
-                <div key={`pipe-${m.key}`} style={{ position: "absolute", left: m.x, top: 0, bottom: 0, borderLeft: "1px solid #f1f5f9" }} />
-              ))}
-              {hasPipeline && pipelineSegments.length > 0 && (
-                <svg style={{ position: "absolute", top: 0, left: 0 }} width={contentWidth} height={PIPELINE_ROW_H}>
-                  {pipelineSegments.map((seg, i) => {
-                    const x = (seg.startH / 24) * pixelsPerDay;
-                    const w = Math.max(1, ((seg.endH - seg.startH) / 24) * pixelsPerDay);
-                    const fill = seg.status === "flowing" ? "#d1d5db" : "#ef4444";
-                    const label = seg.status === "tank_top" ? "Tank top — pipeline blocked" : seg.status === "tank_bottom" ? "Tank bottom — pipeline blocked" : "Flowing";
-                    return (
-                      <rect
-                        key={i}
-                        x={x}
-                        y={8}
-                        width={w}
-                        height={12}
-                        fill={fill}
-                        rx={2}
-                      >
-                        <title>{label}</title>
-                      </rect>
-                    );
+            {constraintRowVisible && (
+              <div
+                style={{
+                  height: CONSTRAINT_ROW_H,
+                  position: "relative",
+                  borderTop: "1px solid #e2e8f0",
+                  background: "#ffffff"
+                }}
+              >
+                {monthMarkers.map((m) => (
+                  <div
+                    key={`con-${m.key}`}
+                    style={{ position: "absolute", left: m.x, top: 0, bottom: 0, borderLeft: "1px solid #f1f5f9" }}
+                  />
+                ))}
+                <svg
+                  style={{ position: "absolute", top: 0, left: 0 }}
+                  width={contentWidth}
+                  height={CONSTRAINT_ROW_H}
+                >
+                  {constraintData.rows.flatMap((row) => {
+                    const colW = Math.max(2, pixelsPerDay / 24);
+                    const x = (row.hour / 24) * pixelsPerDay;
+                    const padY = 8;
+                    const maxH = CONSTRAINT_ROW_H - padY * 2;
+                    const maxCount = Math.max(1, constraintData.maxCountPerHour);
+                    let stackTop = CONSTRAINT_ROW_H - padY;
+                    const rects: React.ReactElement[] = [];
+                    for (const def of SCHEDULING_CONSTRAINTS) {
+                      if (!enabledConstraints.has(def.key)) continue;
+                      const n = row.counts[def.key] ?? 0;
+                      if (n <= 0) continue;
+                      const h = Math.max(4, (n / maxCount) * maxH);
+                      stackTop -= h;
+                      rects.push(
+                        <rect
+                          key={`${row.hour}-${def.key}`}
+                          x={x}
+                          y={stackTop}
+                          width={colW}
+                          height={h}
+                          fill={def.color}
+                          fillOpacity={0.75}
+                          rx={2}
+                        >
+                          <title>
+                            {def.label}: {n} leg{n !== 1 ? "s" : ""} blocked at hour {row.hour}
+                          </title>
+                        </rect>
+                      );
+                    }
+                    return rects;
                   })}
                 </svg>
-              )}
-              {!hasPipeline && (
-                <div style={{ display: "flex", alignItems: "center", height: "100%", paddingLeft: 8, fontSize: 11, color: "#cbd5e1" }}>
-                  No pipeline configured
-                </div>
-              )}
-            </div>
+              </div>
+            )}
+
+            {renderPipelineRow(inboundPipelineSegments, inboundPipelineTph > 0, "pipe-in")}
+            {renderPipelineRow(outboundPipelineSegments, outboundPipelineTph > 0, "pipe-out")}
 
             {/* Inventory chart area - SVG with same coordinate system */}
             <div
@@ -1382,24 +2048,27 @@ export default function GanttChart() {
                           x2={contentWidth}
                           y1={yZero}
                           y2={yZero}
-                          stroke="#cbd5e1"
-                          strokeWidth={2.25}
+                          stroke="#94a3b8"
+                          strokeWidth={1}
                         />
                       )}
                     </>
                   );
                 })()}
-                {hasInventoryData &&
-                  Object.keys(timelineData!.timeline).map((cid) => (
-                    <polyline
-                      key={cid}
-                      points={inventoryPoints(cid)}
-                      fill="none"
-                      stroke={customerColor(cid)}
-                      strokeWidth={2}
-                    />
-                  ))}
-                {hasInventoryData && (
+                {showInventory &&
+                  hasInventoryData &&
+                  Object.keys(timelineData!.timeline)
+                    .filter((cid) => enabledCustomers.has(cid))
+                    .map((cid) => (
+                      <polyline
+                        key={cid}
+                        points={inventoryPoints(cid)}
+                        fill="none"
+                        stroke={customerColor(cid)}
+                        strokeWidth={2.5}
+                      />
+                    ))}
+                {showInventory && hasInventoryData && (
                   <polyline
                     points={terminalTotalPoints()}
                     fill="none"
@@ -1408,6 +2077,56 @@ export default function GanttChart() {
                     strokeDasharray="6 3"
                   />
                 )}
+                {showDoc &&
+                  docYAxis &&
+                  Object.keys(docTrendByCustomer)
+                    .filter((cid) => enabledCustomers.has(cid))
+                    .map((cid) => {
+                      const pts = docOverlayPoints(cid);
+                      if (!pts) return null;
+                      return (
+                        <polyline
+                          key={`doc-${cid}`}
+                          points={pts}
+                          fill="none"
+                          stroke={customerColor(cid)}
+                          strokeWidth={2}
+                          strokeDasharray="8 4"
+                          strokeOpacity={0.9}
+                        />
+                      );
+                    })}
+                {showPacing && pacingYAxis && selectedPacingOption && (
+                  <>
+                    <line
+                      x1={0}
+                      x2={contentWidth}
+                      y1={overlayY(100, pacingYAxis.lo, pacingYAxis.hi)}
+                      y2={overlayY(100, pacingYAxis.lo, pacingYAxis.hi)}
+                      stroke="#94a3b8"
+                      strokeWidth={1}
+                      strokeDasharray="4 4"
+                    />
+                    <polyline
+                      points={pacingOverlayPoints()}
+                      fill="none"
+                      stroke={customerColor(selectedPacingOption.customerId)}
+                      strokeWidth={2}
+                      strokeDasharray="2 6"
+                    />
+                  </>
+                )}
+                {timeSharedOverlayTriangles.map((tri) => (
+                  <polygon
+                    key={`ts-${tri.slotId}`}
+                    points={tri.points}
+                    fill={tri.fill}
+                    stroke="rgba(15,23,42,0.25)"
+                    strokeWidth={0.75}
+                  >
+                    <title>{tri.title}</title>
+                  </polygon>
+                ))}
                 {showStorageCapLine && hasInventoryData && terminalStorageCap > 0 && (
                   <line
                     x1={0}
@@ -1415,9 +2134,8 @@ export default function GanttChart() {
                     y1={invY(terminalStorageCap, ganttInvYAxis.lo, ganttInvYAxis.hi)}
                     y2={invY(terminalStorageCap, ganttInvYAxis.lo, ganttInvYAxis.hi)}
                     stroke="#dc2626"
-                    strokeWidth={2}
-                    strokeOpacity={0.95}
-                    strokeDasharray="8 6"
+                    strokeWidth={1}
+                    strokeDasharray="4 4"
                     strokeLinecap="butt"
                   >
                     <title>
@@ -1437,8 +2155,8 @@ export default function GanttChart() {
           <div
             style={{
               marginTop: 8,
-              marginLeft: LABEL_WIDTH,
-              width: `calc(100% - ${LABEL_WIDTH}px)`,
+              marginLeft: labelColumnWidth,
+              width: `calc(100% - ${labelColumnWidth}px)`,
               boxSizing: "border-box",
               position: "relative",
               height: 32,
@@ -1508,54 +2226,7 @@ export default function GanttChart() {
         </div>
       )}
 
-      {/* Legend */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginTop: 12 }}>
-        {legendCustomers.map((c) => (
-          <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <div style={{ width: 12, height: 12, borderRadius: 3, background: customerColor(c.id) }} />
-            {c.name}
-          </div>
-        ))}
-        {hasInventoryData && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <div style={{ width: 20, height: 2, background: "transparent", borderTop: "2px dashed #0f172a" }} />
-            Terminal Total
-          </div>
-        )}
-        {hasPipeline && (
-          <>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-              <div style={{ width: 20, height: 8, background: "#d1d5db", borderRadius: 2 }} />
-              Pipeline flowing
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-              <div style={{ width: 20, height: 8, background: "#ef4444", borderRadius: 2 }} />
-              Pipeline interrupted (tank {(cfg.pipelineDirection ?? "inbound") === "inbound" ? "top" : "bottom"})
-            </div>
-          </>
-        )}
-        {showTimeshared && (cfg.storageMode ?? "fixed_band") === "time_shared_storage" && (
-          <>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-              <svg width={22} height={12} aria-hidden style={{ flexShrink: 0 }}>
-                <polygon
-                  points="2,10 2,2 20,10"
-                  fill="rgba(59,130,246,0.35)"
-                  stroke="rgba(15,23,42,0.25)"
-                  strokeWidth={0.5}
-                />
-              </svg>
-              TS min band (x, tonnes)
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-              <svg width={22} height={12} aria-hidden style={{ flexShrink: 0 }}>
-                <rect x={2} y={8} width={16} height={2} fill="#94a3b8" />
-              </svg>
-              TS duration (y, hours) → triangle width on timeline
-            </div>
-          </>
-        )}
-      </div>
+      <TimelineChartLegend entries={legendEntries} />
 
       {invChartTooltip && hasInventoryData && timelineData?.timeline && (
         <div

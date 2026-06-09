@@ -77,8 +77,8 @@ interface InventorySummaryRow {
 
 interface ThroughputCoverageRow {
   customerName: string;
-  expectedOutbound: number;
-  scheduledOutbound: number;
+  expectedInbound: number;
+  scheduledInbound: number;
   passes: boolean;
   targetInboundSlots: number;
   targetOutboundSlots: number;
@@ -193,8 +193,8 @@ export function buildAnalyticsAiSummary(input: {
       inventoryDeltaT: inv?.inventoryDelta ?? 0,
       pipelineFlowPerHourT: c.pipelineFlowPerHour ?? 0,
       storageSharePct: c.storageShare ?? 0,
-      throughputTargetT: tp?.expectedOutbound ?? 0,
-      throughputScheduledT: tp?.scheduledOutbound ?? 0,
+      throughputTargetT: tp?.expectedInbound ?? 0,
+      throughputScheduledT: tp?.scheduledInbound ?? 0,
       throughputPasses: tp?.passes ?? true,
       inboundSlotsScheduled: tp?.scheduledInboundSlots ?? 0,
       inboundSlotsTarget: tp?.targetInboundSlots ?? 0,

@@ -26,6 +26,12 @@ import {
   firstHourOverlappingCargo
 } from "./slotLaytime";
 import {
+  customerPipelineLogFlowPerHour,
+  customerPipelineNetDeltaPerHour,
+  totalInboundPipelineTph,
+  totalOutboundPipelineTph
+} from "./pipelineFlows";
+import {
   inboundTargetSlotsByLane,
   outboundTargetSlotsByLane
 } from "./customerLegTargets";
@@ -204,9 +210,7 @@ function applyPipelineFixedBand(
     return applySharedInventoryPipelineHour(invById, customers, config);
   }
   for (const c of customers) {
-    const pipelineRatePerHour = c.pipelineFlowPerHour ?? 0;
-    const pipelineSign = config.pipelineDirection === "inbound" ? 1 : -1;
-    invById[c.id] = (invById[c.id] ?? 0) + pipelineSign * pipelineRatePerHour;
+    invById[c.id] = (invById[c.id] ?? 0) + customerPipelineNetDeltaPerHour(c, config);
   }
   return undefined;
 }
@@ -247,9 +251,9 @@ function applyPipelineCommingled(
 ): void {
   if (h <= 0) return;
   const cap = config.totalStorageCapacity ?? 100000;
-  const sign = config.pipelineDirection === "inbound" ? 1 : -1;
-  const totalPipelineRate = customers.reduce((s, c) => s + (c.pipelineFlowPerHour ?? 0), 0);
-  terminalRef.t += sign * totalPipelineRate;
+  const inboundTotal = totalInboundPipelineTph(customers, config);
+  const outboundTotal = totalOutboundPipelineTph(customers, config);
+  terminalRef.t += inboundTotal - outboundTotal;
   terminalRef.t = Math.max(0, Math.min(cap, terminalRef.t));
 }
 
@@ -276,8 +280,7 @@ function applySlotFlowsCommingled(
 function pipelineFlowRecord(customers: Customer[], config: SimulationConfig): Record<string, number> {
   const out: Record<string, number> = {};
   for (const c of customers) {
-    const rate = c.pipelineFlowPerHour ?? 0;
-    out[c.id] = config.pipelineDirection === "inbound" ? rate : -rate;
+    out[c.id] = customerPipelineLogFlowPerHour(c, config);
   }
   return out;
 }

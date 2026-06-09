@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import type { Customer, ScheduledSlot, SimulationConfig } from "../types";
 import type { SimulationLogRow } from "./simulationLog";
 import { laytimeFromConfig, getCargoWindowMs, hourOverlapsIntervalMs } from "./slotLaytime";
+import { totalInboundPipelineTph, totalOutboundPipelineTph } from "./pipelineFlows";
 
 const MODES = ["ship", "barge", "train"] as const;
 
@@ -90,8 +91,8 @@ export function buildSimulationWorkbook(
 ): XLSX.WorkBook {
   const cust = sortedCustomers(customers);
   const sharedShipping = config.storageMode === "shared_shipping";
-  const totalNominalPipelineRate = cust.reduce((s, c) => s + (c.pipelineFlowPerHour ?? 0), 0);
-  const pipeDir = config.pipelineDirection ?? "inbound";
+  const inboundPipelineTotal = totalInboundPipelineTph(cust, config);
+  const outboundPipelineTotal = totalOutboundPipelineTph(cust, config);
   const maxHour = log.length ? Math.max(...log.map((r) => r.hour)) : 0;
   const berthByHour = computeHourlyBerthTonnesByBucket(slots, config, maxHour);
 
@@ -115,14 +116,12 @@ export function buildSimulationWorkbook(
       {
         key: "Terminal_pipeline_in_t_h",
         kind: "sum",
-        get: (r) =>
-          r.hour <= 0 ? 0 : pipeDir === "inbound" ? totalNominalPipelineRate : 0
+        get: (r) => (r.hour <= 0 ? 0 : inboundPipelineTotal)
       },
       {
         key: "Terminal_pipeline_out_t_h",
         kind: "sum",
-        get: (r) =>
-          r.hour <= 0 ? 0 : pipeDir === "outbound" ? totalNominalPipelineRate : 0
+        get: (r) => (r.hour <= 0 ? 0 : outboundPipelineTotal)
       }
     );
   }

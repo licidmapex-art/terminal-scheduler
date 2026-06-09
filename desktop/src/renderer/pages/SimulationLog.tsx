@@ -12,6 +12,14 @@ import { flushSync } from "react-dom";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useStore } from "../store";
 import type { SimulationLogRow, TransportModeStatus } from "../../engine/simulationLog";
+import {
+  SCHEDULING_CONSTRAINTS,
+  constraintDef,
+  type BlockingConstraintKey
+} from "../lib/schedulingConstraints";
+import TransportStatusIcon, { WorstConstraintIcon } from "../components/TransportStatusIcon";
+import { ConstraintIcon, UncategorisedConstraintIcon } from "../components/ConstraintIcon";
+import { CheckCircle2, ClipboardList } from "lucide-react";
 
 interface Customer {
   id: string;
@@ -30,6 +38,8 @@ type LegColumn = DirectionMode & {
 
 type ViewMode = "events" | "daily" | "all";
 
+type ConstraintFilterKey = BlockingConstraintKey | "uncategorised";
+
 const VISIBLE_ROWS = 150;
 const ROW_HEIGHT = 48;
 
@@ -44,20 +54,25 @@ function modeKey(m: DirectionMode): string {
   return `${m.direction ?? ""}:${m.mode ?? ""}`;
 }
 
-function statusIcon(status: TransportModeStatus | undefined): string {
-  if (!status) return "—";
-  if (status.action === "loaded") return "✅";
-  if (status.action === "loading_in_progress") return "🔄";
-  if (status.action === "pre_ops") return "⏳";
-  if (status.action === "post_ops") return "🏁";
-  if (status.blockingConstraint === "roundtrip") return "⚓";
-  if (status.blockingConstraint === "resource_occupied") return "🚧";
-  if (status.blockingConstraint === "pace_ahead") return "⏸";
-  if (status.blockingConstraint === "optimizer_days_of_cover") return "🧠";
-  if (status.blockingConstraint === "insufficient_inventory") return "📉";
-  if (status.blockingConstraint === "customer_inventory_floor") return "⛔";
-  if (status.blockingConstraint === "tank_full") return "📈";
-  return "○";
+function getTooltip(status: TransportModeStatus | undefined): string {
+  if (!status) return "No status row for this leg in this hour.";
+  if (status.action === "loaded")
+    return `Loaded ${status.volume?.toLocaleString() ?? "?"}t on ${status.resourceName ?? "resource"}`;
+  if (status.action === "loading_in_progress")
+    return `Loading in progress on ${status.resourceName ?? "resource"}`;
+  if (status.action === "pre_ops")
+    return `Pre-ops alongside ${status.resourceName ?? "resource"} (${status.constraintDetail ?? "pre-cargo"})`;
+  if (status.action === "post_ops")
+    return `Post-ops alongside ${status.resourceName ?? "resource"} (${status.constraintDetail ?? "post-cargo"})`;
+  if (status.blockingConstraint) {
+    const label = constraintDef(status.blockingConstraint).label;
+    const detail = status.constraintDetail?.trim();
+    return detail ? `${label}: ${detail}` : label;
+  }
+  return (
+    `Idle — all constraints pass but no slot scheduled this hour. ` +
+    `Inventory: ${status.constraintDetail ?? "unknown"}`
+  );
 }
 
 function findTransportStatusForLeg(
@@ -75,36 +90,6 @@ function findTransportStatusForLeg(
       String(s.direction).toLowerCase() === d &&
       String(s.mode).toLowerCase() === mo &&
       (legKey == null || (s.legKey ?? "lane0") === legKey)
-  );
-}
-
-function getTooltip(status: TransportModeStatus | undefined): string {
-  if (!status) return "No status row for this leg in this hour.";
-  if (status.action === "loaded")
-    return `✅ Loaded ${status.volume?.toLocaleString() ?? "?"}t on ${status.resourceName ?? "resource"}`;
-  if (status.action === "loading_in_progress")
-    return `🔄 Loading in progress on ${status.resourceName ?? "resource"}`;
-  if (status.action === "pre_ops")
-    return `⏳ Pre-ops alongside ${status.resourceName ?? "resource"} (${status.constraintDetail ?? "pre-cargo"})`;
-  if (status.action === "post_ops")
-    return `🏁 Post-ops alongside ${status.resourceName ?? "resource"} (${status.constraintDetail ?? "post-cargo"})`;
-  if (status.blockingConstraint === "roundtrip")
-    return `⚓ Roundtrip: ${status.constraintDetail ?? ""}`.trim();
-  if (status.blockingConstraint === "resource_occupied")
-    return `🚧 Resource occupied: ${status.constraintDetail ?? ""}`.trim();
-  if (status.blockingConstraint === "pace_ahead")
-    return `⏸ Pace ahead: ${status.constraintDetail ?? ""}`.trim();
-  if (status.blockingConstraint === "optimizer_days_of_cover")
-    return `🧠 Optimizer (days-of-cover): ${status.constraintDetail ?? ""}`.trim();
-  if (status.blockingConstraint === "insufficient_inventory")
-    return `📉 Insufficient inventory: ${status.constraintDetail ?? ""}`.trim();
-  if (status.blockingConstraint === "customer_inventory_floor")
-    return `⛔ Customer inventory floor (shared inventory): ${status.constraintDetail ?? ""}`.trim();
-  if (status.blockingConstraint === "tank_full")
-    return `📈 Tank full: ${status.constraintDetail ?? ""}`.trim();
-  return (
-    `○ Idle — all constraints pass but no slot scheduled this hour. ` +
-    `Inventory: ${status.constraintDetail ?? "unknown"}`
   );
 }
 
@@ -129,17 +114,6 @@ function higherConstraint(
 function formatDaysOfCover(doc: number | null | undefined): string {
   if (doc == null || !Number.isFinite(doc)) return "∞";
   return doc >= 10 ? doc.toFixed(1) : doc.toFixed(2);
-}
-
-function worstIconFromConstraint(c: TransportModeStatus["blockingConstraint"] | null): string {
-  if (c === "insufficient_inventory") return "📉";
-  if (c === "customer_inventory_floor") return "⛔";
-  if (c === "tank_full") return "📈";
-  if (c === "roundtrip") return "⚓";
-  if (c === "resource_occupied") return "🚧";
-  if (c === "pace_ahead") return "⏸";
-  if (c === "optimizer_days_of_cover") return "🧠";
-  return "";
 }
 
 /** Multiline text for the floating leg/mode cell tooltip (hour rows). */
@@ -190,14 +164,10 @@ function buildHourLegModeTooltipContent(
   const primary = ["Primary (stored when idle):", getTooltip(status), ""];
   const checklist = [
     "When idle, the engine stores one primary reason. Compare to the checklist:",
-    `⚓ roundtrip        ${bc === "roundtrip" ? "← primary" : "—"}`,
-    `🚧 resource_occupied ${bc === "resource_occupied" ? "← primary" : "—"}`,
-    `⏸ pace_ahead        ${bc === "pace_ahead" ? "← primary" : "—"}`,
-    `🧠 optimizer_days_of_cover ${bc === "optimizer_days_of_cover" ? "← primary" : "—"}`,
-    `📉 insufficient_inventory ${bc === "insufficient_inventory" ? "← primary" : "—"}`,
-    `📈 tank_full       ${bc === "tank_full" ? "← primary" : "—"}`,
-    `⛔ customer_inventory_floor ${bc === "customer_inventory_floor" ? "← primary" : "—"}`,
-    `○ (no category)    ${bc === null ? "← primary" : "—"}`
+    ...SCHEDULING_CONSTRAINTS.map(
+      (def) => `${def.label.padEnd(28)} ${bc === def.key ? "← primary" : "—"}`
+    ),
+    `${"Uncategorised idle".padEnd(28)} ${bc === null ? "← primary" : "—"}`
   ];
   if (status.constraintDetail?.trim()) {
     checklist.push("", `Detail: ${status.constraintDetail.trim()}`);
@@ -221,7 +191,7 @@ function buildDailyLegModeTooltipContent(
     "",
     `Loads started this day: ${agg.loadedCount.toLocaleString()}`,
     agg.loadedCount > 0
-      ? "✅ At least one load started on this leg."
+      ? "At least one load started on this leg."
       : "No load starts on this leg this day (often idle all hours).",
     ""
   ];
@@ -234,7 +204,7 @@ function buildDailyLegModeTooltipContent(
     lines.push("");
   }
   if (agg.worst) {
-    lines.push(`Worst idle reason (by severity across hours): ${agg.worst}`);
+    lines.push(`Worst idle reason (by severity across hours): ${constraintDef(agg.worst).label}`);
     if (agg.sampleDetail?.trim()) {
       lines.push(`Sample detail: ${agg.sampleDetail.trim()}`);
     }
@@ -245,7 +215,7 @@ function buildDailyLegModeTooltipContent(
     "",
     "When idle, the same primary-reason checklist applies per hour (see All hours view and hover an hour cell).",
     "",
-    "⚓ roundtrip · 🚧 resource · ⏸ pace · 🧠 optimizer DoC · 📉 stock · 📈 tank room · ⛔ shared floor · ○ uncategorised"
+    SCHEDULING_CONSTRAINTS.map((d) => d.label).join(" · ") + " · Uncategorised idle"
   );
   return lines.join("\n");
 }
@@ -256,6 +226,30 @@ function matchesFilters(
   activeModes: Set<string>
 ): boolean {
   return activeCustomers.has(s.customerId) && activeModes.has(modeKey(s));
+}
+
+function statusMatchesConstraintFilter(
+  s: TransportModeStatus,
+  activeConstraints: Set<ConstraintFilterKey>
+): boolean {
+  if (activeConstraints.size === 0) return true;
+  if (s.action !== "idle") return false;
+  const key: ConstraintFilterKey = s.blockingConstraint ?? "uncategorised";
+  return activeConstraints.has(key);
+}
+
+function rowMatchesConstraintFilter(
+  row: SimulationLogRow,
+  activeCustomers: Set<string>,
+  activeModes: Set<string>,
+  activeConstraints: Set<ConstraintFilterKey>
+): boolean {
+  if (activeConstraints.size === 0) return true;
+  for (const s of row.transportStatus ?? []) {
+    if (!matchesFilters(s, activeCustomers, activeModes)) continue;
+    if (statusMatchesConstraintFilter(s, activeConstraints)) return true;
+  }
+  return false;
 }
 
 function rowIsInterestingEvent(
@@ -427,6 +421,7 @@ export default function SimulationLog() {
 
   const [activeCustomers, setActiveCustomers] = useState<Set<string>>(() => new Set());
   const [activeModes, setActiveModes] = useState<Set<string>>(() => new Set());
+  const [activeConstraints, setActiveConstraints] = useState<Set<ConstraintFilterKey>>(() => new Set());
   const [maxLegColumns, setMaxLegColumns] = useState(16);
 
   useEffect(() => {
@@ -501,6 +496,22 @@ export default function SimulationLog() {
     [availableModes, activeModes]
   );
 
+  /** Idle-hour counts per blocking constraint (respects customer + mode filters). */
+  const constraintCounts = useMemo(() => {
+    const counts = new Map<ConstraintFilterKey, number>();
+    for (const row of logRows) {
+      for (const s of row.transportStatus ?? []) {
+        if (!matchesFilters(s, activeCustomers, activeModes)) continue;
+        if (s.action !== "idle") continue;
+        const key: ConstraintFilterKey = s.blockingConstraint ?? "uncategorised";
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [logRows, activeCustomers, activeModes]);
+
+  const uncategorisedIdleCount = constraintCounts.get("uncategorised") ?? 0;
+
   /** Per-run legs only: no empty columns for unseen transport rows. */
   const inventoryLegColumns = useMemo((): LegColumn[] => {
     const seen = new Set<string>();
@@ -553,7 +564,7 @@ export default function SimulationLog() {
     return cols.slice(0, Math.max(1, Math.min(maxLegColumns, cols.length)));
   }, [logRows, activeCustomers, activeModes, activeCustomerList, customers, maxLegColumns]);
 
-  const filterKey = `${[...activeCustomers].sort().join(",")}|${[...activeModes].sort().join(",")}`;
+  const filterKey = `${[...activeCustomers].sort().join(",")}|${[...activeModes].sort().join(",")}|${[...activeConstraints].sort().join(",")}`;
 
   const searchKey = searchParams.toString();
 
@@ -610,16 +621,30 @@ export default function SimulationLog() {
 
   const displayRows = useMemo((): DisplayRow[] => {
     if (logRows.length === 0) return [];
+    const matchesConstraints = (row: SimulationLogRow) =>
+      rowMatchesConstraintFilter(row, activeCustomers, activeModes, activeConstraints);
+
     if (viewMode === "all") {
-      return logRows.map((row) => ({ kind: "hour", row }));
+      return logRows.filter(matchesConstraints).map((row) => ({ kind: "hour", row }));
     }
     if (viewMode === "events") {
       return logRows
-        .filter((row) => rowIsInterestingEvent(row, activeCustomers, activeModes))
+        .filter(
+          (row) =>
+            rowIsInterestingEvent(row, activeCustomers, activeModes) && matchesConstraints(row)
+        )
         .map((row) => ({ kind: "hour", row }));
     }
-    return buildDailySummaries(logRows, customers).map((row) => ({ kind: "daily", row }));
-  }, [logRows, viewMode, customers, activeCustomers, activeModes]);
+    return buildDailySummaries(logRows, customers)
+      .filter((daily) => {
+        if (activeConstraints.size === 0) return true;
+        return logRows.some(
+          (row) =>
+            (row.datetime ?? "").slice(0, 10) === daily.dayKey && matchesConstraints(row)
+        );
+      })
+      .map((row) => ({ kind: "daily", row }));
+  }, [logRows, viewMode, customers, activeCustomers, activeModes, activeConstraints]);
 
   const virtualSlice = useMemo(() => {
     const start = Math.min(scrollOffset, Math.max(0, displayRows.length - VISIBLE_ROWS));
@@ -692,6 +717,24 @@ export default function SimulationLog() {
     });
   };
 
+  const toggleConstraint = (key: ConstraintFilterKey) => {
+    setActiveConstraints((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const constraintFilterLabel = useMemo(() => {
+    if (activeConstraints.size === 0) return null;
+    const labels = [...activeConstraints].map((key) => {
+      if (key === "uncategorised") return "Uncategorised idle";
+      return constraintDef(key).label;
+    });
+    return labels.join(", ");
+  }, [activeConstraints]);
+
   const zebra = (rowIdx: number): CSSProperties =>
     virtualSlice.start % 2 === rowIdx % 2 ? { background: "#fff" } : { background: "#f8fafc" };
 
@@ -706,7 +749,9 @@ export default function SimulationLog() {
         </div>
         <div className="card">
           <div className="empty-state">
-            <div className="empty-state-icon">📋</div>
+            <div className="empty-state-icon">
+              <ClipboardList size={48} strokeWidth={1.5} />
+            </div>
             <div className="empty-state-title">No simulation data</div>
             <div className="empty-state-text">Run the scheduler first to see the simulation log</div>
           </div>
@@ -791,6 +836,69 @@ export default function SimulationLog() {
         ))}
       </div>
 
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>CONSTRAINTS</span>
+        <button
+          type="button"
+          className={`btn ${activeConstraints.size === 0 ? "btn-primary" : "btn-secondary"}`}
+          style={{ padding: "4px 12px", fontSize: 12 }}
+          onClick={() => setActiveConstraints(new Set())}
+        >
+          All
+        </button>
+        {SCHEDULING_CONSTRAINTS.map((def) => {
+          const total = constraintCounts.get(def.key) ?? 0;
+          const inactive = total === 0;
+          const on = activeConstraints.has(def.key);
+          return (
+            <button
+              key={def.key}
+              type="button"
+              disabled={inactive}
+              className={`constraint-toggle-chip${on ? " constraint-toggle-chip--on" : ""}${
+                inactive ? " constraint-toggle-chip--inactive" : ""
+              }`}
+              style={
+                on && !inactive ? ({ "--chip-color": def.color } as CSSProperties) : undefined
+              }
+              onClick={() => !inactive && toggleConstraint(def.key)}
+            >
+              <span className="constraint-toggle-chip-icon">
+                <ConstraintIcon constraintKey={def.key} size={13} />
+              </span>
+              {def.label}
+              <span className="constraint-toggle-chip-count">{total}</span>
+            </button>
+          );
+        })}
+        {uncategorisedIdleCount > 0 && (
+          <button
+            type="button"
+            className={`constraint-toggle-chip${
+              activeConstraints.has("uncategorised") ? " constraint-toggle-chip--on" : ""
+            }`}
+            style={
+              activeConstraints.has("uncategorised")
+                ? ({ "--chip-color": "#94a3b8" } as CSSProperties)
+                : undefined
+            }
+            onClick={() => toggleConstraint("uncategorised")}
+          >
+            <span className="constraint-toggle-chip-icon">
+              <UncategorisedConstraintIcon size={13} />
+            </span>
+            Uncategorised idle
+            <span className="constraint-toggle-chip-count">{uncategorisedIdleCount}</span>
+          </button>
+        )}
+      </div>
+      {constraintFilterLabel && (
+        <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b" }}>
+          Showing rows where at least one visible leg was idle due to:{" "}
+          <strong>{constraintFilterLabel}</strong>
+        </p>
+      )}
+
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>VIEW</span>
         {(["daily", "events", "all"] as const).map((v) => (
@@ -821,11 +929,14 @@ export default function SimulationLog() {
         </span>
       </div>
 
-      <div style={{ marginBottom: 8, fontSize: 13, color: "#64748b" }}>{rowCountLabel}</div>
+      <div style={{ marginBottom: 8, fontSize: 13, color: "#64748b" }}>
+        {rowCountLabel}
+        {activeConstraints.size > 0 && displayRows.length === 0 ? " — no rows match this constraint filter" : ""}
+      </div>
       {viewMode === "daily" && (
         <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b", maxWidth: 900, lineHeight: 1.5 }}>
           <strong>Daily mode columns:</strong> the number is how many <strong>loads started</strong> that day for that
-          single leg lane (customer + direction + mode + lane). <span aria-hidden>✅</span> appears only when that count is greater
+          single leg lane (customer + direction + mode + lane). A green check appears only when that count is greater
           than zero. <strong>0</strong> means no visit started on that leg — hover the cell for roll-up text. Row tint
           still highlights the worst idle reason seen that day across visible legs (inventory, berth, pace, etc.).
         </p>
@@ -849,6 +960,12 @@ export default function SimulationLog() {
           ) : inventoryLegColumns.length === 0 ? (
             <div style={{ padding: 24, color: "#64748b" }}>
               No transport legs in this run match the selected customers and modes.
+            </div>
+          ) : displayRows.length === 0 ? (
+            <div style={{ padding: 24, color: "#64748b" }}>
+              No rows match the selected constraint filter
+              {constraintFilterLabel ? ` (${constraintFilterLabel})` : ""}. Clear constraints with{" "}
+              <strong>All</strong> or select different types.
             </div>
           ) : (
             <table className="data-table" style={{ width: "100%", tableLayout: "fixed" }}>
@@ -922,7 +1039,6 @@ export default function SimulationLog() {
                             col.mode,
                             col.legKey
                           );
-                          const icon = statusIcon(status);
                           return (
                             <td
                               key={`${col.customerId}-${modeKey(col)}-${col.legKey ?? "lane0"}`}
@@ -948,7 +1064,7 @@ export default function SimulationLog() {
                                 fontSize: 14
                               }}
                             >
-                              {icon}
+                              <TransportStatusIcon status={status} />
                             </td>
                           );
                         })}
@@ -996,7 +1112,7 @@ export default function SimulationLog() {
                           worst: null,
                           sampleDetail: null
                         };
-                        const wIcon = worstIconFromConstraint(a.worst);
+                        const wIcon = a.worst;
                         return (
                           <td
                             key={`${col.customerId}-${modeKey(col)}-${col.legKey ?? "lane0"}`}
@@ -1016,19 +1132,22 @@ export default function SimulationLog() {
                             onPointerLeave={hideLegModeTooltip}
                             style={{ textAlign: "center", fontSize: 12, cursor: "help" }}
                           >
-                            <span>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                               {a.loadedCount > 0 ? (
                                 <>
                                   {a.loadedCount}
-                                  <span aria-hidden>✅</span>
+                                  <CheckCircle2 size={13} color="#22c55e" strokeWidth={2} aria-hidden />
                                 </>
                               ) : (
                                 "0"
                               )}
                             </span>
                             {wIcon ? (
-                              <span style={{ marginLeft: 4 }} aria-hidden>
-                                {wIcon}
+                              <span
+                                style={{ marginLeft: 4, display: "inline-flex", verticalAlign: "middle" }}
+                                aria-hidden
+                              >
+                                <WorstConstraintIcon constraint={wIcon} />
                               </span>
                             ) : null}
                           </td>

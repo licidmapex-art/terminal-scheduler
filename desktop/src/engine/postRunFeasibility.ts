@@ -4,6 +4,7 @@
 
 import type { Customer, SimulationConfig } from "../types";
 import { getCustomerMaxCapacity } from "./inventory";
+import { totalInboundPipelineTph, totalOutboundPipelineTph } from "./pipelineFlows";
 import type { SimulationLogRow } from "./simulationLog";
 
 const TREND_FRACTION_OF_SCALE = 0.01;
@@ -49,18 +50,20 @@ function trendDirectionLabel(series: number[]): "increasing" | "decreasing" {
 }
 
 function countPipelineInterruptedHours(
+  customers: Customer[],
   log: SimulationLogRow[],
   config: SimulationConfig,
   hasPipeline: boolean
 ): number {
   if (!hasPipeline || log.length === 0) return 0;
   const cap = config.totalStorageCapacity ?? 100_000;
-  const isInbound = config.pipelineDirection !== "outbound";
+  const hasInbound = totalInboundPipelineTph(customers, config) > 0;
+  const hasOutbound = totalOutboundPipelineTph(customers, config) > 0;
   let count = 0;
   for (const row of log) {
     const total = row.terminalTotal ?? 0;
     const interrupted =
-      (isInbound && total >= cap - CAP_EPS) || (!isInbound && total <= CAP_EPS);
+      (hasInbound && total >= cap - CAP_EPS) || (hasOutbound && total <= CAP_EPS);
     if (interrupted) count++;
   }
   return count;
@@ -106,7 +109,9 @@ export function runPostRunFeasibilityChecks(
   if (simulationLog.length === 0) return warnings;
 
   const totalHours = simulationLog.length;
-  const hasPipeline = customers.some((c) => (c.pipelineFlowPerHour ?? 0) > 0);
+  const hasPipeline =
+    totalInboundPipelineTph(customers, config) > 0 ||
+    totalOutboundPipelineTph(customers, config) > 0;
 
   const terminalSeries = simulationLog.map((r) => r.terminalTotal ?? 0);
   const terminalScale = config.totalStorageCapacity ?? 100_000;
@@ -146,13 +151,22 @@ export function runPostRunFeasibilityChecks(
     }
   }
 
-  const pipelineInterrupted = countPipelineInterruptedHours(simulationLog, config, hasPipeline);
+  const pipelineInterrupted = countPipelineInterruptedHours(
+    customers,
+    simulationLog,
+    config,
+    hasPipeline
+  );
   if (hasPipeline && pipelineInterrupted / totalHours > PIPELINE_INTERRUPT_THRESHOLD) {
     const pct = ((pipelineInterrupted / totalHours) * 100).toFixed(1);
+    const hasInbound = totalInboundPipelineTph(customers, config) > 0;
+    const hasOutbound = totalOutboundPipelineTph(customers, config) > 0;
     const reason =
-      config.pipelineDirection === "outbound"
-        ? "terminal inventory at bottom (tank empty)"
-        : "terminal at storage capacity (tank full)";
+      hasInbound && hasOutbound
+        ? "terminal at capacity or empty (tank top/bottom)"
+        : hasOutbound
+          ? "terminal inventory at bottom (tank empty)"
+          : "terminal at storage capacity (tank full)";
     warnings.push(
       `Pipeline was interrupted ${pct}% of the simulation (${pipelineInterrupted} of ${totalHours} hours) due to ${reason}.`
     );

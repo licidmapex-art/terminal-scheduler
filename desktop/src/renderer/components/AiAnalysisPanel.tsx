@@ -41,8 +41,8 @@ interface AiAnalysisPanelProps {
   }>;
   throughputCoverage: Array<{
     customerName: string;
-    expectedOutbound: number;
-    scheduledOutbound: number;
+    expectedInbound: number;
+    scheduledInbound: number;
     passes: boolean;
     targetInboundSlots: number;
     targetOutboundSlots: number;

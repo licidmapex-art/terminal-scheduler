@@ -1,6 +1,4 @@
 import { useState, useEffect, useMemo } from "react";
-import MultiMetricChart from "../components/MultiMetricChart";
-import ConstraintTimelineChart from "../components/ConstraintTimelineChart";
 import AiAnalysisPanel from "../components/AiAnalysisPanel";
 import { useStore } from "../store";
 import type {
@@ -12,10 +10,10 @@ import type { SimulationLogRow } from "../../engine/simulationLog";
 import {
   inboundTargetSlots,
   outboundTargetSlots,
+  inboundThroughputTonnes,
   outboundThroughputTonnes,
   customerRepresentativeDaysOfCover
 } from "../../engine/customerLegTargets";
-import { customerPacingPctByDirectionMode } from "../../engine/pacing";
 import {
   simulationPeriodHoursFloored,
   tallyPipelineTonnesFromSimulationLog,
@@ -25,6 +23,7 @@ import {
 import { tallyBerthTonnesByCustomerFromSlots } from "../../engine/simulationExcelExport";
 import { slotBerthOccupationHours } from "../../engine/slotLaytime";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
+import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
 
 interface Customer {
   id: string;
@@ -116,9 +115,13 @@ interface ResourceUtilRow {
 interface ThroughputCoverageRow {
   customerId: string;
   customerName: string;
-  expectedOutbound: number;
-  scheduledOutbound: number;
-  slotsScheduled: number;
+  /** Declared inbound transport + pipeline inbound (t). */
+  expectedInbound: number;
+  /** Berth inbound cargo + pipeline inbound delivered (t). */
+  scheduledInbound: number;
+  berthInboundTonnes: number;
+  pipelineInboundTonnes: number;
+  declaredInboundTonnes: number;
   delta: number;
   passes: boolean;
   targetInboundSlots: number;
@@ -279,9 +282,20 @@ function achievementSlotPct(scheduled: number, target: number): number {
   return Math.min(150, (scheduled / target) * 100);
 }
 
-function SlotTargetBar({ label, scheduled, target }: { label: string; scheduled: number; target: number }) {
+function SlotTargetBar({
+  label,
+  scheduled,
+  target,
+  direction = "inbound"
+}: {
+  label: string;
+  scheduled: number;
+  target: number;
+  direction?: "inbound" | "outbound";
+}) {
   const noLeg = target <= 0 && scheduled <= 0;
   const pct = noLeg ? 0 : achievementSlotPct(scheduled, target);
+  const ok = pct >= 99;
   return (
     <div style={{ marginTop: label ? 6 : 0 }}>
       {label ? (
@@ -293,11 +307,8 @@ function SlotTargetBar({ label, scheduled, target }: { label: string; scheduled:
         <div className="throughput-bar-row" style={{ maxWidth: 280 }}>
           <div className="throughput-bar-track">
             <div
-              className="throughput-bar-fill"
-              style={{
-                width: `${Math.min(100, pct)}%`,
-                background: pct >= 99 ? "linear-gradient(90deg, #22c55e, #16a34a)" : undefined
-              }}
+              className={`throughput-bar-fill throughput-bar-fill--${direction}${ok ? " throughput-bar-fill--ok" : ""}`}
+              style={{ width: `${Math.min(100, pct)}%` }}
             />
           </div>
           <span style={{ fontSize: 11, fontWeight: 600, minWidth: 40, textAlign: "right" }}>
@@ -414,17 +425,16 @@ export default function Analytics() {
         );
         daysOfCover = raw != null ? Math.round(raw * 10) / 10 : null;
       }
-      const pipeDir = config.pipelineDirection ?? "inbound";
-      const rate = customer?.pipelineFlowPerHour ?? 0;
       let pipelineInboundVol = 0;
       let pipelineOutboundVol = 0;
       if (useLogPipeline) {
         const p = pipelineTonnesFromSchedulerLog.get(customerId) ?? { inbound: 0, outbound: 0 };
         pipelineInboundVol = p.inbound;
         pipelineOutboundVol = p.outbound;
-      } else {
-        pipelineInboundVol = pipeDir === "inbound" ? rate * periodFloored : 0;
-        pipelineOutboundVol = pipeDir === "outbound" ? rate * periodFloored : 0;
+      } else if (customer) {
+        const rates = resolveCustomerPipelineRates(customer as EngineCustomer, cfgEngine);
+        pipelineInboundVol = rates.inboundTph * periodFloored;
+        pipelineOutboundVol = rates.outboundTph * periodFloored;
       }
       const berth = berthByCustomer.get(customerId) ?? { inbound: 0, outbound: 0 };
       const cargoIn = berth.inbound;
@@ -515,51 +525,35 @@ export default function Analytics() {
     return out;
   }, [simulationLog, customers, timelineData, config, customerById]);
 
-  const pacingByCustomerMode = useMemo(() => {
-    if (!config || periodHours <= 0 || simulationLog.length === 0) return {};
-    const cfgEngine = config as EngineSimulationConfig;
-    const start = new Date(config.startDate).getTime();
-    const maxHour = Math.max(...simulationLog.map((r) => r.hour));
-    const out: Record<string, Record<string, number[]>> = {};
-    for (const c of customers) {
-      const byMode = customerPacingPctByDirectionMode(
-        c as EngineCustomer,
-        cfgEngine,
-        periodHours,
-        slots as unknown as ScheduledSlot[],
-        maxHour,
-        start
-      );
-      if (byMode && Object.keys(byMode).length > 0) out[c.id] = byMode;
-    }
-    return out;
-  }, [customers, slots, config, periodHours, simulationLog]);
-
   const throughputCoverage = useMemo((): ThroughputCoverageRow[] => {
     if (!config || periodHours <= 0) return [];
-    const pipeDir = config.pipelineDirection ?? "inbound";
-    const simCfg = pipelineConfigForAnalytics(pipeDir);
+    const simCfg = config as EngineSimulationConfig;
+    const periodFloored = simulationPeriodHoursFloored(simCfg);
+    const useLogPipeline = simulationLog.some((r) => r.hour > 0);
     const EPS = 0.5;
     const rows: ThroughputCoverageRow[] = [];
     for (const c of customers) {
       const engineC = c as EngineCustomer;
-      const pipelineRatePerHour = c.pipelineFlowPerHour ?? 0;
-      const pipelineContribution = pipelineRatePerHour * periodHours;
-      const pipelineInbound = pipeDir === "inbound" ? pipelineContribution : 0;
-      const pipelineOutbound = pipeDir === "outbound" ? pipelineContribution : 0;
-      const declared = c.declaredInboundThroughput ?? 0;
-      const expectedOutbound = Math.max(0, declared + pipelineInbound - pipelineOutbound);
+      const declaredInboundTonnes = Math.max(0, c.declaredInboundThroughput ?? 0);
+      const expectedInbound = inboundThroughputTonnes(engineC, simCfg, periodFloored);
       const custSlots = slots.filter((s) => s.customerId === c.id);
       const outboundSlots = custSlots.filter((s) => s.direction === "outbound");
       const inboundSlots = custSlots.filter((s) => s.direction === "inbound");
-      const scheduledOutbound = outboundSlots.reduce((sum, s) => sum + s.volume, 0);
-      const slotsScheduled = outboundSlots.length;
+      const berthInboundTonnes = inboundSlots.reduce((sum, s) => sum + s.volume, 0);
+      let pipelineInboundTonnes = 0;
+      if (useLogPipeline) {
+        pipelineInboundTonnes = pipelineTonnesFromSchedulerLog.get(c.id)?.inbound ?? 0;
+      } else {
+        pipelineInboundTonnes =
+          resolveCustomerPipelineRates(engineC, simCfg).inboundTph * periodFloored;
+      }
+      const scheduledInbound = berthInboundTonnes + pipelineInboundTonnes;
       const scheduledInboundSlots = inboundSlots.length;
       const scheduledOutboundSlots = outboundSlots.length;
       const targetInboundSlots = inboundTargetSlots(engineC, periodHours);
       const targetOutboundSlots = outboundTargetSlots(engineC, simCfg, periodHours);
       const outboundTonnes = Math.max(0, outboundThroughputTonnes(engineC, simCfg, periodHours));
-      const inboundLegConfigured = (c.inboundMEPS ?? 0) > 0 && (c.declaredInboundThroughput ?? 0) > 0;
+      const inboundLegConfigured = (c.inboundMEPS ?? 0) > 0 && declaredInboundTonnes > 0;
       const outboundLegConfigured = (c.outboundMEPS ?? 0) > 0 && outboundTonnes > 0;
       const labelInbound = inboundLegConfigured
         ? `Inbound (${formatTransportMode(c.inboundMode)})`
@@ -569,20 +563,23 @@ export default function Analytics() {
         : "Outbound —";
       const parcelInMeps = c.inboundMEPS ?? 0;
       const parcelOutMeps = c.outboundMEPS ?? 0;
-      const volIn = inboundSlots.reduce((s, x) => s + x.volume, 0);
+      const volIn = berthInboundTonnes;
       const volOut = outboundSlots.reduce((s, x) => s + x.volume, 0);
       const parcelAvgInVol =
         inboundSlots.length > 0 ? Math.round((volIn / inboundSlots.length) * 10) / 10 : 0;
       const parcelAvgOutVol =
         outboundSlots.length > 0 ? Math.round((volOut / outboundSlots.length) * 10) / 10 : 0;
-      const delta = Math.round((scheduledOutbound - expectedOutbound) * 10) / 10;
-      const passes = expectedOutbound <= EPS ? true : Math.round((scheduledOutbound / expectedOutbound) * 100) >= 100;
+      const delta = Math.round((scheduledInbound - expectedInbound) * 10) / 10;
+      const passes =
+        expectedInbound <= EPS ? true : Math.round((scheduledInbound / expectedInbound) * 100) >= 100;
       rows.push({
         customerId: c.id,
         customerName: c.name,
-        expectedOutbound: Math.round(expectedOutbound * 10) / 10,
-        scheduledOutbound: Math.round(scheduledOutbound * 10) / 10,
-        slotsScheduled,
+        expectedInbound: Math.round(expectedInbound * 10) / 10,
+        scheduledInbound: Math.round(scheduledInbound * 10) / 10,
+        berthInboundTonnes: Math.round(berthInboundTonnes * 10) / 10,
+        pipelineInboundTonnes: Math.round(pipelineInboundTonnes * 10) / 10,
+        declaredInboundTonnes: Math.round(declaredInboundTonnes * 10) / 10,
         delta,
         passes,
         targetInboundSlots,
@@ -598,7 +595,7 @@ export default function Analytics() {
       });
     }
     return rows;
-  }, [customers, config, periodHours, slots]);
+  }, [customers, config, periodHours, slots, simulationLog, pipelineTonnesFromSchedulerLog]);
 
   const tankExtremes = useMemo((): TankExtremeRow[] => {
     if (!timelineData?.timeline) return [];
@@ -732,15 +729,15 @@ export default function Analytics() {
       <div className="card" style={{ marginBottom: 24 }}>
         <div className="card-title">Model checks (KPIs)</div>
         <p style={{ margin: "0 0 16px", color: "#64748b", fontSize: 14 }}>
-          Soft tests against the last scheduler run. Throughput compares required outbound volume to scheduled
-          outbound slots.
+          Soft tests against the last scheduler run. Throughput coverage compares required inbound volume
+          (declared transport + pipeline inbound) to scheduled inbound berth cargo plus pipeline delivered.
         </p>
 
         <div style={{ marginBottom: 20 }}>
           <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Throughput coverage</h3>
           <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
-            Expected outbound = declared inbound throughput + customer pipeline flow (t/h) in − out (same as
-            scheduler).
+            Target inbound = declared inbound throughput + pipeline inbound (t/h × period). Scheduled inbound =
+            berth cargo on inbound slots + pipeline inbound from the simulation log (or nominal rate when no log).
             <span style={{ marginLeft: 8 }}>
               Overall:{" "}
               <span className={`badge ${allThroughputPass ? "badge-blue" : "badge-amber"}`}>
@@ -752,8 +749,8 @@ export default function Analytics() {
             <thead>
               <tr>
                 <th>Customer</th>
-                <th style={{ textAlign: "right" }}>Target (t)</th>
-                <th style={{ textAlign: "right" }}>Scheduled (t)</th>
+                <th style={{ textAlign: "right" }}>Target inbound (t)</th>
+                <th style={{ textAlign: "right" }}>Scheduled inbound (t)</th>
                 <th style={{ width: 200 }}>Achievement</th>
                 <th style={{ textAlign: "right" }}>Delta</th>
                 <th style={{ textAlign: "right" }}>Status</th>
@@ -768,22 +765,34 @@ export default function Analytics() {
                 </tr>
               ) : (
                 throughputCoverage.map((row) => {
-                  const ach = achievementPct(row.scheduledOutbound, row.expectedOutbound);
+                  const ach = achievementPct(row.scheduledInbound, row.expectedInbound);
+                  const targetPipelineTonnes = Math.max(
+                    0,
+                    Math.round((row.expectedInbound - row.declaredInboundTonnes) * 10) / 10
+                  );
+                  const targetTip =
+                    `Declared transport ${row.declaredInboundTonnes.toLocaleString()} t` +
+                    ` + pipeline ${targetPipelineTonnes.toLocaleString()} t`;
+                  const schedTip =
+                    `Berth cargo ${row.berthInboundTonnes.toLocaleString()} t` +
+                    ` + pipeline ${row.pipelineInboundTonnes.toLocaleString()} t`;
                   return (
                     <tr key={row.customerId}>
                       <td style={{ fontWeight: 600 }}>{row.customerName}</td>
-                      <td style={{ textAlign: "right" }}>{row.expectedOutbound.toLocaleString()}</td>
-                      <td style={{ textAlign: "right" }}>{row.scheduledOutbound.toLocaleString()}</td>
+                      <td style={{ textAlign: "right" }} title={targetTip}>
+                        {row.expectedInbound.toLocaleString()}
+                      </td>
+                      <td style={{ textAlign: "right" }} title={schedTip}>
+                        {row.scheduledInbound.toLocaleString()}
+                      </td>
                       <td>
                         <div className="throughput-bar-row">
                           <div className="throughput-bar-track">
                             <div
-                              className="throughput-bar-fill"
-                              style={{
-                                width: `${Math.min(100, ach)}%`,
-                                background:
-                                  ach >= 99 ? "linear-gradient(90deg, #22c55e, #16a34a)" : undefined
-                              }}
+                              className={`throughput-bar-fill throughput-bar-fill--inbound${
+                                ach >= 99 ? " throughput-bar-fill--ok" : ""
+                              }`}
+                              style={{ width: `${Math.min(100, ach)}%` }}
                             />
                           </div>
                           <span style={{ fontSize: 13, fontWeight: 600, minWidth: 44, textAlign: "right" }}>
@@ -809,24 +818,43 @@ export default function Analytics() {
           <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Slot details</h3>
           <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
             Slot coverage vs engine targets, average scheduled parcel size (t), and partial loads (volume &lt; MEPS when
-            MEPS &gt; 0).
+            MEPS &gt; 0). Inbound on the left, outbound on the right.
           </p>
-          <table className="data-table">
+          <table className="data-table analytics-slot-details-table">
             <thead>
               <tr>
-                <th>Customer</th>
-                <th style={{ minWidth: 200 }}>Inbound</th>
-                <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>Sched / target (in)</th>
-                <th style={{ minWidth: 200 }}>Outbound</th>
-                <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>Sched / target (out)</th>
-                <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>Avg parcel (t)</th>
-                <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>Partial loads</th>
+                <th rowSpan={2} style={{ width: "14%", verticalAlign: "bottom" }}>
+                  Customer
+                </th>
+                <th colSpan={3} className="analytics-slot-group analytics-slot-group--in">
+                  Inbound ↓
+                </th>
+                <th rowSpan={2} className="analytics-slot-divider" aria-hidden />
+                <th colSpan={3} className="analytics-slot-group analytics-slot-group--out">
+                  Outbound ↑
+                </th>
+              </tr>
+              <tr>
+                <th className="analytics-slot-subhead--in">Transport &amp; coverage</th>
+                <th className="analytics-slot-subhead--in" style={{ textAlign: "right", width: "11%" }}>
+                  Sched / target
+                </th>
+                <th className="analytics-slot-subhead--in" style={{ textAlign: "right", width: "12%" }}>
+                  Parcel &amp; partials
+                </th>
+                <th className="analytics-slot-subhead--out">Transport &amp; coverage</th>
+                <th className="analytics-slot-subhead--out" style={{ textAlign: "right", width: "11%" }}>
+                  Sched / target
+                </th>
+                <th className="analytics-slot-subhead--out" style={{ textAlign: "right", width: "12%" }}>
+                  Parcel &amp; partials
+                </th>
               </tr>
             </thead>
             <tbody>
               {throughputCoverage.length === 0 ? (
                 <tr>
-                  <td colSpan={7} style={{ textAlign: "center", color: "#94a3b8", padding: 16 }}>
+                  <td colSpan={8} style={{ textAlign: "center", color: "#94a3b8", padding: 16 }}>
                     Add customers and simulation dates to evaluate slots
                   </td>
                 </tr>
@@ -842,34 +870,60 @@ export default function Analytics() {
                   return (
                     <tr key={row.customerId}>
                       <td style={{ fontWeight: 600 }}>{row.customerName}</td>
-                      <td style={{ verticalAlign: "top" }}>
-                        <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>{row.labelInbound}</div>
+                      <td className="analytics-slot-cell--in">
+                        <div className="analytics-slot-leg-label analytics-slot-leg-label--in">
+                          {row.labelInbound}
+                        </div>
                         <SlotTargetBar
                           label=""
                           scheduled={row.scheduledInboundSlots}
                           target={row.targetInboundSlots}
+                          direction="inbound"
                         />
                       </td>
-                      <td style={{ textAlign: "right", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                      <td
+                        className="analytics-slot-cell--in"
+                        style={{ textAlign: "right", whiteSpace: "nowrap" }}
+                      >
                         {row.scheduledInboundSlots} / {row.targetInboundSlots}
                       </td>
-                      <td style={{ verticalAlign: "top" }}>
-                        <div style={{ fontSize: 12, color: "#475569", marginBottom: 4 }}>{row.labelOutbound}</div>
+                      <td className="analytics-slot-cell--in" style={{ textAlign: "right" }}>
+                        <div className="analytics-slot-meta">
+                          <div>
+                            Avg <strong>{actIn}</strong> t
+                          </div>
+                          <div>
+                            Partial <strong>{partialIn}</strong>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="analytics-slot-divider" aria-hidden />
+                      <td className="analytics-slot-cell--out">
+                        <div className="analytics-slot-leg-label analytics-slot-leg-label--out">
+                          {row.labelOutbound}
+                        </div>
                         <SlotTargetBar
                           label=""
                           scheduled={row.scheduledOutboundSlots}
                           target={row.targetOutboundSlots}
+                          direction="outbound"
                         />
                       </td>
-                      <td style={{ textAlign: "right", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                      <td
+                        className="analytics-slot-cell--out"
+                        style={{ textAlign: "right", whiteSpace: "nowrap" }}
+                      >
                         {row.scheduledOutboundSlots} / {row.targetOutboundSlots}
                       </td>
-                      <td style={{ textAlign: "right", verticalAlign: "top", fontSize: 13 }}>
-                        <div>in: {actIn}</div>
-                        <div>out: {actOut}</div>
-                      </td>
-                      <td style={{ textAlign: "right", verticalAlign: "top", fontSize: 13 }}>
-                        in {partialIn} / out {partialOut}
+                      <td className="analytics-slot-cell--out" style={{ textAlign: "right" }}>
+                        <div className="analytics-slot-meta">
+                          <div>
+                            Avg <strong>{actOut}</strong> t
+                          </div>
+                          <div>
+                            Partial <strong>{partialOut}</strong>
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -951,42 +1005,6 @@ export default function Analytics() {
           </table>
         </div>
       </div>
-
-      {(hasData || simulationLog.length > 0) && (
-        <div className="card" style={{ marginBottom: 24 }}>
-          <div className="card-title">Timeline comparison</div>
-          <p style={{ margin: "0 16px 12px", fontSize: 13, color: "#64748b", maxWidth: 900, lineHeight: 1.5 }}>
-            One chart with a shared time axis. Toggle inventory (t), days of cover (d), and pacing gaps per leg
-            (direction · mode): lines appear only while that leg is below 100% of the pacer allowance. Toggle customers
-            on or off; <strong>Average (all customers)</strong> is always computed over the full fleet (same DoC as the
-            relative optimizer), not only the customers you have selected.
-          </p>
-          <MultiMetricChart
-            customers={customers}
-            simulationLog={simulationLog}
-            docTrendByCustomer={docTrendByCustomer}
-            pacingByCustomerMode={pacingByCustomerMode}
-            startDate={timelineData?.startDate ?? config?.startDate ?? null}
-          />
-        </div>
-      )}
-
-      {simulationLog.length > 0 && (
-        <div className="card" style={{ marginBottom: 24 }}>
-          <div className="card-title">Scheduling constraints</div>
-          <p style={{ margin: "0 16px 12px", fontSize: 13, color: "#64748b", maxWidth: 900, lineHeight: 1.5 }}>
-            Hourly count of legs that were <strong>idle because a constraint blocked</strong> a slot start (same rules as
-            the Simulation Log). Toggle constraint types — including <strong>pace ahead</strong> and the{" "}
-            <strong>relative optimizer</strong> — and customers to focus the stack chart. Counts are leg-hours, not berth
-            hours.
-          </p>
-          <ConstraintTimelineChart
-            customers={customers}
-            simulationLog={simulationLog}
-            startDate={timelineData?.startDate ?? config?.startDate ?? null}
-          />
-        </div>
-      )}
 
       <div className="card" style={{ marginBottom: 24 }}>
         <div className="card-title">Inventory Summary</div>

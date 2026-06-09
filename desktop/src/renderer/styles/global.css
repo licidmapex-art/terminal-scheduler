@@ -1,39 +1,83 @@
+:root {
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-border: #e2e8f0;
+  --color-border-subtle: #f1f5f9;
+  --color-text: #1e293b;
+  --color-text-muted: #64748b;
+  --color-text-faint: #94a3b8;
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  --color-sidebar-bg: #0f172a;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-card: 0 1px 4px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.04);
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html { overflow-x: hidden; }
 body {
   font-family: 'Inter', sans-serif;
-  background: #f8fafc;
-  color: #1e293b;
+  background: var(--color-bg);
+  color: var(--color-text);
   overflow-x: hidden;
 }
 
 /* Sidebar */
 .sidebar {
-  width: 240px; min-height: 100vh; background: #0f172a;
+  width: 240px; min-height: 100vh; background: var(--color-sidebar-bg);
   display: flex; flex-direction: column; padding: 0;
   position: fixed; left: 0; top: 0; bottom: 0;
 }
 .sidebar-logo {
   padding: 24px 20px; border-bottom: 1px solid #1e293b;
-  color: #ffffff; font-size: 16px; font-weight: 700;
+  color: #ffffff;
   display: flex; align-items: center; gap: 10px;
 }
-.sidebar-logo-icon { font-size: 24px; }
+.sidebar-logo-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.35));
+}
+.sidebar-logo-text {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  line-height: 1.25;
+  color: #f8fafc;
+}
 .sidebar-nav { padding: 16px 12px; flex: 1; }
 .sidebar-section-label {
-  color: #94a3b8; font-size: 11px; font-weight: 600;
+  color: var(--color-text-faint); font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.08em;
   padding: 8px 8px 4px;
 }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 9px 12px; border-radius: 8px; margin-bottom: 2px;
-  color: #94a3b8; font-size: 14px; font-weight: 500;
+  padding: 9px 12px; border-radius: var(--radius-md); margin-bottom: 2px;
+  color: var(--color-text-faint); font-size: 14px; font-weight: 500;
   cursor: pointer; transition: all 0.15s; text-decoration: none;
+  border-left: 2px solid transparent;
 }
 .nav-item:hover { background: #1e293b; color: #e2e8f0; }
-.nav-item.active { background: #1d4ed8; color: #ffffff; }
-.nav-item-icon { width: 18px; text-align: center; }
+.nav-item.active {
+  background: rgba(59, 130, 246, 0.12);
+  color: #ffffff;
+  border-left-color: var(--color-primary);
+  padding-left: 10px;
+}
+.nav-item-icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
 
 /* Main content — clip horizontal overflow so wide charts scroll inside their own panel, not the window */
 .main-content {
@@ -58,9 +102,9 @@ body {
 
 /* Cards */
 .card {
-  background: #ffffff; border-radius: 12px;
-  border: 1px solid #e2e8f0; padding: 24px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  background: var(--color-surface); border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border); padding: 24px;
+  box-shadow: var(--shadow-card);
 }
 .card-title {
   font-size: 15px; font-weight: 600; color: #0f172a;
@@ -73,9 +117,9 @@ body {
   gap: 16px; margin-bottom: 24px;
 }
 .kpi-card {
-  background: #ffffff; border-radius: 12px;
-  border: 1px solid #e2e8f0; padding: 20px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  background: var(--color-surface); border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border); padding: 20px;
+  box-shadow: var(--shadow-card);
 }
 .kpi-label { font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
 .kpi-value { font-size: 28px; font-weight: 700; color: #0f172a; margin-top: 6px; }
@@ -112,12 +156,12 @@ body {
 /* Buttons */
 .btn {
   display: inline-flex; align-items: center; gap: 8px;
-  padding: 9px 18px; border-radius: 8px; font-size: 14px;
+  padding: 9px 18px; border-radius: var(--radius-md); font-size: 14px;
   font-weight: 500; cursor: pointer; border: none;
   transition: all 0.15s; font-family: 'Inter', sans-serif;
 }
-.btn-primary { background: #3b82f6; color: white; }
-.btn-primary:hover { background: #2563eb; }
+.btn-primary { background: var(--color-primary); color: white; }
+.btn-primary:hover { background: var(--color-primary-hover); }
 .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
 .btn-secondary { background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; }
 .btn-secondary:hover { background: #e2e8f0; }
@@ -169,7 +213,13 @@ body {
 .empty-state {
   text-align: center; padding: 60px 20px; color: #94a3b8;
 }
-.empty-state-icon { font-size: 48px; margin-bottom: 16px; }
+.empty-state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  color: var(--color-text-faint);
+}
 .empty-state-title { font-size: 16px; font-weight: 600; color: #64748b; margin-bottom: 8px; }
 .empty-state-text { font-size: 14px; }
 
@@ -320,6 +370,95 @@ body {
   height: 100%;
   border-radius: 4px;
   background: linear-gradient(90deg, #3b82f6, #2563eb);
+}
+.throughput-bar-fill--inbound {
+  background: linear-gradient(90deg, #0ea5e9, #0284c7);
+}
+.throughput-bar-fill--inbound.throughput-bar-fill--ok {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+.throughput-bar-fill--outbound {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+}
+.throughput-bar-fill--outbound.throughput-bar-fill--ok {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+
+/* Analytics — slot details inbound / outbound groups */
+.analytics-slot-details-table {
+  table-layout: fixed;
+}
+.analytics-slot-details-table th,
+.analytics-slot-details-table td {
+  vertical-align: top;
+}
+.analytics-slot-group {
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 10px 12px !important;
+}
+.analytics-slot-group--in {
+  background: #f0f9ff;
+  color: #0369a1;
+  border-left: 3px solid #0ea5e9;
+}
+.analytics-slot-group--out {
+  background: #fffbeb;
+  color: #b45309;
+  border-left: 3px solid #f59e0b;
+}
+.analytics-slot-subhead--in {
+  background: #f8fcff;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  border-left: 3px solid #bae6fd;
+}
+.analytics-slot-subhead--out {
+  background: #fffef5;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  border-left: 3px solid #fde68a;
+}
+.analytics-slot-cell--in {
+  background: #fafcff;
+  border-left: 3px solid #e0f2fe;
+}
+.analytics-slot-cell--out {
+  background: #fffdf7;
+  border-left: 3px solid #fef3c7;
+}
+.analytics-slot-divider {
+  width: 2px;
+  padding: 0 !important;
+  background: #e2e8f0;
+}
+.analytics-slot-leg-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 6px;
+}
+.analytics-slot-leg-label--in::before {
+  content: "↓ ";
+  color: #0284c7;
+}
+.analytics-slot-leg-label--out::before {
+  content: "↑ ";
+  color: #d97706;
+}
+.analytics-slot-meta {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.analytics-slot-meta strong {
+  color: #334155;
+  font-weight: 600;
 }
 
 .sparkline-svg {
@@ -901,7 +1040,10 @@ body {
   color: #94a3b8;
 }
 .constraint-toggle-chip-icon {
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
   line-height: 1;
 }
 .constraint-toggle-chip-count {
@@ -945,6 +1087,32 @@ body {
 .multi-metric-chart-area,
 .constraint-timeline-chart-area {
   cursor: crosshair;
+}
+
+/* ── Unified timeline chart (Schedule) ── */
+.timeline-row-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  letter-spacing: 0.04em;
+}
+.timeline-axis-tick {
+  font-size: 10px;
+  color: #475569;
+  line-height: 1.1;
+  text-align: right;
+  white-space: nowrap;
+  text-shadow:
+    1px 0 0 #f8fafc, -1px 0 0 #f8fafc, 0 1px 0 #f8fafc, 0 -1px 0 #f8fafc,
+    1px 1px 0 #f8fafc, -1px -1px 0 #f8fafc, 1px -1px 0 #f8fafc, -1px 1px 0 #f8fafc;
+}
+.timeline-axis-tick--doc,
+.timeline-axis-tick--pace {
+  font-size: 9px;
+  color: #64748b;
+}
+.gantt-scroll-area {
+  overscroll-behavior: contain;
 }
 
 /* ── AI analysis (Analytics) ── */

@@ -174,6 +174,14 @@ export function loadScenario(id: string): void {
       createCustomer({
         ...base,
         pipelineFlowPerHour,
+        pipelineInboundPerHour:
+          typeof c.pipelineInboundPerHour === "number"
+            ? c.pipelineInboundPerHour
+            : Math.max(0, pipelineFlowPerHour),
+        pipelineOutboundPerHour:
+          typeof c.pipelineOutboundPerHour === "number"
+            ? c.pipelineOutboundPerHour
+            : Math.max(0, -pipelineFlowPerHour),
         timeSharedMinBand: c.timeSharedMinBand ?? 0,
         timeSharedDuration: c.timeSharedDuration ?? 24
       });

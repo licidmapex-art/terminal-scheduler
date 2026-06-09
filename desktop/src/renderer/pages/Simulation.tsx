@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { ClipboardList, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import TerminalMapSvg from "../components/TerminalMapSvg";
 import {
   useSimulationData,
@@ -164,7 +165,7 @@ export default function Simulation() {
         <div style={{ padding: "16px 20px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <button type="button" className="btn btn-secondary" onClick={() => setCurrentHour(0)} style={{ padding: "6px 12px" }}>
-              ⏮
+              <SkipBack size={16} strokeWidth={2} />
             </button>
             <button
               type="button"
@@ -172,7 +173,15 @@ export default function Simulation() {
               onClick={() => setIsPlaying((p) => !p)}
               style={{ padding: "6px 16px", minWidth: 80 }}
             >
-              {isPlaying ? "⏸ Pause" : "▶ Play"}
+              {isPlaying ? (
+                <>
+                  <Pause size={16} strokeWidth={2} /> Pause
+                </>
+              ) : (
+                <>
+                  <Play size={16} strokeWidth={2} /> Play
+                </>
+              )}
             </button>
             <button
               type="button"
@@ -180,7 +189,7 @@ export default function Simulation() {
               onClick={() => setCurrentHour(lastHourIndex)}
               style={{ padding: "6px 12px" }}
             >
-              ⏭
+              <SkipForward size={16} strokeWidth={2} />
             </button>
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
               <span style={{ fontSize: 12, color: "#64748b", marginRight: 4 }}>Speed</span>
@@ -236,8 +245,18 @@ export default function Simulation() {
               <span style={{ color: "#94a3b8" }}>—</span>
             ) : (
               tickerLines.map((e, i) => (
-                <div key={`${e}-${i}`} style={{ opacity: i === tickerLines.length - 1 ? 1 : 0.45, marginBottom: 2 }}>
-                  📋 {e}
+                <div
+                  key={`${e}-${i}`}
+                  style={{
+                    opacity: i === tickerLines.length - 1 ? 1 : 0.45,
+                    marginBottom: 2,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6
+                  }}
+                >
+                  <ClipboardList size={14} strokeWidth={2} color="#64748b" aria-hidden />
+                  {e}
                 </div>
               ))
             )}

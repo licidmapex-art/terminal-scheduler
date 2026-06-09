@@ -70,6 +70,34 @@ describe("buildCustomerThroughputOverview", () => {
     expect(overview.calculatedOutboundTonnes).toBe(5000 - windowTonnes);
   });
 
+  it("uses explicit outbound pipeline regardless of terminal direction", () => {
+    const periodHours = 8760;
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date(start.getTime() + periodHours * 60 * 60 * 1000);
+    const config = baseConfig({ startDate: start, endDate: end, pipelineDirection: "inbound" });
+    const customer = baseCustomer({
+      pipelineFlowPerHour: -46,
+      pipelineInboundPerHour: 0,
+      pipelineOutboundPerHour: 46
+    });
+    const overview = buildCustomerThroughputOverview(customer, config);
+    expect(overview.inboundPipelineTonnes).toBe(0);
+    expect(overview.outboundPipelineTonnes).toBe(46 * periodHours);
+    expect(overview.outboundPipelineRatePerHour).toBe(46);
+  });
+
+  it("falls back to legacy net when explicit columns are zero", () => {
+    const config = baseConfig({ pipelineDirection: "inbound" });
+    const customer = baseCustomer({
+      pipelineFlowPerHour: 1,
+      pipelineInboundPerHour: 0,
+      pipelineOutboundPerHour: 0
+    });
+    const overview = buildCustomerThroughputOverview(customer, config);
+    expect(overview.inboundPipelineTonnes).toBe(1 * 24 * 7);
+    expect(overview.outboundPipelineTonnes).toBe(0);
+  });
+
   it("includes expected slot counts per transport leg", () => {
     const config = baseConfig();
     const customer = baseCustomer({

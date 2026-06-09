@@ -4,6 +4,7 @@
 
 import type { Customer, SimulationConfig } from "../types";
 import { getCustomerMaxCapacity } from "./inventory";
+import { resolveCustomerPipelineRates } from "./pipelineFlows";
 import {
   customerDirectionTransports,
   splitTonnesByShares
@@ -18,11 +19,12 @@ export function outboundThroughputTonnes(
   config: SimulationConfig,
   periodHours: number
 ): number {
-  const pipelineRatePerHour = customer.pipelineFlowPerHour ?? 0;
-  const pipelineContribution = pipelineRatePerHour * periodHours;
-  const pipelineInbound = config.pipelineDirection === "inbound" ? pipelineContribution : 0;
-  const pipelineOutbound = config.pipelineDirection === "outbound" ? pipelineContribution : 0;
-  return customer.declaredInboundThroughput + pipelineInbound - pipelineOutbound;
+  const { inboundTph, outboundTph } = resolveCustomerPipelineRates(customer, config);
+  return (
+    customer.declaredInboundThroughput +
+    inboundTph * periodHours -
+    outboundTph * periodHours
+  );
 }
 
 /** Inbound tonnes for the period (declared transport + inbound pipeline). */
@@ -31,10 +33,8 @@ export function inboundThroughputTonnes(
   config: SimulationConfig,
   periodHours: number
 ): number {
-  const pipelineRatePerHour = customer.pipelineFlowPerHour ?? 0;
-  const pipelineInbound =
-    config.pipelineDirection === "inbound" ? pipelineRatePerHour * periodHours : 0;
-  return Math.max(0, customer.declaredInboundThroughput + pipelineInbound);
+  const { inboundTph } = resolveCustomerPipelineRates(customer, config);
+  return Math.max(0, customer.declaredInboundThroughput + inboundTph * periodHours);
 }
 
 /** Max outbound volume when roundtrip is the binding limit: Σ floor(period ÷ roundtrip) × MEPS per lane. */
@@ -144,9 +144,9 @@ export function customerRepresentativeDaysOfCover(
   const periodDays = Math.max(periodHours / 24, 1e-9);
   const customerMax = getCustomerMaxCapacity(customer, config);
   const headroom = Math.max(0, customerMax - inv);
-  const pipe = customer.pipelineFlowPerHour ?? 0;
-  const pipelineInboundPerDay = config.pipelineDirection === "inbound" ? pipe * 24 : 0;
-  const pipelineOutboundPerDay = config.pipelineDirection === "outbound" ? pipe * 24 : 0;
+  const { inboundTph, outboundTph } = resolveCustomerPipelineRates(customer, config);
+  const pipelineInboundPerDay = inboundTph * 24;
+  const pipelineOutboundPerDay = outboundTph * 24;
 
   const inSlots = inboundTargetSlots(customer, periodHours);
   const outSlots = outboundTargetSlots(customer, config, periodHours);
@@ -161,7 +161,7 @@ export function customerRepresentativeDaysOfCover(
   if (inPressure > SORT_METRIC_EPS) cands.push(headroom / inPressure);
 
   if (cands.length === 0) {
-    const daily = pipe * 24;
+    const daily = Math.max(pipelineInboundPerDay, pipelineOutboundPerDay);
     if (daily <= 0) return null;
     return inv / daily;
   }

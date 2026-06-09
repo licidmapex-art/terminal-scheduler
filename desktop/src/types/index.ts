@@ -8,8 +8,12 @@ export interface Customer {
   /** Starting inventory (tonnes) at simulation start. */
   currentInventory: number;
   storageShare: number; // % of totalStorageCapacity (0-100)
-  /** Net pipeline contribution for this customer, tonnes per hour (sign from terminal pipeline direction). */
+  /** Net pipeline: inbound − outbound (t/h); kept in sync when saving from the customer form. */
   pipelineFlowPerHour: number;
+  /** Inbound pipeline fill rate (t/h). */
+  pipelineInboundPerHour?: number;
+  /** Outbound pipeline drain rate (t/h). */
+  pipelineOutboundPerHour?: number;
   // Inbound transport
   declaredInboundThroughput: number; // tonnes of inbound transport units per period (0 if none)
   /** Preferred multi-mode model: up to 3 rows with share split. */
@@ -27,9 +31,9 @@ export interface Customer {
   outboundMode: "ship" | "barge" | "train";
   /** Hours before outbound vessel can return; 0 = space evenly across period */
   outboundRoundtripHours: number;
-  /** Time-shared storage: min band x (tonnes) — triangle base at slot end (inbound) or start (outbound) */
+  /** Time-shared storage: min band x (tonnes) above inventory; triangle height = cargo (t) */
   timeSharedMinBand: number;
-  /** Time-shared storage: triangle duration y (hours) */
+  /** Legacy stored duration (hours); chart uses cargo ÷ pipeline flow instead */
   timeSharedDuration: number;
   /** Optional hex color (#rrggbb) for charts, Gantt, and simulation map; omitted/null uses palette by customer order. */
   chartColor?: string | null;

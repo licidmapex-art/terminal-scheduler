@@ -301,12 +301,66 @@ export function runMigrations(database: Database.Database): void {
 
   migrateCustomerPipelineFlowPerHour(database);
 
+  migrateCustomerPipelineInboundOutbound(database);
+
   migrateScheduledSlotsDropRequests(database);
 
   try {
     database.exec("ALTER TABLE scheduled_slots ADD COLUMN leg_key TEXT");
   } catch {
     /* column already exists */
+  }
+}
+
+/** Split legacy signed net pipeline into explicit inbound/outbound columns (t/h). */
+function migrateCustomerPipelineInboundOutbound(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(customers)").all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+
+  if (!names.has("pipeline_inbound_per_hour")) {
+    try {
+      database.exec(
+        "ALTER TABLE customers ADD COLUMN pipeline_inbound_per_hour REAL NOT NULL DEFAULT 0"
+      );
+    } catch {
+      return;
+    }
+  }
+  if (!names.has("pipeline_outbound_per_hour")) {
+    try {
+      database.exec(
+        "ALTER TABLE customers ADD COLUMN pipeline_outbound_per_hour REAL NOT NULL DEFAULT 0"
+      );
+    } catch {
+      return;
+    }
+  }
+
+  try {
+    database.exec(`
+      UPDATE customers SET
+        pipeline_inbound_per_hour = CASE
+          WHEN pipeline_flow_per_hour < 0 THEN 0
+          WHEN COALESCE(
+            (SELECT pipeline_direction FROM simulation_configs ORDER BY rowid LIMIT 1),
+            'inbound'
+          ) = 'outbound' THEN 0
+          ELSE pipeline_flow_per_hour
+        END,
+        pipeline_outbound_per_hour = CASE
+          WHEN pipeline_flow_per_hour < 0 THEN ABS(pipeline_flow_per_hour)
+          WHEN COALESCE(
+            (SELECT pipeline_direction FROM simulation_configs ORDER BY rowid LIMIT 1),
+            'inbound'
+          ) = 'outbound' THEN pipeline_flow_per_hour
+          ELSE 0
+        END
+      WHERE pipeline_inbound_per_hour = 0
+        AND pipeline_outbound_per_hour = 0
+        AND pipeline_flow_per_hour != 0
+    `);
+  } catch {
+    /* ignore */
   }
 }
 

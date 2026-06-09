@@ -4,6 +4,7 @@ import {
   outboundTargetSlotsByLane,
   outboundThroughputTonnes
 } from "../../engine/customerLegTargets";
+import { resolveCustomerPipelineRates } from "../../engine/pipelineFlows";
 import {
   customerDirectionTransports,
   splitTonnesByShares
@@ -60,12 +61,9 @@ export function buildCustomerThroughputOverview(
   config: SimulationConfig
 ): CustomerThroughputOverview {
   const periodHours = simulationPeriodHours(config);
-  const pipelineRate = customer.pipelineFlowPerHour ?? 0;
-  const pipelineContribution = pipelineRate * periodHours;
-  const pipelineInbound =
-    config.pipelineDirection === "inbound" ? pipelineContribution : 0;
-  const pipelineOutbound =
-    config.pipelineDirection === "outbound" ? pipelineContribution : 0;
+  const { inboundTph, outboundTph } = resolveCustomerPipelineRates(customer, config);
+  const pipelineInbound = inboundTph * periodHours;
+  const pipelineOutbound = outboundTph * periodHours;
 
   const inboundRows = customerDirectionTransports(customer, "inbound");
   const outboundRows = customerDirectionTransports(customer, "outbound");
@@ -79,9 +77,9 @@ export function buildCustomerThroughputOverview(
     storageShare: customer.storageShare ?? 0,
     inboundTransportTonnes: declaredInbound,
     inboundPipelineTonnes: pipelineInbound,
-    inboundPipelineRatePerHour: config.pipelineDirection === "inbound" ? pipelineRate : 0,
+    inboundPipelineRatePerHour: inboundTph,
     outboundPipelineTonnes: pipelineOutbound,
-    outboundPipelineRatePerHour: config.pipelineDirection === "outbound" ? pipelineRate : 0,
+    outboundPipelineRatePerHour: outboundTph,
     calculatedOutboundTonnes: calculatedOutbound,
     inboundModes: modeLines(inboundRows, declaredInbound, inboundSlots),
     outboundModes: modeLines(outboundRows, Math.max(0, calculatedOutbound), outboundSlots)

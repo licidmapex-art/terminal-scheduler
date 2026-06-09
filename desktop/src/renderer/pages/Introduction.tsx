@@ -1,4 +1,33 @@
 import ErrorBoundary from "../components/ErrorBoundary";
+import { ConstraintIcon } from "../components/ConstraintIcon";
+import TransportStatusIcon from "../components/TransportStatusIcon";
+import { Minus } from "lucide-react";
+import type { TransportModeStatus } from "../../engine/simulationLog";
+
+function IntroConstraintItem({
+  constraintKey,
+  children
+}: {
+  constraintKey: NonNullable<TransportModeStatus["blockingConstraint"]>;
+  children: React.ReactNode;
+}) {
+  return (
+    <li style={{ marginBottom: 8, display: "flex", gap: 10, alignItems: "flex-start" }}>
+      <span style={{ marginTop: 2, flexShrink: 0 }}>
+        <ConstraintIcon constraintKey={constraintKey} size={16} />
+      </span>
+      <span>{children}</span>
+    </li>
+  );
+}
+
+function IntroStatusSample({ status }: { status: TransportModeStatus }) {
+  return (
+    <span style={{ display: "inline-flex", verticalAlign: "middle", margin: "0 2px" }}>
+      <TransportStatusIcon status={status} size={14} />
+    </span>
+  );
+}
 
 export default function Introduction() {
   return (
@@ -83,56 +112,63 @@ export default function Introduction() {
             <p style={{ marginBottom: 8, fontWeight: 600, color: "#334155" }}>
               Constraints (icons match the Simulation log when a leg is idle with that block)
             </p>
-            <ul style={{ margin: "0 0 12px", paddingLeft: 22 }}>
-              <li style={{ marginBottom: 8 }}>
+            <ul style={{ margin: "0 0 12px", paddingLeft: 0, listStyle: "none" }}>
+              <li style={{ marginBottom: 8, paddingLeft: 0 }}>
                 <strong>Target count</strong> — Cannot schedule more slot starts for a <strong>leg</strong> than that leg&apos;s
                 computed target from declared throughput and MEPS (and roundtrip limits), <strong>per customer × direction ×
                 mode</strong> unless you use <strong>shared shipping</strong>, where inbound/outbound targets of the same mode
                 are combined across customers. (No separate log icon — the leg may idle for other reasons once the target is
                 reached.)
               </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>⏸</span> <strong>Pace ahead</strong> — Slot starts are throttled so visits are spread across
-                the horizon, not only bunched at the beginning (continuous pace target <strong>per leg</strong>, except{" "}
+              <IntroConstraintItem constraintKey="pace_ahead">
+                <strong>Pace ahead</strong> — Slot starts are throttled so visits are spread across the horizon, not only
+                bunched at the beginning (continuous pace target <strong>per leg</strong>, except{" "}
                 <strong>shared shipping</strong> where pace is combined per direction + mode).
-              </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>🧠</span> <strong>Relative optimizer (days-of-cover)</strong> — Optional guard (terminal
-                config) that skips a slot start for a leg when its DoC exceeds <strong>× the cross-customer average</strong>{" "}
-                at that hour, so other customers can still book the berth. Set multiplier <strong>0</strong> to disable.
-              </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>⚓</span> <strong>Roundtrip</strong> — If configured, a minimum number of hours must pass
-                after the previous visit on that <strong>same leg</strong> (same customer, direction, and mode) ended before
-                another start is allowed — not shared across customers.
-              </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>📉</span> <strong>Insufficient inventory</strong> (outbound) — <strong>Fixed band:</strong>{" "}
-                the customer&apos;s attributed stock must cover the parcel (MEPS). <strong>Shared shipping / shared
-                inventory:</strong> the <strong>terminal pool</strong> must be at least MEPS.
-              </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>⛔</span> <strong>Customer inventory floor</strong> (<strong>shared inventory</strong> only)
-                — The <strong>booking customer&apos;s</strong> attributed balance after the move must not go below{" "}
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="optimizer_days_of_cover">
+                <strong>Relative optimizer (days-of-cover)</strong> — Optional guard (terminal config) that skips a slot start
+                for a leg when its DoC exceeds <strong>× the cross-customer average</strong> at that hour, so other customers
+                can still book the berth. Set multiplier <strong>0</strong> to disable.
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="roundtrip">
+                <strong>Roundtrip</strong> — If configured, a minimum number of hours must pass after the previous visit on
+                that <strong>same leg</strong> (same customer, direction, and mode) ended before another start is allowed — not
+                shared across customers.
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="insufficient_inventory">
+                <strong>Insufficient inventory</strong> (outbound) — <strong>Fixed band:</strong> the customer&apos;s
+                attributed stock must cover the parcel (MEPS). <strong>Shared shipping / shared inventory:</strong> the{" "}
+                <strong>terminal pool</strong> must be at least MEPS.
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="customer_inventory_floor">
+                <strong>Customer inventory floor</strong> (<strong>shared inventory</strong> only) — The{" "}
+                <strong>booking customer&apos;s</strong> attributed balance after the move must not go below{" "}
                 <strong>−x</strong> tonnes if you set a deficit limit (terminal config).
-              </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>📈</span> <strong>Tank full</strong> (inbound capacity) — <strong>Fixed band:</strong> the
-                parcel must fit in that customer&apos;s capacity band. <strong>Shared modes:</strong> the terminal pool plus the
-                parcel must not exceed total storage capacity.
-              </li>
-              <li style={{ marginBottom: 8 }}>
-                <span aria-hidden>🚧</span> <strong>Resource occupied</strong> — The visit must fit on a <strong>compatible</strong>{" "}
-                resource (ship → large berth, barge → large or small, train → rail), respect <strong>blackouts</strong>, the{" "}
-                <strong>minimum gap</strong> between consecutive uses of the same berth, and finish <strong>pre-/post-ops
-                included</strong> before the horizon end.
-              </li>
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="tank_full">
+                <strong>Tank full</strong> (inbound capacity) — <strong>Fixed band:</strong> the parcel must fit in that
+                customer&apos;s capacity band. <strong>Shared modes:</strong> the terminal pool plus the parcel must not exceed
+                total storage capacity.
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="resource_occupied">
+                <strong>Resource occupied</strong> — The visit must fit on a <strong>compatible</strong> resource (ship → large
+                berth, barge → large or small, train → rail), respect <strong>blackouts</strong>, the <strong>minimum gap</strong>{" "}
+                between consecutive uses of the same berth, and finish <strong>pre-/post-ops included</strong> before the horizon
+                end.
+              </IntroConstraintItem>
             </ul>
-            <p style={{ marginBottom: 12, fontSize: 13, color: "#64748b" }}>
-              <strong>Other log icons</strong> (active visit, not idle blocks):{" "}
-              <span aria-hidden>✅</span> loaded · <span aria-hidden>🔄</span> loading · <span aria-hidden>⏳</span> pre-ops ·{" "}
-              <span aria-hidden>🏁</span> post-ops · <span aria-hidden>○</span> idle with all checks passed but no new start
-              this hour.
+            <p style={{ marginBottom: 12, fontSize: 13, color: "#64748b", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              <strong>Other log icons</strong> (active visit, not idle blocks):
+              <IntroStatusSample status={{ action: "loaded", customerId: "", direction: "inbound", mode: "ship" }} />
+              loaded
+              <IntroStatusSample status={{ action: "loading_in_progress", customerId: "", direction: "inbound", mode: "ship" }} />
+              loading
+              <IntroStatusSample status={{ action: "pre_ops", customerId: "", direction: "inbound", mode: "ship" }} />
+              pre-ops
+              <IntroStatusSample status={{ action: "post_ops", customerId: "", direction: "inbound", mode: "ship" }} />
+              post-ops
+              <Minus size={14} color="#cbd5e1" strokeWidth={2} aria-hidden />
+              idle with all checks passed but no new start this hour.
             </p>
             <p style={{ marginBottom: 0, fontSize: 13, color: "#64748b" }}>
               <strong>Run Scheduler</strong> on the Schedule page applies this logic to your current customers and resources.

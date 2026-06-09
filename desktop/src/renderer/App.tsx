@@ -1,5 +1,20 @@
 import { HashRouter, Routes, Route, NavLink } from "react-router-dom";
 import { useRef } from "react";
+import {
+  Anchor,
+  BarChart2,
+  BookOpen,
+  Bug,
+  CalendarDays,
+  ClipboardList,
+  Download,
+  LayoutDashboard,
+  Play,
+  Settings,
+  Upload,
+  Users,
+  Warehouse
+} from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import Schedule from "./pages/Schedule";
 import Customers from "./pages/Customers";
@@ -11,6 +26,12 @@ import Simulation from "./pages/Simulation";
 import Config from "./pages/Config";
 import Introduction from "./pages/Introduction";
 import Debugging from "./pages/Debugging";
+
+const NAV_ICON_SIZE = 16;
+
+function NavIcon({ children }: { children: React.ReactNode }) {
+  return <span className="nav-item-icon">{children}</span>;
+}
 
 /** Only active in the browser/web build — no-ops when Electron APIs are present. */
 function useDataIO() {
@@ -68,11 +89,10 @@ export default function App() {
       <div style={{ display: "flex", minHeight: "100vh", overflowX: "hidden", maxWidth: "100vw" }}>
         <div className="sidebar">
           <div className="sidebar-logo">
-            <span className="sidebar-logo-icon">⚓</span>
-            <div>
-              <div>Terminal</div>
-              <div style={{ fontSize: "11px", fontWeight: 400, color: "#64748b" }}>Scheduler</div>
-            </div>
+            <span className="sidebar-logo-icon">
+              <Anchor size={24} strokeWidth={2.25} color="#f59e0b" />
+            </span>
+            <div className="sidebar-logo-text">Terminal scheduler</div>
           </div>
           <nav className="sidebar-nav">
             <div className="sidebar-section-label">Introduction</div>
@@ -80,61 +100,93 @@ export default function App() {
               to="/introduction"
               className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}
             >
-              <span className="nav-item-icon">📘</span> How scheduling works
+              <NavIcon>
+                <BookOpen size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              How scheduling works
             </NavLink>
             <div className="sidebar-section-label" style={{ marginTop: "16px" }}>
               Operations
             </div>
             <NavLink to="/" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">📊</span> Dashboard
+              <NavIcon>
+                <LayoutDashboard size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Dashboard
             </NavLink>
             <NavLink to="/schedule" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">📅</span> Schedule
+              <NavIcon>
+                <CalendarDays size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Schedule
             </NavLink>
             <NavLink to="/analytics" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">📈</span> Analytics
+              <NavIcon>
+                <BarChart2 size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Analytics
             </NavLink>
             <NavLink to="/simulation-log" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">📋</span> Simulation Log
+              <NavIcon>
+                <ClipboardList size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Simulation Log
             </NavLink>
             <NavLink to="/debugging" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">🧪</span> Debugging
+              <NavIcon>
+                <Bug size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Debugging
             </NavLink>
             <NavLink to="/simulation" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">🎬</span> Visualization
+              <NavIcon>
+                <Play size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Visualization
             </NavLink>
             <div className="sidebar-section-label" style={{ marginTop: "16px" }}>Configuration</div>
             <NavLink to="/customers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">👥</span> Customers
+              <NavIcon>
+                <Users size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Customers
             </NavLink>
             <NavLink to="/resources" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">🏗️</span> Resources
+              <NavIcon>
+                <Warehouse size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Resources
             </NavLink>
             <NavLink to="/config" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <span className="nav-item-icon">⚙️</span> Terminal
+              <NavIcon>
+                <Settings size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Terminal
             </NavLink>
           </nav>
 
           {isBrowser && (
-            <div style={{ padding: "12px 16px", borderTop: "1px solid #e2e8f0", display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ padding: "12px 16px", borderTop: "1px solid #1e293b", display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#94a3b8", marginBottom: 2 }}>Data</div>
               <button
                 type="button"
                 className="btn btn-secondary"
-                style={{ fontSize: 12, padding: "5px 10px", width: "100%", justifyContent: "flex-start" }}
+                style={{ fontSize: 12, padding: "5px 10px", width: "100%", justifyContent: "flex-start", background: "#1e293b", borderColor: "#334155", color: "#e2e8f0" }}
                 onClick={handleSave}
                 title="Download all customers, resources, and config as a JSON file"
               >
-                💾 Save data
+                <Download size={14} strokeWidth={2} />
+                Save data
               </button>
               <button
                 type="button"
                 className="btn btn-secondary"
-                style={{ fontSize: 12, padding: "5px 10px", width: "100%", justifyContent: "flex-start" }}
+                style={{ fontSize: 12, padding: "5px 10px", width: "100%", justifyContent: "flex-start", background: "#1e293b", borderColor: "#334155", color: "#e2e8f0" }}
                 onClick={handleLoad}
                 title="Load a previously saved JSON data file"
               >
-                📂 Load data
+                <Upload size={14} strokeWidth={2} />
+                Load data
               </button>
               <input
                 ref={fileRef}

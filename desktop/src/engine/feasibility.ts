@@ -7,8 +7,10 @@ import { laytimeFromConfig } from "./slotLaytime";
 import { customerDirectionTransports } from "./customerTransports";
 import {
   inboundThroughputTonnes,
-  outboundRoundtripCapacityTonnes
+  outboundRoundtripCapacityTonnes,
+  outboundThroughputTonnes
 } from "./customerLegTargets";
+import { resolveCustomerPipelineRates } from "./pipelineFlows";
 
 /** Derived transport leg for feasibility + scheduler (no persisted requests). */
 export interface SchedulingLeg {
@@ -99,11 +101,9 @@ export function runFeasibilityChecks(
   // Mass balance feasibility check per customer
   const periodHours = simulationPeriodHours;
   for (const c of customers) {
-    const rate = c.pipelineFlowPerHour ?? 0;
-    const pipelineInbound =
-      config.pipelineDirection === "inbound" ? rate * periodHours : 0;
-    const pipelineOutbound =
-      config.pipelineDirection === "outbound" ? rate * periodHours : 0;
+    const { inboundTph, outboundTph } = resolveCustomerPipelineRates(c, config);
+    const pipelineInbound = inboundTph * periodHours;
+    const pipelineOutbound = outboundTph * periodHours;
 
     const outboundRows = customerDirectionTransports(c, "outbound");
     const outboundMeps = outboundRows.reduce((mx, row) => Math.max(mx, row.meps), 0);
@@ -148,13 +148,7 @@ export function runFeasibilityChecks(
     }
 
     if (customer.outboundRoundtripHours > 0 && customer.outboundMEPS > 0) {
-      const r = customer.pipelineFlowPerHour ?? 0;
-      const pipelineInbound =
-        config.pipelineDirection === "inbound" ? r * periodHours : 0;
-      const pipelineOutbound =
-        config.pipelineDirection === "outbound" ? r * periodHours : 0;
-      const outboundThroughput =
-        customer.declaredInboundThroughput + pipelineInbound - pipelineOutbound;
+      const outboundThroughput = outboundThroughputTonnes(customer, config, periodHours);
 
       if (outboundThroughput > 0) {
         const maxSlots = Math.floor(periodHours / customer.outboundRoundtripHours);

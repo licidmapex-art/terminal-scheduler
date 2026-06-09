@@ -15,6 +15,8 @@ import {
   computeStorageShareFromThroughput,
   storageShareAppliesToCapacityBand
 } from "../lib/defaultStorageShare";
+import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
+import type { SimulationConfig as EngineSimulationConfig } from "../../types";
 
 interface Customer {
   id: string;
@@ -23,6 +25,8 @@ interface Customer {
   currentInventory: number;
   storageShare: number;
   pipelineFlowPerHour: number;
+  pipelineInboundPerHour?: number;
+  pipelineOutboundPerHour?: number;
   inboundTransports?: TransportRow[];
   outboundTransports?: TransportRow[];
   inboundMEPS?: number;
@@ -113,25 +117,15 @@ function normalizeRows(rows?: TransportRow[], fallback?: Partial<TransportRow>):
   return [];
 }
 
-/**
- * Split the stored signed pipelineFlowPerHour into separate inbound/outbound display values.
- * Old data (unsigned + pipelineDirection) and new data (signed, direction="inbound") both handled.
- */
 function computePipelineFlows(
   customer: Customer | null | undefined,
   configPipelineDirection: "inbound" | "outbound"
 ): { inbound: string; outbound: string } {
-  const net = customer?.pipelineFlowPerHour ?? 0;
-  if (net < 0) {
-    // New-style signed value: negative means outbound drain
-    return { inbound: "0", outbound: String(-net) };
-  }
-  if (configPipelineDirection === "outbound") {
-    // Old-style unsigned value with outbound terminal direction
-    return { inbound: "0", outbound: String(net) };
-  }
-  // Inbound (default or explicitly set)
-  return { inbound: String(net), outbound: "0" };
+  if (!customer) return { inbound: "0", outbound: "0" };
+  const rates = resolveCustomerPipelineRates(customer, {
+    pipelineDirection: configPipelineDirection
+  } as EngineSimulationConfig);
+  return { inbound: String(rates.inboundTph), outbound: String(rates.outboundTph) };
 }
 
 function snapshotFromCustomer(
@@ -470,6 +464,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         currentInventory: inventory,
         storageShare: storageShareVal,
         pipelineFlowPerHour: netPipeline,
+        pipelineInboundPerHour: inboundPipeline,
+        pipelineOutboundPerHour: outboundPipeline,
         inboundTransports: inboundRows,
         outboundTransports: outboundRows,
         inboundMEPS: inboundPrimary.meps,
@@ -901,7 +897,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         {openSections.timeShared && (
           <div className="customer-form-section-content">
             <p className="form-helper" style={{ marginBottom: 12 }}>
-              Used in Time-shared mode. x = minimum band (tonnes), y = entitlement triangle duration (hours).
+              Used in Time-shared mode on the inventory chart. Triangle starts at cargo size (t), decreases to 0
+              over cargo ÷ pipeline flow (h). Min band x is stored for compatibility.
             </p>
             <div className="form-grid">
               <div className="form-group">
@@ -925,6 +922,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   value={timeSharedDuration}
                   onChange={(e) => setTimeSharedDuration(e.target.value)}
                 />
+                <span className="form-helper">On the chart, duration is cargo ÷ pipeline flow; this field is kept for compatibility.</span>
               </div>
             </div>
           </div>

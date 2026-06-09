@@ -1,3 +1,4 @@
+import { TrendingUp } from "lucide-react";
 import { useMemo } from "react";
 import {
   LineChart,
@@ -70,7 +71,9 @@ export default function DocTimelineChart({ docTrendByCustomer, startDate, custom
   if (seriesIds.length === 0 || chartData.length === 0) {
     return (
       <div className="empty-state">
-        <div className="empty-state-icon">📈</div>
+        <div className="empty-state-icon">
+          <TrendingUp size={48} strokeWidth={1.5} />
+        </div>
         <div className="empty-state-title">No days-of-cover timeline</div>
         <div className="empty-state-text">
           No customer had a positive DoC denominator (pipeline and/or scheduled transport targets from the model). Add
