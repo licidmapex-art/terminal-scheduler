@@ -249,3 +249,17 @@ export function summaryToPromptText(summary: AnalyticsAiSummary, userNotes?: str
   };
   return JSON.stringify(payload, null, 2);
 }
+
+/** JSON payload plus optional notes for a bespoke question about the same run. */
+export function questionToPromptText(
+  summary: AnalyticsAiSummary,
+  question: string,
+  userNotes?: string
+): string {
+  const payload = {
+    ...summary,
+    userQuestion: question.trim(),
+    notes: userNotes?.trim() || undefined
+  };
+  return JSON.stringify(payload, null, 2);
+}

@@ -35,8 +35,9 @@ export function countLegSlotsThroughHour(
 }
 
 /**
- * Sort legs for scheduling. In shared shipping, legs in the same direction/mode pool
- * rotate by fulfillment ratio so one customer cannot take the whole aggregate target.
+ * Sort legs for scheduling. In shared shipping (all legs) and shared inventory (inbound only),
+ * legs in the same direction/mode pool rotate by fulfillment ratio so one customer cannot
+ * monopolize early slots.
  */
 export function compareSchedulingLegs(
   a: SchedulingLeg,
@@ -45,9 +46,13 @@ export function compareSchedulingLegs(
   metricB: number,
   sharedShipping: boolean,
   slotsA: number,
-  slotsB: number
+  slotsB: number,
+  sharedInventoryInboundPool = false
 ): number {
-  const sharedPool = sharedShipping && a.direction === b.direction && a.mode === b.mode;
+  const sharedPool =
+    a.direction === b.direction &&
+    a.mode === b.mode &&
+    (sharedShipping || (sharedInventoryInboundPool && a.direction === "inbound"));
 
   if (sharedPool) {
     const ratioA = customerLegFulfillmentRatio(a, slotsA);
@@ -70,6 +75,44 @@ export function normalizedOptimizerRelativeDocMultiplier(config: SimulationConfi
   const raw = Number(config.optimizerRelativeDocMultiplier ?? 0);
   if (!Number.isFinite(raw)) return 0;
   return Math.max(0, raw);
+}
+
+export function normalizedOptimizerRelativeFulfillmentMultiplier(config: SimulationConfig): number {
+  const raw = Number(config.optimizerRelativeFulfillmentMultiplier ?? 0);
+  if (!Number.isFinite(raw)) return 0;
+  return Math.max(0, raw);
+}
+
+/** Same pool scope as fulfilment-ratio merit order in compareSchedulingLegs. */
+export function legUsesFulfillmentPool(
+  leg: Pick<SchedulingLeg, "direction">,
+  sharedShipping: boolean,
+  sharedInventory: boolean
+): boolean {
+  if (sharedShipping) return true;
+  return sharedInventory && leg.direction === "inbound";
+}
+
+export function averagePoolFulfillmentRatioAtHour(
+  leg: SchedulingLeg,
+  legs: SchedulingLeg[],
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  h: number,
+  sharedShipping: boolean,
+  sharedInventory: boolean
+): number | null {
+  if (!legUsesFulfillmentPool(leg, sharedShipping, sharedInventory)) return null;
+  const poolLegs = legs.filter((l) => l.direction === leg.direction && l.mode === leg.mode);
+  if (poolLegs.length === 0) return null;
+  const ratios = poolLegs
+    .map((l) => {
+      const slots = countLegSlotsThroughHour(l, assignedSlots, simStartMs, h - 1);
+      return customerLegFulfillmentRatio(l, slots);
+    })
+    .filter((r): r is number => Number.isFinite(r));
+  if (ratios.length === 0) return null;
+  return ratios.reduce((s, r) => s + r, 0) / ratios.length;
 }
 
 function pipelineInboundPerDayCustomer(customer: Customer, config: SimulationConfig): number {
@@ -182,6 +225,79 @@ function customerMinLegDaysOfCover(
   return customerRepresentativeDaysOfCover(invById[customer.id] ?? 0, customer, config, periodHours);
 }
 
+function terminalInventoryForDaysOfCover(
+  config: SimulationConfig,
+  invById: Record<string, number>,
+  terminalInventory: number,
+  customers: Customer[]
+): number {
+  const mode = config.storageMode ?? "fixed_band";
+  if (mode === "shared_shipping") return terminalInventory;
+  return customers.reduce((s, c) => s + (invById[c.id] ?? 0), 0);
+}
+
+function terminalCapacityForDaysOfCover(customers: Customer[], config: SimulationConfig): number {
+  const mode = config.storageMode ?? "fixed_band";
+  if (mode === "shared_shipping" || mode === "shared_inventory") {
+    return config.totalStorageCapacity ?? 100000;
+  }
+  return customers.reduce((s, c) => s + getCustomerMaxCapacity(c, config), 0);
+}
+
+function totalTerminalOutboundPressurePerDay(
+  customers: Customer[],
+  legs: SchedulingLeg[],
+  periodHours: number,
+  config: SimulationConfig
+): number {
+  return customers.reduce(
+    (s, c) => s + customerOutboundPressurePerDay(c, legs, periodHours, config),
+    0
+  );
+}
+
+function totalTerminalInboundPressurePerDay(
+  customers: Customer[],
+  legs: SchedulingLeg[],
+  periodHours: number,
+  config: SimulationConfig
+): number {
+  return customers.reduce(
+    (s, c) => s + customerInboundPressurePerDay(c, legs, periodHours, config),
+    0
+  );
+}
+
+/**
+ * Terminal-wide DoC: total inventory ÷ summed outbound pressure, headroom ÷ summed inbound pressure,
+ * then the minimum when both apply (same ingredients as per-customer DoC, aggregated).
+ */
+export function combinedTerminalDaysOfCoverAtHour(
+  customers: Customer[],
+  legs: SchedulingLeg[],
+  config: SimulationConfig,
+  periodHours: number,
+  invById: Record<string, number>,
+  terminalInventory: number,
+  _sharedShipping: boolean
+): number | null {
+  const inv = terminalInventoryForDaysOfCover(config, invById, terminalInventory, customers);
+  const capacity = terminalCapacityForDaysOfCover(customers, config);
+  const headroom = Math.max(0, capacity - inv);
+  const outPressure = totalTerminalOutboundPressurePerDay(customers, legs, periodHours, config);
+  const inPressure = totalTerminalInboundPressurePerDay(customers, legs, periodHours, config);
+
+  const cands: number[] = [];
+  if (outPressure > SORT_METRIC_EPS) cands.push(inv / outPressure);
+  if (inPressure > SORT_METRIC_EPS) cands.push(headroom / inPressure);
+  if (cands.length === 0) {
+    const daily = Math.max(inPressure, outPressure);
+    if (daily <= 0) return null;
+    return inv / daily;
+  }
+  return Math.min(...cands);
+}
+
 /**
  * Mean of each customer's tightest leg DoC at this hour (aligns with Analytics average DoC).
  */
@@ -222,4 +338,16 @@ export function relativeOptimizerShouldYield(
   if (!Number.isFinite(legMetric) || averageDoc == null || !Number.isFinite(averageDoc)) return false;
   if (averageDoc <= SORT_METRIC_EPS) return false;
   return legMetric > multiplier * averageDoc;
+}
+
+/** True when this leg is too far ahead on annual fulfilment vs the direction+mode pool average. */
+export function relativeFulfillmentOptimizerShouldYield(
+  legRatio: number,
+  averageRatio: number | null,
+  multiplier: number
+): boolean {
+  if (multiplier <= 0) return false;
+  if (!Number.isFinite(legRatio) || averageRatio == null || !Number.isFinite(averageRatio)) return false;
+  if (averageRatio <= SORT_METRIC_EPS) return false;
+  return legRatio > multiplier * averageRatio;
 }

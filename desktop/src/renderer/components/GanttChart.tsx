@@ -9,18 +9,24 @@ import React, {
 } from "react";
 import { Loader2, Zap } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
+import { HelpPopover } from "./HelpPopover";
 import { setLastSchedulerRun, useStore } from "../store";
 import { formatRelativeTime } from "../lib/formatRelativeTime";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import {
   totalInboundPipelineTph,
-  totalOutboundPipelineTph
+  totalOutboundPipelineTph,
+  resolveCustomerPipelineRates
 } from "../lib/pipelineFlows";
+import { sharedInventoryPipelineOutboundTakeCap } from "../../engine/inventory";
 import {
+  AVERAGE_CUSTOMER_ID,
+  COMBINED_TERMINAL_ID,
   buildConstraintHourData,
   buildDocTrendByCustomer,
   buildPacingByCustomerMode,
   buildPacingLegOptions,
+  isRealCustomerDocId,
   SAMPLE_HOUR_STEP
 } from "../lib/timelineChartData";
 import {
@@ -168,6 +174,13 @@ function simulationLogIsHourAligned(log: SimLogRow[]): boolean {
   return true;
 }
 
+function formatDocTooltip(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  if (v >= 100) return `${Math.round(v)} d`;
+  if (v >= 10) return `${v.toFixed(1)} d`;
+  return `${v.toFixed(2)} d`;
+}
+
 /** First ~3 weeks sampled every hour so opening stock and pipeline drift stay visible when zoomed out (6h-only samples looked like “no data” until first berth activity). */
 const INVENTORY_DENSE_HOURS = 21 * 24;
 
@@ -309,6 +322,8 @@ export default function GanttChart() {
   const [showTimeshared, setShowTimeshared] = useState(true);
   const [showStorageCapLine, setShowStorageCapLine] = useState(true);
   const [showDoc, setShowDoc] = useState(false);
+  const [showAverageDoc, setShowAverageDoc] = useState(true);
+  const [showCombinedDoc, setShowCombinedDoc] = useState(true);
   const [showPacing, setShowPacing] = useState(false);
   const [showConstraints, setShowConstraints] = useState(false);
   const [enabledConstraints, setEnabledConstraints] = useState<Set<BlockingConstraintKey>>(
@@ -985,6 +1000,8 @@ export default function GanttChart() {
       if (!terminalTotalByHour.length) return [];
       const cap = cfg.totalStorageCapacity ?? 100000;
       const EPS = 1;
+      const storageMode = cfg.storageMode ?? "fixed_band";
+      const sharedInventory = storageMode === "shared_inventory";
       const segments: PipelineSegment[] = [];
       let curStatus: PipelineSegment["status"] | null = null;
       let segStart = 0;
@@ -993,6 +1010,21 @@ export default function GanttChart() {
         let status: PipelineSegment["status"];
         if (direction === "inbound") {
           status = total >= cap - EPS ? "tank_top" : "flowing";
+        } else if (sharedInventory) {
+          const canFlow = customers.some((c) => {
+            const { outboundTph } = resolveCustomerPipelineRates(c, cfg as EngineSimulationConfig);
+            if (outboundTph <= 0) return false;
+            const inv =
+              h === 0
+                ? (c.currentInventory ?? 0)
+                : (ganttInventorySeries.byCustomer.get(c.id)?.[h - 1] ?? 0);
+            return sharedInventoryPipelineOutboundTakeCap(
+              inv,
+              outboundTph,
+              cfg as EngineSimulationConfig
+            ) > EPS;
+          });
+          status = canFlow ? "flowing" : "tank_bottom";
         } else {
           status = total <= EPS ? "tank_bottom" : "flowing";
         }
@@ -1007,7 +1039,7 @@ export default function GanttChart() {
       }
       return segments;
     },
-    [terminalTotalByHour, cfg]
+    [terminalTotalByHour, cfg, customers, ganttInventorySeries.byCustomer]
   );
 
   const inboundPipelineSegments = useMemo(
@@ -1030,7 +1062,9 @@ export default function GanttChart() {
     let minV = Infinity;
     let maxV = -Infinity;
     for (const [cid, series] of Object.entries(docTrendByCustomer)) {
-      if (!enabledCustomers.has(cid)) continue;
+      if (cid === AVERAGE_CUSTOMER_ID && !showAverageDoc) continue;
+      if (cid === COMBINED_TERMINAL_ID && !showCombinedDoc) continue;
+      if (isRealCustomerDocId(cid) && !enabledCustomers.has(cid)) continue;
       for (const v of series) {
         if (v != null && Number.isFinite(v)) {
           minV = Math.min(minV, v);
@@ -1040,8 +1074,8 @@ export default function GanttChart() {
     }
     if (!Number.isFinite(minV)) return null;
     if (maxV === minV) maxV = minV + 1;
-    return { lo: Math.max(0, minV * 0.95), hi: maxV * 1.05 };
-  }, [showDoc, docTrendByCustomer, enabledCustomers]);
+    return { lo: Math.max(0, minV * 0.95), hi: Math.max(1, maxV * 1.05) };
+  }, [showDoc, docTrendByCustomer, enabledCustomers, showAverageDoc, showCombinedDoc]);
 
   const pacingYAxis = useMemo(() => {
     if (!showPacing || !selectedPacingOption) return null;
@@ -1220,6 +1254,24 @@ export default function GanttChart() {
       });
     }
     if (showDoc && docYAxis) {
+      if (showAverageDoc && docTrendByCustomer[AVERAGE_CUSTOMER_ID]) {
+        entries.push({
+          id: "doc-average",
+          label: "Average DoC (all customers)",
+          kind: "dashed-line",
+          color: "#64748b",
+          dashArray: "6 3"
+        });
+      }
+      if (showCombinedDoc && docTrendByCustomer[COMBINED_TERMINAL_ID]) {
+        entries.push({
+          id: "doc-combined",
+          label: "Combined DoC (terminal)",
+          kind: "dashed-line",
+          color: "#0f172a",
+          dashArray: "4 2"
+        });
+      }
       for (const c of legendCustomers) {
         if (!enabledCustomers.has(c.id) || !docTrendByCustomer[c.id]) continue;
         entries.push({
@@ -1312,6 +1364,8 @@ export default function GanttChart() {
     showDoc,
     docYAxis,
     docTrendByCustomer,
+    showAverageDoc,
+    showCombinedDoc,
     showPacing,
     pacingYAxis,
     selectedPacingOption,
@@ -1426,9 +1480,11 @@ export default function GanttChart() {
           </div>
         </div>
         <div className="dashboard-hero-actions">
-          <span className="chart-hour-zoom-hint" style={{ color: "#94a3b8" }}>
-            Scroll wheel to zoom (cursor-centered)
-          </span>
+          <HelpPopover
+            label="Chart zoom help"
+            content="Scroll wheel to zoom (cursor-centered)"
+            size={14}
+          />
         </div>
       </div>
 
@@ -1531,6 +1587,33 @@ export default function GanttChart() {
             )}
           </div>
         </div>
+        {showDoc &&
+          hasDocConfig &&
+          (docTrendByCustomer[AVERAGE_CUSTOMER_ID] || docTrendByCustomer[COMBINED_TERMINAL_ID]) && (
+            <div className="multi-metric-toolbar-group">
+              <span className="multi-metric-toolbar-label">Days of cover</span>
+              <div className="multi-metric-toggles">
+                {docTrendByCustomer[AVERAGE_CUSTOMER_ID] && (
+                  <button
+                    type="button"
+                    className={`metric-toggle${showAverageDoc ? " metric-toggle--on" : ""}`}
+                    onClick={() => setShowAverageDoc((v) => !v)}
+                  >
+                    Average
+                  </button>
+                )}
+                {docTrendByCustomer[COMBINED_TERMINAL_ID] && (
+                  <button
+                    type="button"
+                    className={`metric-toggle${showCombinedDoc ? " metric-toggle--on" : ""}`}
+                    onClick={() => setShowCombinedDoc((v) => !v)}
+                  >
+                    Combined
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         {hasConstraintData && showConstraints && (
           <div className="multi-metric-toolbar-group">
             <span className="multi-metric-toolbar-label">Constraints</span>
@@ -2126,9 +2209,37 @@ export default function GanttChart() {
                   />
                 )}
                 {showDoc &&
+                  showAverageDoc &&
+                  docYAxis &&
+                  docTrendByCustomer[AVERAGE_CUSTOMER_ID] && (
+                  <polyline
+                    key="doc-average"
+                    points={docOverlayPoints(AVERAGE_CUSTOMER_ID)}
+                    fill="none"
+                    stroke="#64748b"
+                    strokeWidth={2}
+                    strokeDasharray="6 3"
+                    strokeOpacity={0.95}
+                  />
+                )}
+                {showDoc &&
+                  showCombinedDoc &&
+                  docYAxis &&
+                  docTrendByCustomer[COMBINED_TERMINAL_ID] && (
+                  <polyline
+                    key="doc-combined"
+                    points={docOverlayPoints(COMBINED_TERMINAL_ID)}
+                    fill="none"
+                    stroke="#0f172a"
+                    strokeWidth={2.5}
+                    strokeDasharray="4 2"
+                    strokeOpacity={0.95}
+                  />
+                )}
+                {showDoc &&
                   docYAxis &&
                   Object.keys(docTrendByCustomer)
-                    .filter((cid) => enabledCustomers.has(cid))
+                    .filter((cid) => isRealCustomerDocId(cid) && enabledCustomers.has(cid))
                     .map((cid) => {
                       const pts = docOverlayPoints(cid);
                       if (!pts) return null;
@@ -2301,6 +2412,26 @@ export default function GanttChart() {
               t
             </div>
           ))}
+          {showDoc && simulationLog[invChartTooltip.hourIndex] && (
+            <>
+              {showAverageDoc && docTrendByCustomer[AVERAGE_CUSTOMER_ID] && (
+                <div style={{ marginTop: 6, opacity: 0.92 }}>
+                  Average DoC:{" "}
+                  {formatDocTooltip(
+                    docTrendByCustomer[AVERAGE_CUSTOMER_ID]![invChartTooltip.hourIndex]
+                  )}
+                </div>
+              )}
+              {showCombinedDoc && docTrendByCustomer[COMBINED_TERMINAL_ID] && (
+                <div style={{ opacity: 0.92 }}>
+                  Combined DoC:{" "}
+                  {formatDocTooltip(
+                    docTrendByCustomer[COMBINED_TERMINAL_ID]![invChartTooltip.hourIndex]
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import type { StorageMode } from "../../types";
+import { FormLabelWithHelp, HelpPopover } from "./HelpPopover";
 
 function parseStorageMode(raw: unknown): StorageMode {
   if (raw === "commingled") return "shared_shipping";
@@ -14,6 +15,17 @@ function parseStorageMode(raw: unknown): StorageMode {
   }
   return "fixed_band";
 }
+
+const STORAGE_MODE_HELP: Record<StorageMode, string> = {
+  fixed_band:
+    "Each customer has a dedicated capacity band (storage share × total). Tank-full and inventory gates apply per customer.",
+  shared_shipping:
+    "One terminal-wide pool for constraints. Reported inventory is split by storage share (proportional allocation of flows).",
+  time_shared_storage:
+    "Same scheduling as fixed band. Per-customer triangle overlay (x, y on the customer) shows dynamic entitlement over the slot; optional Gantt “TS” layer.",
+  shared_inventory:
+    "Terminal-wide gates like shared shipping, but berth moves attribute 100% of volume to the booking customer (not proportional). Inbound berth pace is pooled across customers by transport mode so early-year slots rotate fairly."
+};
 
 interface SimulationConfigFormProps {
   onSaved?: () => void;
@@ -37,6 +49,33 @@ function toDatetimeLocal(value: unknown, fallback: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function StorageModeCard({
+  mode,
+  title,
+  selected,
+  onSelect
+}: {
+  mode: StorageMode;
+  title: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`storage-mode-card${selected ? " selected" : ""}`}
+      onClick={onSelect}
+    >
+      <div className="storage-mode-card-title-row">
+        <div className="storage-mode-card-title">{title}</div>
+        <span className="storage-mode-card-help" onClick={(e) => e.stopPropagation()}>
+          <HelpPopover content={STORAGE_MODE_HELP[mode]} label={`${title} help`} />
+        </span>
+      </div>
+    </button>
+  );
+}
+
 export default function SimulationConfigForm({ onSaved }: SimulationConfigFormProps) {
   const location = useLocation();
   const defaults = getDefaultDates();
@@ -49,6 +88,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
   const [pacerRoundingDirection, setPacerRoundingDirection] = useState<"up" | "down">("up");
   const [pacerRoundAtDecile, setPacerRoundAtDecile] = useState("1");
   const [optimizerRelativeDocMultiplier, setOptimizerRelativeDocMultiplier] = useState("0");
+  const [optimizerRelativeFulfillmentMultiplier, setOptimizerRelativeFulfillmentMultiplier] = useState("0");
   const [minSlotIntervalHours, setMinSlotIntervalHours] = useState("0");
   const [preOpsHours, setPreOpsHours] = useState("0");
   const [postOpsHours, setPostOpsHours] = useState("0");
@@ -111,6 +151,12 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               ? Math.max(0, optimizerRaw)
               : 0;
           setOptimizerRelativeDocMultiplier(String(optimizerNorm));
+          const fulfillmentRaw = c.optimizerRelativeFulfillmentMultiplier;
+          const fulfillmentNorm =
+            typeof fulfillmentRaw === "number" && Number.isFinite(fulfillmentRaw)
+              ? Math.max(0, fulfillmentRaw)
+              : 0;
+          setOptimizerRelativeFulfillmentMultiplier(String(fulfillmentNorm));
           const pre = c.preOpsHours;
           setPreOpsHours(String(typeof pre === "number" ? pre : 0));
           const post = c.postOpsHours;
@@ -136,6 +182,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
     const minInterval = parseFloat(minSlotIntervalHours);
     const pacerDecile = parseInt(pacerRoundAtDecile, 10);
     const optimizerMult = parseFloat(optimizerRelativeDocMultiplier);
+    const fulfillmentOptimizerMult = parseFloat(optimizerRelativeFulfillmentMultiplier);
     const preOps = parseFloat(preOpsHours);
     const postOps = parseFloat(postOpsHours);
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
@@ -155,7 +202,11 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
       return;
     }
     if (isNaN(optimizerMult) || optimizerMult < 0) {
-      setError("Relative optimizer multiplier must be a non-negative number");
+      setError("Relative DoC optimizer multiplier must be a non-negative number");
+      return;
+    }
+    if (isNaN(fulfillmentOptimizerMult) || fulfillmentOptimizerMult < 0) {
+      setError("Relative fulfilment optimizer multiplier must be a non-negative number");
       return;
     }
     if (isNaN(preOps) || preOps < 0 || preOps > 48) {
@@ -203,6 +254,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         pacerRoundingDirection,
         pacerRoundAtDecile: pacerDecile,
         optimizerRelativeDocMultiplier: Math.max(0, optimizerMult),
+        optimizerRelativeFulfillmentMultiplier: Math.max(0, fulfillmentOptimizerMult),
         minSlotIntervalHours: minInterval,
         preOpsHours: preOps,
         postOpsHours: postOps,
@@ -236,11 +288,18 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         <div className="config-section-header">
           <span className="config-section-num">1</span>
           <div>
-            <div className="config-section-title">Simulation horizon</div>
-            <p className="config-section-desc">
-              Defines the period the scheduler simulates hour-by-hour. Per-customer inbound and outbound pipeline flows
-              (t/h) are set on each customer profile. Berth occupancy is evaluated inside this window.
-            </p>
+            <div className="config-section-title-row">
+              <div className="config-section-title">Simulation horizon</div>
+              <HelpPopover
+                label="Simulation horizon help"
+                content={
+                  <>
+                    Defines the period the scheduler simulates hour-by-hour. Per-customer inbound and outbound pipeline
+                    flows (t/h) are set on each customer profile. Berth occupancy is evaluated inside this window.
+                  </>
+                }
+              />
+            </div>
           </div>
         </div>
         <div className="form-grid">
@@ -271,64 +330,62 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         <div className="config-section-header">
           <span className="config-section-num">2</span>
           <div>
-            <div className="config-section-title">Storage model</div>
-            <p className="config-section-desc">
-              Choose how berth inventory gates and accounting interact with terminal storage capacity. Set total and per-tank capacity under <strong>Resources</strong>.
-            </p>
+            <div className="config-section-title-row">
+              <div className="config-section-title">Storage model</div>
+              <HelpPopover
+                label="Storage model help"
+                content={
+                  <>
+                    Choose how berth inventory gates and accounting interact with terminal storage capacity. Set total
+                    and per-tank capacity under <strong>Resources</strong>.
+                  </>
+                }
+              />
+            </div>
           </div>
         </div>
         <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">Allocation mode</label>
           <div className="storage-mode-cards">
-            <button
-              type="button"
-              className={`storage-mode-card${storageMode === "fixed_band" ? " selected" : ""}`}
-              onClick={() => setStorageMode("fixed_band")}
-            >
-              <div className="storage-mode-card-title">Fixed band</div>
-              <div className="storage-mode-card-body">
-                Each customer has a dedicated capacity band (storage share × total). Tank-full and inventory gates
-                apply per customer.
-              </div>
-            </button>
-            <button
-              type="button"
-              className={`storage-mode-card${storageMode === "shared_shipping" ? " selected" : ""}`}
-              onClick={() => setStorageMode("shared_shipping")}
-            >
-              <div className="storage-mode-card-title">Shared shipping</div>
-              <div className="storage-mode-card-body">
-                One terminal-wide pool for constraints. Reported inventory is split by storage share (proportional
-                allocation of flows).
-              </div>
-            </button>
-            <button
-              type="button"
-              className={`storage-mode-card${storageMode === "time_shared_storage" ? " selected" : ""}`}
-              onClick={() => setStorageMode("time_shared_storage")}
-            >
-              <div className="storage-mode-card-title">Time-shared storage</div>
-              <div className="storage-mode-card-body">
-                Same scheduling as fixed band. Per-customer triangle overlay (x, y on the customer) shows dynamic
-                entitlement over the slot; optional Gantt “TS” layer.
-              </div>
-            </button>
-            <button
-              type="button"
-              className={`storage-mode-card${storageMode === "shared_inventory" ? " selected" : ""}`}
-              onClick={() => setStorageMode("shared_inventory")}
-            >
-              <div className="storage-mode-card-title">Shared inventory</div>
-              <div className="storage-mode-card-body">
-                Terminal-wide gates like shared shipping, but berth moves attribute 100% of volume to the booking
-                customer (not proportional).
-              </div>
-            </button>
+            <StorageModeCard
+              mode="fixed_band"
+              title="Fixed band"
+              selected={storageMode === "fixed_band"}
+              onSelect={() => setStorageMode("fixed_band")}
+            />
+            <StorageModeCard
+              mode="shared_shipping"
+              title="Shared shipping"
+              selected={storageMode === "shared_shipping"}
+              onSelect={() => setStorageMode("shared_shipping")}
+            />
+            <StorageModeCard
+              mode="time_shared_storage"
+              title="Time-shared storage"
+              selected={storageMode === "time_shared_storage"}
+              onSelect={() => setStorageMode("time_shared_storage")}
+            />
+            <StorageModeCard
+              mode="shared_inventory"
+              title="Shared inventory"
+              selected={storageMode === "shared_inventory"}
+              onSelect={() => setStorageMode("shared_inventory")}
+            />
           </div>
         </div>
         {storageMode === "shared_inventory" && (
           <div className="form-group" style={{ marginTop: 16, maxWidth: 420 }}>
-            <label className="form-label">Max. customer deficit x (tonnes)</label>
+            <FormLabelWithHelp
+              help={
+                <>
+                  For the booking customer only: attributed inventory may not go below −x after an outbound
+                  parcel (full MEPS) or outbound pipeline hour. x = 0 disables this customer-floor check
+                  (pool borrowing/lending allowed). Terminal total must still cover MEPS for berth moves.
+                </>
+              }
+            >
+              Max. customer deficit x (tonnes)
+            </FormLabelWithHelp>
             <input
               type="number"
               min={0}
@@ -337,11 +394,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               value={sharedInventoryCustomerDeficitLimitTonnes}
               onChange={(e) => setSharedInventoryCustomerDeficitLimitTonnes(e.target.value)}
             />
-            <div className="form-helper">
-              For the booking customer only: attributed inventory may not go below −x after an outbound parcel
-              (full MEPS). x = 0 disables this customer-floor check (pool borrowing/lending allowed). Terminal total
-              must still cover MEPS.
-            </div>
           </div>
         )}
       </div>
@@ -350,17 +402,26 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         <div className="config-section-header">
           <span className="config-section-num">3</span>
           <div>
-            <div className="config-section-title">Operational laytime</div>
-            <p className="config-section-desc">
-              Minimum gap between consecutive bookings on the same resource, plus optional pre-ops and post-ops time
-              alongside without cargo transfer. Pre/post extend each slot&apos;s occupation (Gantt width and berth
-              blocking); inventory moves only during the cargo window between them.
-            </p>
+            <div className="config-section-title-row">
+              <div className="config-section-title">Operational laytime</div>
+              <HelpPopover
+                label="Operational laytime help"
+                content={
+                  <>
+                    Minimum gap between consecutive bookings on the same resource, plus optional pre-ops and post-ops
+                    time alongside without cargo transfer. Pre/post extend each slot&apos;s occupation (Gantt width and
+                    berth blocking); inventory moves only during the cargo window between them.
+                  </>
+                }
+              />
+            </div>
           </div>
         </div>
         <div className="form-grid">
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Pre-ops (hours)</label>
+            <FormLabelWithHelp help="Alongside before pumping (e.g. mooring, hook-up). No inventory flow.">
+              Pre-ops (hours)
+            </FormLabelWithHelp>
             <input
               type="number"
               className="form-input"
@@ -370,10 +431,11 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               value={preOpsHours}
               onChange={(e) => setPreOpsHours(e.target.value)}
             />
-            <div className="form-helper">Alongside before pumping (e.g. mooring, hook-up). No inventory flow.</div>
           </div>
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Minimum gap between slots (hours)</label>
+            <FormLabelWithHelp help="0–48 h. Cleared time after berth release before the next visit starts.">
+              Minimum gap between slots (hours)
+            </FormLabelWithHelp>
             <input
               type="number"
               className="form-input"
@@ -383,10 +445,11 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               value={minSlotIntervalHours}
               onChange={(e) => setMinSlotIntervalHours(e.target.value)}
             />
-            <div className="form-helper">0–48 h. Cleared time after berth release before the next visit starts.</div>
           </div>
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Post-ops (hours)</label>
+            <FormLabelWithHelp help="Alongside after pumping (e.g. flush, unmoor). No inventory flow.">
+              Post-ops (hours)
+            </FormLabelWithHelp>
             <input
               type="number"
               className="form-input"
@@ -396,7 +459,6 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               value={postOpsHours}
               onChange={(e) => setPostOpsHours(e.target.value)}
             />
-            <div className="form-helper">Alongside after pumping (e.g. flush, unmoor). No inventory flow.</div>
           </div>
         </div>
       </div>
@@ -405,15 +467,20 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         <div className="config-section-header">
           <span className="config-section-num">4</span>
           <div>
-            <div className="config-section-title">Pacing behavior</div>
-            <p className="config-section-desc">
-              Controls when the pacer allows the next slot relative to the fractional pace tracker.
-            </p>
+            <div className="config-section-title-row">
+              <div className="config-section-title">Pacing behavior</div>
+              <HelpPopover
+                label="Pacing behavior help"
+                content="Controls when the pacer allows the next slot relative to the fractional pace tracker."
+              />
+            </div>
           </div>
         </div>
         <div className="form-grid">
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Rounding mode</label>
+            <FormLabelWithHelp help="Up: 1.3 becomes 2 when decile ≤ 3. Down: with decile 3, 1.3 stays 1 until pace exceeds 1.7.">
+              Rounding mode
+            </FormLabelWithHelp>
             <select
               className="form-select"
               value={pacerRoundingDirection}
@@ -422,12 +489,11 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               <option value="up">Round up from decile</option>
               <option value="down">Round down until mirrored decile</option>
             </select>
-            <div className="form-helper">
-              Up: 1.3 becomes 2 when decile ≤ 3. Down: with decile 3, 1.3 stays 1 until pace exceeds 1.7.
-            </div>
           </div>
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Round threshold decile (1–9)</label>
+            <FormLabelWithHelp help="Example: 3 = threshold 0.3. Use higher values to delay extra slots.">
+              Round threshold decile (1–9)
+            </FormLabelWithHelp>
             <input
               type="number"
               className="form-input"
@@ -437,12 +503,18 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               value={pacerRoundAtDecile}
               onChange={(e) => setPacerRoundAtDecile(e.target.value)}
             />
-            <div className="form-helper">
-              Example: 3 = threshold 0.3. Use higher values to delay extra slots.
-            </div>
           </div>
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <label className="form-label">Relative optimizer (× average DoC)</label>
+            <FormLabelWithHelp
+              help={
+                <>
+                  When a leg&apos;s days-of-cover exceeds this multiple of the cross-customer average at that hour,
+                  that customer yields the slot attempt (others may still book). Set 0 to disable.
+                </>
+              }
+            >
+              Relative optimizer (× average DoC)
+            </FormLabelWithHelp>
             <input
               type="number"
               className="form-input"
@@ -451,10 +523,27 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               value={optimizerRelativeDocMultiplier}
               onChange={(e) => setOptimizerRelativeDocMultiplier(e.target.value)}
             />
-            <div className="form-helper">
-              When a leg&apos;s days-of-cover exceeds this multiple of the cross-customer average at that hour, that
-              customer yields the slot attempt (others may still book). Set 0 to disable.
-            </div>
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
+            <FormLabelWithHelp
+              help={
+                <>
+                  In shared shipping (all legs) and shared inventory (inbound only): yield when this leg&apos;s annual
+                  fulfilment % exceeds this multiple of the direction+mode pool average — reduces streaks when a customer
+                  is ahead on ship quota. Set 0 to disable.
+                </>
+              }
+            >
+              Relative optimizer (× pool fulfilment)
+            </FormLabelWithHelp>
+            <input
+              type="number"
+              className="form-input"
+              min={0}
+              step={0.1}
+              value={optimizerRelativeFulfillmentMultiplier}
+              onChange={(e) => setOptimizerRelativeFulfillmentMultiplier(e.target.value)}
+            />
           </div>
         </div>
       </div>

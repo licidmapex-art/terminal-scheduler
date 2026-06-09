@@ -2,6 +2,7 @@ import { useState } from "react";
 import SimulationConfigForm from "../components/SimulationConfigForm";
 import ScenarioManager from "../components/ScenarioManager";
 import ErrorBoundary from "../components/ErrorBoundary";
+import { PageTitleWithHelp } from "../components/HelpPopover";
 
 export default function Config() {
   const [configFormKey, setConfigFormKey] = useState(0);
@@ -11,10 +12,10 @@ export default function Config() {
       <div>
         <div className="page-header">
           <div>
-            <h1 className="page-title">Terminal configuration</h1>
-            <p className="page-subtitle">
-              Set the planning horizon, storage model, and berth spacing. Per-customer pipeline flows are configured on each customer; total storage capacity is under Resources.
-            </p>
+            <PageTitleWithHelp
+              title="Terminal configuration"
+              help="Set the planning horizon, storage model, and berth spacing. Per-customer pipeline flows are configured on each customer; total storage capacity is under Resources."
+            />
           </div>
         </div>
 

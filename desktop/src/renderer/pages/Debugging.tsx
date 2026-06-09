@@ -1,5 +1,6 @@
 import { Bug } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { FormLabelWithHelp, PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import {
   CartesianGrid,
   Legend,
@@ -94,6 +95,7 @@ export default function Debugging() {
           (s.legKey ?? "lane0") === (selected.legKey ?? "lane0")
       );
       const avg = row.averageCustomerDaysOfCover ?? null;
+      const combined = row.combinedTerminalDaysOfCover ?? null;
       const relativeThreshold =
         avg != null && Number.isFinite(avg) && optimizerMultiplier > 0
           ? optimizerMultiplier * avg
@@ -103,6 +105,7 @@ export default function Debugging() {
         sortDoc: status?.daysOfCover ?? null,
         optimizerDoc: status?.optimizerDaysOfCover ?? null,
         averageDoc: avg,
+        combinedDoc: combined,
         relativeThreshold
       };
     });
@@ -112,33 +115,53 @@ export default function Debugging() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Debugging</h1>
-          <p className="page-subtitle">
-            Optimizer diagnostics: compare scheduler DoC and optimizer DoC by leg.
-          </p>
+          <PageTitleWithHelp
+            title="Debugging"
+            help="Optimizer diagnostics: compare scheduler DoC and optimizer DoC by leg."
+          />
         </div>
       </div>
 
       <div className="card" style={{ marginBottom: 24 }}>
-        <div className="card-title">Days-of-cover formulas (reminder)</div>
-        <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-          Inbound sort DoC = inventory / outbound pressure per day. Outbound sort DoC = headroom / inbound pressure per
-          day (or raw headroom when inbound pressure is zero).
-        </p>
-        <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-          Optimizer DoC uses the same directional formulas but with relevant inventory context: terminal inventory for
-          shared modes (`shared_inventory`, `shared_shipping`) and customer inventory for non-shared modes.
-        </p>
-        <p style={{ margin: "0 0 0", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-          Relative optimizer blocks when optimizer DoC &gt; <strong>× average</strong> cross-customer DoC at that hour
-          (mean of each customer&apos;s tightest leg).
-        </p>
+        <div className="card-title-row">
+          <div className="card-title" style={{ margin: 0 }}>Days-of-cover formulas (reminder)</div>
+          <HelpPopover
+            label="Days-of-cover formulas help"
+            content={
+              <>
+                <p style={{ margin: "0 0 10px" }}>
+                  Inbound sort DoC = inventory / outbound pressure per day. Outbound sort DoC = headroom / inbound
+                  pressure per day (or raw headroom when inbound pressure is zero).
+                </p>
+                <p style={{ margin: "0 0 10px" }}>
+                  Optimizer DoC uses the same directional formulas but with relevant inventory context: terminal
+                  inventory for shared modes (shared_inventory, shared_shipping) and customer inventory for non-shared
+                  modes.
+                </p>
+                <p style={{ margin: 0 }}>
+                  Relative optimizer blocks when optimizer DoC &gt; × average cross-customer DoC at that hour (mean of
+                  each customer&apos;s tightest leg). Combined DoC uses total terminal inventory and summed
+                  inbound/outbound pressure across all customers (minimum of drain/fill views when both apply).
+                </p>
+              </>
+            }
+          />
+        </div>
       </div>
 
       <div className="card">
         <div className="card-title">Optimizer DoC timeline</div>
         <div style={{ marginBottom: 12, maxWidth: 520 }}>
-          <label className="form-label">Leg</label>
+          <FormLabelWithHelp
+            help={
+              <>
+                Relative optimizer: <strong>{optimizerMultiplier.toFixed(2)}×</strong> average DoC{" "}
+                {optimizerMultiplier === 0 ? "(disabled)" : ""}
+              </>
+            }
+          >
+            Leg
+          </FormLabelWithHelp>
           <select
             className="form-select"
             value={selectedLegKey}
@@ -151,10 +174,6 @@ export default function Debugging() {
               </option>
             ))}
           </select>
-          <div className="form-helper" style={{ marginTop: 8 }}>
-            Relative optimizer: <strong>{optimizerMultiplier.toFixed(2)}×</strong> average DoC{" "}
-            {optimizerMultiplier === 0 ? "(disabled)" : ""}
-          </div>
         </div>
 
         {selected && chartData.length > 0 ? (
@@ -179,6 +198,16 @@ export default function Debugging() {
                   connectNulls={false}
                   strokeWidth={2}
                   strokeDasharray="6 3"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="combinedDoc"
+                  name="Combined DoC (terminal)"
+                  stroke="#0f172a"
+                  dot={false}
+                  connectNulls={false}
+                  strokeWidth={2}
+                  strokeDasharray="4 2"
                 />
                 {optimizerMultiplier > 0 ? (
                   <Line

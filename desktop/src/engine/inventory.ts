@@ -63,8 +63,32 @@ export function countPipelineInterruptionHours(
   const cap = config.totalStorageCapacity ?? 100_000;
   const hasInboundPipe = totalInboundPipelineTph(customers, config) > 0;
   const hasOutboundPipe = totalOutboundPipelineTph(customers, config) > 0;
+  const sharedInventory = config.storageMode === "shared_inventory";
   let tankTopHours = 0;
   let tankBottomHours = 0;
+
+  if (sharedInventory && hasOutboundPipe) {
+    for (let i = 1; i < log.length; i++) {
+      const prev = log[i - 1]!.customerInventories;
+      const total = log[i - 1]!.terminalTotal ?? 0;
+      if (hasInboundPipe && total >= cap - EXTREME_EPS) tankTopHours++;
+      let outboundCurtailed = false;
+      for (const c of customers) {
+        const { outboundTph } = resolveCustomerPipelineRates(c, config);
+        if (outboundTph <= 0) continue;
+        const inv = prev[c.id] ?? 0;
+        const takeCap = sharedInventoryPipelineOutboundTakeCap(inv, outboundTph, config);
+        if (takeCap < outboundTph - EXTREME_EPS) outboundCurtailed = true;
+      }
+      if (outboundCurtailed) tankBottomHours++;
+    }
+    if (hasInboundPipe && log.length === 1) {
+      const total = log[0]!.terminalTotal ?? 0;
+      if (total >= cap - EXTREME_EPS) tankTopHours++;
+    }
+    return { tankTopHours, tankBottomHours };
+  }
+
   for (const row of log) {
     const total = row.terminalTotal ?? 0;
     if (hasInboundPipe && total >= cap - EXTREME_EPS) tankTopHours++;
@@ -91,6 +115,33 @@ export function tallyRefusedTonnesAtTankExtremes(
     totalInboundPipelineTph(customers, config) > 0 ||
     totalOutboundPipelineTph(customers, config) > 0;
   if (!hasPipeline || log.length === 0) return out;
+
+  if (config.storageMode === "shared_inventory") {
+    for (let i = 1; i < log.length; i++) {
+      const prev = log[i - 1]!.customerInventories;
+      const total = log[i - 1]!.terminalTotal ?? 0;
+      const cap = config.totalStorageCapacity ?? 100_000;
+      for (const c of customers) {
+        const { inboundTph, outboundTph } = resolveCustomerPipelineRates(c, config);
+        const cur = out.get(c.id)!;
+        if (inboundTph > 0 && total >= cap - EXTREME_EPS) {
+          cur.refusedAtTopTonnes += inboundTph;
+        }
+        if (outboundTph > 0) {
+          const inv = prev[c.id] ?? 0;
+          const takeCap = sharedInventoryPipelineOutboundTakeCap(inv, outboundTph, config);
+          const refused = Math.max(0, outboundTph - takeCap);
+          cur.refusedAtBottomTonnes += refused;
+        }
+      }
+    }
+    for (const c of customers) {
+      const cur = out.get(c.id)!;
+      cur.refusedAtTopTonnes = Math.round(cur.refusedAtTopTonnes * 10) / 10;
+      cur.refusedAtBottomTonnes = Math.round(cur.refusedAtBottomTonnes * 10) / 10;
+    }
+    return out;
+  }
 
   const { tankTopHours, tankBottomHours } = countPipelineInterruptionHours(customers, config, log);
 
@@ -129,8 +180,27 @@ export function normalizeSharedInventoryToCap(
 }
 
 /**
- * One hour of pipeline for shared_inventory: terminal-wide pool (inbound curtailed at cap),
- * attribution unchanged except aggregate scaling on outbound (mirrors commingled terminal clamp).
+ * Max outbound pipeline tonnes one customer can take this hour in shared_inventory.
+ * Matches berth outbound: full configured rate, borrowing down to −x when x &gt; 0; unlimited when x = 0.
+ */
+export function sharedInventoryPipelineOutboundTakeCap(
+  attributedInv: number,
+  outboundTph: number,
+  config: SimulationConfig
+): number {
+  if (outboundTph <= 0) return 0;
+  const x = config.sharedInventoryCustomerDeficitLimitTonnes ?? 0;
+  if (x > 0) {
+    const headroom = attributedInv + x;
+    if (headroom <= EXTREME_EPS) return 0;
+    return Math.min(outboundTph, headroom);
+  }
+  return outboundTph;
+}
+
+/**
+ * One hour of pipeline for shared_inventory: inbound is terminal-wide (curtailed at cap);
+ * outbound drains each customer's configured rate from their attribution (may borrow to −x).
  * Returns effective tonnes/hour added per customer (same sign convention as pipelineFlowRecord).
  */
 export function applySharedInventoryPipelineHour(
@@ -157,20 +227,13 @@ export function applySharedInventoryPipelineHour(
   }
 
   if (outboundTotal > 0) {
-    const newT = Math.max(0, Math.min(cap, S - outboundTotal));
-    const delta = S - newT;
-    const positiveTotal = customers.reduce((sum, c) => sum + Math.max(0, invById[c.id] ?? 0), 0);
-    if (positiveTotal > 0 && delta > 0) {
-      for (const c of customers) {
-        const { outboundTph } = resolveCustomerPipelineRates(c, config);
-        if (outboundTph <= 0) continue;
-        const before = invById[c.id] ?? 0;
-        if (before <= 0) continue;
-        const take = (delta * before) / positiveTotal;
-        const after = before - take;
-        invById[c.id] = after;
-        effective[c.id] += after - before;
-      }
+    for (const c of customers) {
+      const { outboundTph } = resolveCustomerPipelineRates(c, config);
+      const before = invById[c.id] ?? 0;
+      const take = sharedInventoryPipelineOutboundTakeCap(before, outboundTph, config);
+      if (take <= 0) continue;
+      invById[c.id] = before - take;
+      effective[c.id] -= take;
     }
   }
 

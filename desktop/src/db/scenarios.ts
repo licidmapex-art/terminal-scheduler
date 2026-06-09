@@ -57,6 +57,7 @@ interface ScenarioPayload {
     tankCapacity?: number;
     sharedInventoryCustomerDeficitLimitTonnes?: number;
     optimizerRelativeDocMultiplier?: number;
+    optimizerRelativeFulfillmentMultiplier?: number;
     bargeBerthAllocation?: "alternate" | "small_only" | "prefer_small";
   } | null;
 }
@@ -108,6 +109,7 @@ function buildScenarioPayload(): ScenarioPayload {
           sharedInventoryCustomerDeficitLimitTonnes:
             cfg.sharedInventoryCustomerDeficitLimitTonnes ?? 0,
           optimizerRelativeDocMultiplier: cfg.optimizerRelativeDocMultiplier ?? 0,
+          optimizerRelativeFulfillmentMultiplier: cfg.optimizerRelativeFulfillmentMultiplier ?? 0,
           bargeBerthAllocation: cfg.bargeBerthAllocation ?? "alternate"
         }
       : null
@@ -231,6 +233,10 @@ export function loadScenario(id: string): void {
         optimizerRelativeDocMultiplier: Math.max(
           0,
           Number(payload.config.optimizerRelativeDocMultiplier ?? 0)
+        ),
+        optimizerRelativeFulfillmentMultiplier: Math.max(
+          0,
+          Number(payload.config.optimizerRelativeFulfillmentMultiplier ?? 0)
         ),
         bargeBerthAllocation:
           payload.config.bargeBerthAllocation === "small_only" ||

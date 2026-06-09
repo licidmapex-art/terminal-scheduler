@@ -1,4 +1,5 @@
 import { formatHourDomainLabel } from "../hooks/useChartHourZoom";
+import { HelpPopover } from "./HelpPopover";
 
 interface Props {
   viewDomain: [number, number];
@@ -32,7 +33,11 @@ export default function ChartHourZoomToolbar({
           Reset zoom
         </button>
       ) : null}
-      <span className="chart-hour-zoom-hint">Scroll wheel to zoom (cursor-centered)</span>
+      <HelpPopover
+        label="Chart zoom help"
+        content="Scroll wheel to zoom (cursor-centered)"
+        size={14}
+      />
       {rangeLabel ? <span className="chart-hour-zoom-range">{rangeLabel}</span> : null}
     </div>
   );

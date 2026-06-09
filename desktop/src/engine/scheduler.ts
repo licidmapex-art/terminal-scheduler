@@ -38,11 +38,17 @@ import {
 import { paceAllowanceSlots } from "./pacing";
 import {
   averageCustomerDaysOfCoverAtHour,
+  averagePoolFulfillmentRatioAtHour,
+  combinedTerminalDaysOfCoverAtHour,
   compareSchedulingLegs,
   countLegSlotsThroughHour,
+  customerLegFulfillmentRatio,
   legSortMetric,
+  legUsesFulfillmentPool,
   normalizedOptimizerRelativeDocMultiplier,
+  normalizedOptimizerRelativeFulfillmentMultiplier,
   optimizerMetric,
+  relativeFulfillmentOptimizerShouldYield,
   relativeOptimizerShouldYield
 } from "./optimizer";
 import { getCompatibleResources, pickBerthCandidate } from "./resourceAllocation";
@@ -302,6 +308,38 @@ function loadsStartedByHourAgg(
   }).length;
 }
 
+/** Pooled pace across customers: all legs in shared_shipping; inbound only in shared_inventory. */
+function legUsesAggregatedPace(
+  leg: Pick<SchedulingLeg, "direction">,
+  sharedShipping: boolean,
+  sharedInventory: boolean
+): boolean {
+  if (sharedShipping) return true;
+  return sharedInventory && leg.direction === "inbound";
+}
+
+function buildDirectionModeAggTargetMap(
+  legs: SchedulingLeg[],
+  sharedShipping: boolean,
+  sharedInventory: boolean
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const leg of legs) {
+    if (!legUsesAggregatedPace(leg, sharedShipping, sharedInventory)) continue;
+    const dk = `${leg.direction}:${leg.mode}`;
+    map.set(dk, (map.get(dk) ?? 0) + leg.targetSlots);
+  }
+  return map;
+}
+
+function usesPerCustomerPoolCap(
+  leg: SchedulingLeg,
+  sharedShipping: boolean,
+  sharedInventory: boolean
+): boolean {
+  return sharedShipping || (sharedInventory && leg.direction === "inbound");
+}
+
 function lastCompletedEndHour(
   key: string,
   h: number,
@@ -346,15 +384,10 @@ function buildTransportStatuses(
   const sharedShipping = mode === "shared_shipping";
   const sharedInventory = mode === "shared_inventory";
   const out: TransportModeStatus[] = [];
-  const aggTargetMap = new Map<string, number>();
-  if (sharedShipping) {
-    for (const leg of legs) {
-      const dk = `${leg.direction}:${leg.mode}`;
-      aggTargetMap.set(dk, (aggTargetMap.get(dk) ?? 0) + leg.targetSlots);
-    }
-  }
+  const aggTargetMap = buildDirectionModeAggTargetMap(legs, sharedShipping, sharedInventory);
 
   const optimizerMultiplier = normalizedOptimizerRelativeDocMultiplier(config);
+  const fulfillmentOptimizerMultiplier = normalizedOptimizerRelativeFulfillmentMultiplier(config);
   const averageDoc = averageCustomerDaysOfCoverAtHour(
     customers,
     legs,
@@ -364,6 +397,7 @@ function buildTransportStatuses(
     terminalBeforeNewSlotsThisHour,
     sharedShipping
   );
+  const avgFulfillmentByPool = new Map<string, number | null>();
 
   for (const leg of legs) {
     const c = leg.customer;
@@ -461,57 +495,20 @@ function buildTransportStatuses(
     let blockingConstraint: TransportModeStatus["blockingConstraint"] = null;
     let constraintDetail: string | null = null;
 
-    const lastEnd = lastCompletedEndHour(key, h, assignedSlots, simStartMs);
-    if (lastEnd !== null && leg.roundtripHours > 0) {
-      if (h < lastEnd + leg.roundtripHours) {
-        blockingConstraint = "roundtrip";
-        const availableAt = new Date(simStartMs + (lastEnd + leg.roundtripHours) * HOUR_MS);
-        constraintDetail = `vessel available at ${availableAt.toLocaleDateString("en-GB", {
-          day: "2-digit",
-          month: "short",
-          hour: "2-digit",
-          minute: "2-digit"
-        })}`;
-      }
-    }
-
-    if (!blockingConstraint) {
-      const compatible = getCompatibleResources(leg.mode, resources, config);
-      if (compatible.length === 0) {
-        blockingConstraint = "resource_occupied";
-        constraintDetail = `No ${leg.mode} resource configured (${leg.direction}) — add a compatible berth or rail siding (Resources)`;
-      } else {
-        let hasFeasible = false;
-        for (const res of compatible) {
-          if (res.flowRate <= 0) continue;
-          const loadingHours = leg.meps / res.flowRate;
-          const end = addHours(candidateStart, preOps + loadingHours + postOps);
-          if (end.getTime() > simEndMs) continue;
-          const blackouts = getBlackoutsForResource(res);
-          const conflict = findConflict(
-            candidateStart,
-            end,
-            assignedSlots,
-            blackouts,
-            res.id,
-            minInterval
-          );
-          if (!conflict) {
-            hasFeasible = true;
-            break;
-          }
-        }
-        if (!hasFeasible) {
-          blockingConstraint = "resource_occupied";
-          constraintDetail = `all ${compatible.length} compatible berths busy or blocked`;
-        }
-      }
+    const nCustomerLeg = loadsStartedByHour(h, key, assignedSlots, simStartMs);
+    if (
+      usesPerCustomerPoolCap(leg, sharedShipping, sharedInventory) &&
+      nCustomerLeg >= leg.targetSlots
+    ) {
+      blockingConstraint = "annual_target_met";
+      constraintDetail = `annual target reached — ${nCustomerLeg}/${leg.targetSlots} slots (${(leg.targetSlots * leg.meps).toLocaleString()}t)`;
     }
 
     if (!blockingConstraint) {
       const dk = `${leg.direction}:${leg.mode}`;
-      const effTarget = sharedShipping ? (aggTargetMap.get(dk) ?? leg.targetSlots) : leg.targetSlots;
-      const nBefore = sharedShipping
+      const poolPace = legUsesAggregatedPace(leg, sharedShipping, sharedInventory);
+      const effTarget = poolPace ? (aggTargetMap.get(dk) ?? leg.targetSlots) : leg.targetSlots;
+      const nBefore = poolPace
         ? loadsStartedByHourAgg(h - 1, leg.direction, leg.mode, assignedSlots, simStartMs)
         : loadsStartedByHour(h - 1, key, assignedSlots, simStartMs);
       const paceTargetContinuous = (h / periodHoursSafe) * effTarget + 1;
@@ -520,9 +517,37 @@ function buildTransportStatuses(
         blockingConstraint = "pace_ahead";
         const paceMode = config.pacerRoundingDirection === "down" ? "down" : "up";
         const paceDecile = normalizedPacerDecile(config);
-        constraintDetail = sharedShipping
+        constraintDetail = poolPace
           ? `scheduled ${nBefore}/${effTarget} (combined), pace ${paceTargetContinuous.toFixed(2)} → allow ${paceAllowance} (${paceMode}@0.${paceDecile})`
           : `scheduled ${nBefore}/${effTarget}, pace ${paceTargetContinuous.toFixed(2)} → allow ${paceAllowance} (${paceMode}@0.${paceDecile})`;
+      }
+    }
+
+    if (
+      !blockingConstraint &&
+      fulfillmentOptimizerMultiplier > 0 &&
+      legUsesFulfillmentPool(leg, sharedShipping, sharedInventory)
+    ) {
+      const poolKey = `${leg.direction}:${leg.mode}`;
+      let avgFulfillment = avgFulfillmentByPool.get(poolKey);
+      if (avgFulfillment === undefined) {
+        avgFulfillment = averagePoolFulfillmentRatioAtHour(
+          leg,
+          legs,
+          assignedSlots,
+          simStartMs,
+          h,
+          sharedShipping,
+          sharedInventory
+        );
+        avgFulfillmentByPool.set(poolKey, avgFulfillment);
+      }
+      const slotsThrough = countLegSlotsThroughHour(leg, assignedSlots, simStartMs, h - 1);
+      const legFulfillment = customerLegFulfillmentRatio(leg, slotsThrough);
+      if (relativeFulfillmentOptimizerShouldYield(legFulfillment, avgFulfillment, fulfillmentOptimizerMultiplier)) {
+        blockingConstraint = "optimizer_fulfillment";
+        const avgPct = avgFulfillment != null ? (avgFulfillment * 100).toFixed(1) : "—";
+        constraintDetail = `fulfilment ${(legFulfillment * 100).toFixed(1)}% > ${fulfillmentOptimizerMultiplier}× pool avg ${avgPct}% — yields slot to other customers`;
       }
     }
 
@@ -534,6 +559,20 @@ function buildTransportStatuses(
       blockingConstraint = "optimizer_days_of_cover";
       const avgLabel = averageDoc != null ? averageDoc.toFixed(2) : "—";
       constraintDetail = `optimizer DoC ${optimizerMetricSnapshot.toFixed(2)} > ${optimizerMultiplier}× avg ${avgLabel} — yields slot to other customers`;
+    }
+
+    const lastEnd = lastCompletedEndHour(key, h, assignedSlots, simStartMs);
+    if (!blockingConstraint && lastEnd !== null && leg.roundtripHours > 0) {
+      if (h < lastEnd + leg.roundtripHours) {
+        blockingConstraint = "roundtrip";
+        const availableAt = new Date(simStartMs + (lastEnd + leg.roundtripHours) * HOUR_MS);
+        constraintDetail = `vessel available at ${availableAt.toLocaleDateString("en-GB", {
+          day: "2-digit",
+          month: "short",
+          hour: "2-digit",
+          minute: "2-digit"
+        })}`;
+      }
     }
 
     if (!blockingConstraint) {
@@ -578,6 +617,39 @@ function buildTransportStatuses(
     }
 
     if (!blockingConstraint) {
+      const compatible = getCompatibleResources(leg.mode, resources, config);
+      if (compatible.length === 0) {
+        blockingConstraint = "resource_occupied";
+        constraintDetail = `No ${leg.mode} resource configured (${leg.direction}) — add a compatible berth or rail siding (Resources)`;
+      } else {
+        let hasFeasible = false;
+        for (const res of compatible) {
+          if (res.flowRate <= 0) continue;
+          const loadingHours = leg.meps / res.flowRate;
+          const end = addHours(candidateStart, preOps + loadingHours + postOps);
+          if (end.getTime() > simEndMs) continue;
+          const blackouts = getBlackoutsForResource(res);
+          const conflict = findConflict(
+            candidateStart,
+            end,
+            assignedSlots,
+            blackouts,
+            res.id,
+            minInterval
+          );
+          if (!conflict) {
+            hasFeasible = true;
+            break;
+          }
+        }
+        if (!hasFeasible) {
+          blockingConstraint = "resource_occupied";
+          constraintDetail = `all ${compatible.length} compatible berths busy or blocked`;
+        }
+      }
+    }
+
+    if (!blockingConstraint) {
       const invNow = sharedShipping ? custInvCommingled(terminalRef.t, c, customers) : (invById[c.id] ?? 0);
       constraintDetail = `inv=${invNow.toFixed(0)}t, need=${leg.meps.toLocaleString()}t, pace=ok, resource=free`;
     }
@@ -612,6 +684,7 @@ export function runScheduler(
   const periodHoursSafe = Math.max(periodHours, 1);
   const minInterval = config.minSlotIntervalHours ?? 0;
   const optimizerMultiplier = normalizedOptimizerRelativeDocMultiplier(config);
+  const fulfillmentOptimizerMultiplier = normalizedOptimizerRelativeFulfillmentMultiplier(config);
   const { preOps, postOps } = laytimeFromConfig(config);
   const mode = config.storageMode;
   const sharedShipping = mode === "shared_shipping";
@@ -619,13 +692,7 @@ export function runScheduler(
   const poolProportional = sharedShipping;
 
   const legs = deriveLegs(customers, config, periodHoursSafe);
-  const aggTargetMap = new Map<string, number>();
-  if (sharedShipping) {
-    for (const leg of legs) {
-      const dk = `${leg.direction}:${leg.mode}`;
-      aggTargetMap.set(dk, (aggTargetMap.get(dk) ?? 0) + leg.targetSlots);
-    }
-  }
+  const aggTargetMap = buildDirectionModeAggTargetMap(legs, sharedShipping, sharedInventory);
   const feasibilityWarnings = runFeasibilityChecks(customers, resources, legs, config);
 
   const assignedSlots: ScheduledSlot[] = [];
@@ -686,7 +753,7 @@ export function runScheduler(
       );
       const slotsA = countLegSlotsThroughHour(a, assignedSlots, simStartMs, h);
       const slotsB = countLegSlotsThroughHour(b, assignedSlots, simStartMs, h);
-      return compareSchedulingLegs(a, b, mA, mB, sharedShipping, slotsA, slotsB);
+      return compareSchedulingLegs(a, b, mA, mB, sharedShipping, slotsA, slotsB, sharedInventory);
     });
 
     const candidateStartBase = new Date(simStartMs + h * HOUR_MS);
@@ -702,6 +769,16 @@ export function runScheduler(
       terminalBeforeNewSlotsThisHour,
       sharedShipping
     );
+    const combinedDoc = combinedTerminalDaysOfCoverAtHour(
+      customers,
+      legs,
+      config,
+      periodHoursSafe,
+      invBeforeNewSlotsThisHour,
+      terminalBeforeNewSlotsThisHour,
+      sharedShipping
+    );
+    const avgFulfillmentByPoolHour = new Map<string, number | null>();
 
     for (const leg of ordered) {
       const key = legKey(leg.customer.id, leg.direction, leg.mode, leg.laneKey);
@@ -713,10 +790,13 @@ export function runScheduler(
       }
 
       const dk = `${leg.direction}:${leg.mode}`;
-      const effTarget = sharedShipping ? (aggTargetMap.get(dk) ?? leg.targetSlots) : leg.targetSlots;
+      const poolPace = legUsesAggregatedPace(leg, sharedShipping, sharedInventory);
+      const effTarget = poolPace ? (aggTargetMap.get(dk) ?? leg.targetSlots) : leg.targetSlots;
       const nCustomerLeg = loadsStartedByHour(h, key, assignedSlots, simStartMs);
-      if (sharedShipping && nCustomerLeg >= leg.targetSlots) continue;
-      const nBeforeThisHour = sharedShipping
+      if (usesPerCustomerPoolCap(leg, sharedShipping, sharedInventory) && nCustomerLeg >= leg.targetSlots) {
+        continue;
+      }
+      const nBeforeThisHour = poolPace
         ? loadsStartedByHourAgg(h - 1, leg.direction, leg.mode, assignedSlots, simStartMs)
         : loadsStartedByHour(h - 1, key, assignedSlots, simStartMs);
       // Hard cap: never schedule more slots than the computed target (per leg, or combined for shared_shipping).
@@ -730,6 +810,35 @@ export function runScheduler(
       const customerMax = getCustomerMaxCapacity(c, config);
       const terminalInventoryForOptimizer =
         mode === "shared_inventory" ? sumCustomerInventory(invById, customers) : terminalRef.t;
+      if (
+        fulfillmentOptimizerMultiplier > 0 &&
+        legUsesFulfillmentPool(leg, sharedShipping, sharedInventory)
+      ) {
+        let avgFulfillment = avgFulfillmentByPoolHour.get(dk);
+        if (avgFulfillment === undefined) {
+          avgFulfillment = averagePoolFulfillmentRatioAtHour(
+            leg,
+            legs,
+            assignedSlots,
+            simStartMs,
+            h,
+            sharedShipping,
+            sharedInventory
+          );
+          avgFulfillmentByPoolHour.set(dk, avgFulfillment);
+        }
+        const slotsThrough = countLegSlotsThroughHour(leg, assignedSlots, simStartMs, h - 1);
+        const legFulfillment = customerLegFulfillmentRatio(leg, slotsThrough);
+        if (
+          relativeFulfillmentOptimizerShouldYield(
+            legFulfillment,
+            avgFulfillment,
+            fulfillmentOptimizerMultiplier
+          )
+        ) {
+          continue;
+        }
+      }
       if (optimizerMultiplier > 0) {
         const metric = optimizerMetric(
           leg,
@@ -870,6 +979,10 @@ export function runScheduler(
       averageCustomerDaysOfCover:
         averageDoc != null && Number.isFinite(averageDoc)
           ? Math.round(averageDoc * 1000) / 1000
+          : null,
+      combinedTerminalDaysOfCover:
+        combinedDoc != null && Number.isFinite(combinedDoc)
+          ? Math.round(combinedDoc * 1000) / 1000
           : null,
       transportStatus
     });

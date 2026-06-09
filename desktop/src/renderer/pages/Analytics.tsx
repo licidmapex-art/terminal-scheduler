@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import AiAnalysisPanel from "../components/AiAnalysisPanel";
+import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import { useStore } from "../store";
 import type {
   Customer as EngineCustomer,
@@ -26,6 +27,11 @@ import { tallyBerthTonnesByCustomerFromSlots } from "../../engine/simulationExce
 import { slotBerthOccupationHours } from "../../engine/slotLaytime";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
+import {
+  AVERAGE_CUSTOMER_ID,
+  COMBINED_TERMINAL_ID,
+  buildDocTrendByCustomer
+} from "../lib/timelineChartData";
 
 interface Customer {
   id: string;
@@ -526,46 +532,30 @@ export default function Analytics() {
     sharedShippingAttributedFlows
   ]);
 
-  const docTrendByCustomer = useMemo(() => {
-    const out: Record<string, Array<number | null>> = {};
-    // Prefer scheduler log snapshots because they are the exact leg sort metric shown in Simulation Log.
-    if (simulationLog.length > 0) {
-      const maxHour = Math.max(...simulationLog.map((r) => r.hour));
-      for (const customer of customers) {
-        const series: Array<number | null> = [];
-        for (let h = 0; h <= maxHour; h++) {
-          const row = simulationLog.find((r) => r.hour === h);
-          if (!row) {
-            series.push(null);
-            continue;
-          }
-          const vals = (row.transportStatus ?? [])
-            .filter((s) => s.customerId === customer.id && s.daysOfCover !== undefined)
-            .map((s) => s.daysOfCover)
-            .filter((v): v is number => v != null && Number.isFinite(v));
-          series.push(vals.length > 0 ? Math.min(...vals) : null);
-        }
-        if (!series.every((x) => x == null)) out[customer.id] = series;
-      }
-      return out;
-    }
+  const docTrendByCustomer = useMemo(
+    () =>
+      buildDocTrendByCustomer(
+        simulationLog,
+        customers,
+        timelineData,
+        config as EngineSimulationConfig | null,
+        customerById as Map<string, EngineCustomer>
+      ),
+    [simulationLog, customers, timelineData, config, customerById]
+  );
 
-    // Fallback when no scheduler log is available.
-    if (!timelineData?.timeline || !config) return out;
-    const cfgEngine = config as EngineSimulationConfig;
-    const periodFloored = simulationPeriodHoursFloored(cfgEngine);
-    for (const [customerId, values] of Object.entries(timelineData.timeline)) {
-      const customer = customerById.get(customerId);
-      if (!customer) continue;
-      const arr = values as number[];
-      const series = arr.map((inv) =>
-        customerRepresentativeDaysOfCover(inv, customer as unknown as EngineCustomer, cfgEngine, periodFloored)
-      );
-      if (series.every((x) => x == null)) continue;
-      out[customerId] = series;
-    }
-    return out;
-  }, [simulationLog, customers, timelineData, config, customerById]);
+  const aggregateDocFinal = useMemo(() => {
+    const pick = (id: string) => {
+      const series = docTrendByCustomer[id];
+      if (!series?.length) return null;
+      const v = series[series.length - 1];
+      return v != null && Number.isFinite(v) ? Math.round(v * 10) / 10 : null;
+    };
+    return {
+      average: pick(AVERAGE_CUSTOMER_ID),
+      combined: pick(COMBINED_TERMINAL_ID)
+    };
+  }, [docTrendByCustomer]);
 
   const throughputCoverage = useMemo((): ThroughputCoverageRow[] => {
     if (!config || periodHours <= 0) return [];
@@ -761,10 +751,10 @@ export default function Analytics() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Analytics</h1>
-          <p className="page-subtitle">
-            Feasibility diagnostics, coverage vs targets, inventory and days-of-cover trends, and berth load
-          </p>
+          <PageTitleWithHelp
+            title="Analytics"
+            help="Feasibility diagnostics, coverage vs targets, inventory and days-of-cover trends, and berth load"
+          />
         </div>
       </div>
 
@@ -784,25 +774,34 @@ export default function Analytics() {
       )}
 
       <div className="card" style={{ marginBottom: 24 }}>
-        <div className="card-title">Model checks (KPIs)</div>
-        <p style={{ margin: "0 0 16px", color: "#64748b", fontSize: 14 }}>
-          Soft tests against the last scheduler run. Throughput coverage compares required inbound volume
-          (declared transport + pipeline inbound) to scheduled inbound berth cargo plus pipeline delivered.
-        </p>
+        <div className="card-title-row">
+          <div className="card-title" style={{ margin: 0 }}>Model checks (KPIs)</div>
+          <HelpPopover
+            label="Model checks help"
+            content="Soft tests against the last scheduler run. Throughput coverage compares required inbound volume (declared transport + pipeline inbound) to scheduled inbound berth cargo plus pipeline delivered."
+          />
+        </div>
 
         <div style={{ marginBottom: 20 }}>
-          <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Throughput coverage</h3>
+          <div className="section-heading-row" style={{ marginBottom: 8 }}>
+            <h3 style={{ fontSize: 14, margin: 0 }}>Throughput coverage</h3>
+            <HelpPopover
+              label="Throughput coverage help"
+              content={
+                <>
+                  Target inbound = declared inbound throughput + pipeline inbound (t/h × period). Scheduled inbound =
+                  berth cargo + pipeline inbound
+                  {isSharedShipping
+                    ? " (shared shipping: terminal flows split by storage share, matching the schedule graph inventory)."
+                    : " from berth slots + simulation log pipeline (or nominal rate when no log)."}
+                </>
+              }
+            />
+          </div>
           <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
-            Target inbound = declared inbound throughput + pipeline inbound (t/h × period). Scheduled inbound =
-            berth cargo + pipeline inbound
-            {isSharedShipping
-              ? " (shared shipping: terminal flows split by storage share, matching the schedule graph inventory)."
-              : " from berth slots + simulation log pipeline (or nominal rate when no log)."}
-            <span style={{ marginLeft: 8 }}>
-              Overall:{" "}
-              <span className={`badge ${allThroughputPass ? "badge-blue" : "badge-amber"}`}>
-                {throughputCoverage.length === 0 ? "—" : allThroughputPass ? "All pass" : "Gaps"}
-              </span>
+            Overall:{" "}
+            <span className={`badge ${allThroughputPass ? "badge-blue" : "badge-amber"}`}>
+              {throughputCoverage.length === 0 ? "—" : allThroughputPass ? "All pass" : "Gaps"}
             </span>
           </p>
           <table className="data-table">
@@ -875,14 +874,21 @@ export default function Analytics() {
         </div>
 
         <div style={{ marginBottom: 20 }}>
-          <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Slot details</h3>
-          <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
-            Slot coverage vs engine targets, average scheduled parcel size (t), and partial loads (volume &lt; MEPS when
-            MEPS &gt; 0). Inbound on the left, outbound on the right.
-            {isSharedShipping
-              ? " Slot counts are per transport leg owner; tonne totals above use storage-share attribution."
-              : ""}
-          </p>
+          <div className="section-heading-row" style={{ marginBottom: 8 }}>
+            <h3 style={{ fontSize: 14, margin: 0 }}>Slot details</h3>
+            <HelpPopover
+              label="Slot details help"
+              content={
+                <>
+                  Slot coverage vs engine targets, average scheduled parcel size (t), and partial loads (volume &lt;
+                  MEPS when MEPS &gt; 0). Inbound on the left, outbound on the right.
+                  {isSharedShipping
+                    ? " Slot counts are per transport leg owner; tonne totals above use storage-share attribution."
+                    : ""}
+                </>
+              }
+            />
+          </div>
           <table className="data-table analytics-slot-details-table">
             <thead>
               <tr>
@@ -997,13 +1003,20 @@ export default function Analytics() {
         </div>
 
         <div style={{ marginBottom: 20 }}>
-          <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Tank bottoms and tank tops</h3>
-          <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
-            Bottom = inventory at 0 t; top = at customer max capacity (storage share × total capacity). Hours = total
-            hours in that state; occurrences = separate stretches (each consecutive run counts as one). Refused tonnes
-            = that customer&apos;s pipeline flow (t/h) × terminal pipeline-interruption hours (tank top or tank bottom
-            on the Gantt — same rules).
-          </p>
+          <div className="section-heading-row" style={{ marginBottom: 8 }}>
+            <h3 style={{ fontSize: 14, margin: 0 }}>Tank bottoms and tank tops</h3>
+            <HelpPopover
+              label="Tank bottoms and tops help"
+              content={
+                <>
+                  Bottom = inventory at 0 t; top = at customer max capacity (storage share × total capacity). Hours =
+                  total hours in that state; occurrences = separate stretches (each consecutive run counts as one).
+                  Refused tonnes = that customer&apos;s pipeline flow (t/h) × terminal pipeline-interruption hours (tank
+                  top or tank bottom on the Gantt — same rules).
+                </>
+              }
+            />
+          </div>
           <table className="data-table">
             <thead>
               <tr>
@@ -1070,18 +1083,27 @@ export default function Analytics() {
       </div>
 
       <div className="card" style={{ marginBottom: 24 }}>
-        <div className="card-title">Inventory Summary</div>
-        <p style={{ margin: "-8px 0 16px", fontSize: 13, color: "#64748b" }}>
-          <strong>DoC final / trend</strong> mirror the scheduler priority ingredients: <strong>inventory ÷ total
-          outbound pressure</strong> and <strong>headroom ÷ total inbound pressure</strong> (t/d each), then the{" "}
-          <strong>minimum</strong> when both apply. With no pipeline and no slot targets, DoC is unavailable (—). Starting
-          (t) is configured opening stock. Δ
-          inventory and mass balance
-          use final minus that opening (not the first timeline point). Inbound/outbound tonnes are pipeline from the
-          simulation log (hour 0 pipeline = 0, matching the engine) plus berth cargo summed as tonnes per clock hour
-          over the cargo window (same rule as the simulation Excel export). Tonnes are whole numbers. Mass OK also
-          allows a no-clamp / no-pool-scale flow replay for fixed_band and shared_inventory.
-        </p>
+        <div className="card-title-row">
+          <div className="card-title" style={{ margin: 0 }}>Inventory Summary</div>
+          <HelpPopover
+            label="Inventory summary help"
+            content={
+              <>
+                <strong>DoC final / trend</strong> mirror the scheduler priority ingredients:{" "}
+                <strong>inventory ÷ total outbound pressure</strong> and{" "}
+                <strong>headroom ÷ total inbound pressure</strong> (t/d each), then the <strong>minimum</strong> when
+                both apply. <strong>Combined DoC</strong> applies the same formula to total terminal inventory and summed
+                pressures (shown in the inventory table footer when available). <strong>Average DoC</strong> is the mean
+                of each customer&apos;s tightest leg — usually different from combined. With no pipeline and no slot
+                targets, DoC is unavailable (—). Starting (t) is configured opening stock. Δ inventory and mass balance
+                use final minus that opening (not the first timeline point). Inbound/outbound tonnes are pipeline from
+                the simulation log (hour 0 pipeline = 0, matching the engine) plus berth cargo summed as tonnes per
+                clock hour over the cargo window (same rule as the simulation Excel export). Tonnes are whole numbers.
+                Mass OK also allows a no-clamp / no-pool-scale flow replay for fixed_band and shared_inventory.
+              </>
+            }
+          />
+        </div>
         <table className="data-table">
           <thead>
             <tr>
@@ -1145,15 +1167,60 @@ export default function Analytics() {
               ))
             )}
           </tbody>
+          {(aggregateDocFinal.average != null || aggregateDocFinal.combined != null) && (
+            <tfoot>
+              <tr style={{ borderTop: "2px solid #e2e8f0", fontWeight: 600 }}>
+                <td colSpan={9} style={{ textAlign: "right", color: "#64748b" }}>
+                  Terminal aggregates
+                </td>
+                <td style={{ textAlign: "right" }}>
+                  {aggregateDocFinal.combined != null ? (
+                    <>
+                      Combined {aggregateDocFinal.combined.toLocaleString()} d
+                      {aggregateDocFinal.average != null ? (
+                        <span style={{ fontWeight: 400, color: "#64748b" }}>
+                          {" "}
+                          · avg {aggregateDocFinal.average.toLocaleString()} d
+                        </span>
+                      ) : null}
+                    </>
+                  ) : aggregateDocFinal.average != null ? (
+                    <>Avg {aggregateDocFinal.average.toLocaleString()} d</>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+                <td style={{ verticalAlign: "middle" }}>
+                  {aggregateDocFinal.combined != null && docTrendByCustomer[COMBINED_TERMINAL_ID] ? (
+                    <DocSparkline
+                      series={downsampleSeries(docTrendByCustomer[COMBINED_TERMINAL_ID] ?? [], 96)}
+                      width={104}
+                      height={32}
+                      stroke="#0f172a"
+                    />
+                  ) : aggregateDocFinal.average != null && docTrendByCustomer[AVERAGE_CUSTOMER_ID] ? (
+                    <DocSparkline
+                      series={downsampleSeries(docTrendByCustomer[AVERAGE_CUSTOMER_ID] ?? [], 96)}
+                      width={104}
+                      height={32}
+                      stroke="#64748b"
+                    />
+                  ) : null}
+                </td>
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
 
       <div className="card">
-        <div className="card-title">Resource Utilization</div>
-        <p style={{ margin: "-8px 0 16px", fontSize: 13, color: "#64748b" }}>
-          Hours on berth sums each slot&apos;s laytime: pre-ops + cargo transfer + post-ops (from simulation
-          config). Avg h / slot is the mean of those laytimes for visits on that resource.
-        </p>
+        <div className="card-title-row">
+          <div className="card-title" style={{ margin: 0 }}>Resource Utilization</div>
+          <HelpPopover
+            label="Resource utilization help"
+            content="Hours on berth sums each slot's laytime: pre-ops + cargo transfer + post-ops (from simulation config). Avg h / slot is the mean of those laytimes for visits on that resource."
+          />
+        </div>
         <table className="data-table">
           <thead>
             <tr>

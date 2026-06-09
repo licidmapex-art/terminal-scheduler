@@ -2,8 +2,10 @@ import type { LucideIcon } from "lucide-react";
 import {
   Anchor,
   Brain,
+  CheckCircle2,
   Lock,
   PauseCircle,
+  Percent,
   ShieldAlert,
   TrendingDown,
   TrendingUp
@@ -31,11 +33,25 @@ export const SCHEDULING_CONSTRAINTS: SchedulingConstraintDef[] = [
     color: "#8b5cf6"
   },
   {
+    key: "annual_target_met",
+    label: "Annual target met",
+    icon: "target",
+    IconComponent: CheckCircle2,
+    color: "#22c55e"
+  },
+  {
     key: "optimizer_days_of_cover",
     label: "Relative optimizer (DoC)",
     icon: "optimizer",
     IconComponent: Brain,
     color: "#06b6d4"
+  },
+  {
+    key: "optimizer_fulfillment",
+    label: "Relative optimizer (fulfilment)",
+    icon: "fulfillment",
+    IconComponent: Percent,
+    color: "#a855f7"
   },
   {
     key: "roundtrip",

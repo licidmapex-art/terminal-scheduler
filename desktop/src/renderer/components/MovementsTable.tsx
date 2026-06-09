@@ -14,22 +14,30 @@ interface MovementsTableProps {
   slots: MovementSlot[];
   customerNameById: Map<string, string>;
   resourceNameById: Map<string, string>;
+  /** When set and greater than zero while `slots` is empty, show a filter-empty message. */
+  unfilteredCount?: number;
 }
 
 export default function MovementsTable({
   slots,
   customerNameById,
-  resourceNameById
+  resourceNameById,
+  unfilteredCount = 0
 }: MovementsTableProps) {
   if (slots.length === 0) {
+    const filteredEmpty = unfilteredCount > 0;
     return (
       <div className="empty-state" style={{ padding: 40 }}>
         <div className="empty-state-icon">
           <CalendarDays size={48} strokeWidth={1.5} />
         </div>
-        <div className="empty-state-title">No movements yet</div>
+        <div className="empty-state-title">
+          {filteredEmpty ? "No movements match filters" : "No movements yet"}
+        </div>
         <div className="empty-state-text">
-          Run the scheduler on the Schedule page after setting customers, resources, and terminal dates.
+          {filteredEmpty
+            ? "Turn on at least one customer, move type, and resource to see rows."
+            : "Run the scheduler on the Schedule page after setting customers, resources, and terminal dates."}
         </div>
       </div>
     );

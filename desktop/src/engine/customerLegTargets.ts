@@ -168,3 +168,44 @@ export function customerRepresentativeDaysOfCover(
 
   return Math.min(...cands);
 }
+
+/**
+ * Terminal-wide DoC from configured targets (no scheduler legs): same formula as
+ * {@link customerRepresentativeDaysOfCover} but uses total terminal inventory and summed pressures.
+ */
+export function terminalRepresentativeDaysOfCover(
+  terminalInventory: number,
+  customers: Customer[],
+  config: SimulationConfig,
+  periodHours: number
+): number | null {
+  const mode = config.storageMode ?? "fixed_band";
+  const sharedPool = mode === "shared_shipping" || mode === "shared_inventory";
+  const capacity = sharedPool
+    ? (config.totalStorageCapacity ?? 100000)
+    : customers.reduce((s, c) => s + getCustomerMaxCapacity(c, config), 0);
+  const headroom = Math.max(0, capacity - terminalInventory);
+  const periodDays = Math.max(periodHours / 24, 1e-9);
+
+  let inPressure = 0;
+  let outPressure = 0;
+  for (const c of customers) {
+    const { inboundTph, outboundTph } = resolveCustomerPipelineRates(c, config);
+    inPressure += inboundTph * 24;
+    outPressure += outboundTph * 24;
+    const inSlots = inboundTargetSlots(c, periodHours);
+    const outSlots = outboundTargetSlots(c, config, periodHours);
+    inPressure += inSlots > 0 ? (inSlots * c.inboundMEPS) / periodDays : 0;
+    outPressure += outSlots > 0 ? (outSlots * c.outboundMEPS) / periodDays : 0;
+  }
+
+  const cands: number[] = [];
+  if (outPressure > SORT_METRIC_EPS) cands.push(terminalInventory / outPressure);
+  if (inPressure > SORT_METRIC_EPS) cands.push(headroom / inPressure);
+  if (cands.length === 0) {
+    const daily = Math.max(inPressure, outPressure);
+    if (daily <= 0) return null;
+    return terminalInventory / daily;
+  }
+  return Math.min(...cands);
+}

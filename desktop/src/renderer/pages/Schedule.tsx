@@ -1,5 +1,6 @@
 import GanttChart from "../components/GanttChart";
 import ErrorBoundary from "../components/ErrorBoundary";
+import { PageTitleWithHelp } from "../components/HelpPopover";
 
 export default function Schedule() {
   return (
@@ -7,8 +8,7 @@ export default function Schedule() {
       <div>
         <div className="page-header">
           <div>
-            <h1 className="page-title">Schedule</h1>
-            <p className="page-subtitle">Run the scheduler and view the Gantt chart</p>
+            <PageTitleWithHelp title="Schedule" help="Run the scheduler and view the Gantt chart" />
           </div>
         </div>
         <GanttChart />

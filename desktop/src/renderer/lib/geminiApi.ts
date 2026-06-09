@@ -40,11 +40,23 @@ Structure your response with these markdown headings:
 
 Be specific with numbers from the data. Do not invent data not in the summary. If the simulation looks healthy, say so briefly. Keep the total response under 600 words unless serious issues require more detail.`;
 
+const SYSTEM_INSTRUCTION_QUESTION = `You are an expert analyst for a terminal scheduling and inventory simulation tool for bulk liquid/gas terminals.
+
+The user will provide a JSON summary of one simulation run and a specific question about that run. Answer the question clearly and concisely for a terminal planner.
+
+Use only data from the summary. Be specific with numbers where relevant. If the summary does not contain enough information to answer fully, say what is missing and what you can infer. Do not invent figures not present in the summary. Use short paragraphs or bullet lists as appropriate; no fixed section template unless the question asks for one.`;
+
+export type AiAnalysisRequestMode = "summary" | "question";
+
 export interface GeminiAnalysisOptions {
   /** Skip session cache and force a new API call. */
   forceRefresh?: boolean;
   /** Called while waiting on rate-limit retries or model fallbacks. */
   onStatus?: (message: string) => void;
+  /** Structured summary vs answering a user question. */
+  mode?: AiAnalysisRequestMode;
+  /** Required when mode is "question". */
+  question?: string;
 }
 
 interface CachedAnalysis {
@@ -180,23 +192,25 @@ function formatGeminiFailure(status: number, detail: string, model: string): str
   return `Gemini request failed (${model}): ${detail}`;
 }
 
-function buildRequestBody(summaryJson: string): string {
+function buildRequestBody(summaryJson: string, mode: AiAnalysisRequestMode, question?: string): string {
+  const systemInstruction = mode === "question" ? SYSTEM_INSTRUCTION_QUESTION : SYSTEM_INSTRUCTION;
+  const userText =
+    mode === "question"
+      ? `Simulation summary (JSON):\n\n${summaryJson}\n\nUser question:\n${question?.trim() ?? ""}`
+      : `Analyse this terminal scheduler simulation summary:\n\n${summaryJson}`;
+
   return JSON.stringify({
     systemInstruction: {
-      parts: [{ text: SYSTEM_INSTRUCTION }]
+      parts: [{ text: systemInstruction }]
     },
     contents: [
       {
         role: "user",
-        parts: [
-          {
-            text: `Analyse this terminal scheduler simulation summary:\n\n${summaryJson}`
-          }
-        ]
+        parts: [{ text: userText }]
       }
     ],
     generationConfig: {
-      temperature: 0.4,
+      temperature: mode === "question" ? 0.35 : 0.4,
       maxOutputTokens: 2048
     }
   });
@@ -300,7 +314,14 @@ export async function requestGeminiAnalysis(
     throw new Error("No Gemini API key saved. Enter your key below and try again.");
   }
 
-  const promptHash = hashPrompt(summaryJson);
+  const mode = options.mode ?? "summary";
+  const question = options.question?.trim() ?? "";
+  if (mode === "question" && !question) {
+    throw new Error("Enter a question before requesting analysis.");
+  }
+
+  const cacheKey = `${mode}\0${mode === "question" ? question : ""}\0${summaryJson}`;
+  const promptHash = hashPrompt(cacheKey);
   if (!options.forceRefresh) {
     const cached = readAnalysisCache();
     if (cached?.promptHash === promptHash) {
@@ -316,7 +337,11 @@ export async function requestGeminiAnalysis(
     await sleep(waitMs);
   }
 
-  const { text } = await runWithModelFallback(apiKey, buildRequestBody(summaryJson), options.onStatus);
+  const { text } = await runWithModelFallback(
+    apiKey,
+    buildRequestBody(summaryJson, mode, question),
+    options.onStatus
+  );
   writeAnalysisCache(promptHash, text);
   return text;
 }

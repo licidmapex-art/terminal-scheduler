@@ -10,6 +10,7 @@ import {
   tallyPipelineTonnesFromSimulationLog,
   tallyRefusedTonnesAtTankExtremes,
   applySharedInventoryPipelineHour,
+  sharedInventoryPipelineOutboundTakeCap,
   theoreticalInventoryDeltaWithoutTankClamp,
   replaySharedShippingTerminalFlowTotals,
   attributeSharedShippingFlowsToCustomers,
@@ -259,7 +260,7 @@ describe("tallyRefusedTonnesAtTankExtremes", () => {
       }
     ];
     const m = tallyRefusedTonnesAtTankExtremes(customers, config, log);
-    expect(m.get("c1")?.refusedAtTopTonnes).toBe(200);
+    expect(m.get("c1")?.refusedAtTopTonnes).toBe(100);
     expect(m.get("c1")?.refusedAtBottomTonnes).toBe(0);
   });
 
@@ -635,6 +636,167 @@ describe("buildTimeline (shared_inventory)", () => {
     expect(Math.round((invById.c1 + invById.c2) * 1000) / 1000).toBe(0);
     expect(invById.c2).toBe(-5000);
     expect(invById.c1).toBe(5000);
+  });
+
+  it("shared_inventory outbound pipeline drains each customer at their own rate only", () => {
+    const config: SimulationConfig = {
+      startDate: new Date("2025-01-01T00:00:00Z"),
+      endDate: new Date("2025-01-02T00:00:00Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100_000,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 0,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "pipe",
+        name: "Pipeline",
+        declaredInboundThroughput: 0,
+        currentInventory: 10_000,
+        pipelineFlowPerHour: 46,
+        pipelineOutboundPerHour: 46,
+        storageShare: 33,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "other",
+        name: "Other",
+        declaredInboundThroughput: 0,
+        currentInventory: 90_000,
+        pipelineFlowPerHour: 0,
+        storageShare: 67,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const invById: Record<string, number> = { pipe: 10_000, other: 90_000 };
+    const effective = applySharedInventoryPipelineHour(invById, customers, config);
+    expect(effective.pipe).toBe(-46);
+    expect(effective.other).toBe(0);
+    expect(invById.pipe).toBe(10_000 - 46);
+    expect(invById.other).toBe(90_000);
+  });
+
+  it("shared_inventory outbound pipeline borrows from zero at full rate down to −x", () => {
+    const config: SimulationConfig = {
+      startDate: new Date("2025-01-01T00:00:00Z"),
+      endDate: new Date("2025-01-02T00:00:00Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100_000,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 50_000,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "pipe",
+        name: "Pipeline",
+        declaredInboundThroughput: 0,
+        currentInventory: 0,
+        pipelineFlowPerHour: 46,
+        pipelineOutboundPerHour: 46,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "creditor",
+        name: "Creditor",
+        declaredInboundThroughput: 0,
+        currentInventory: 50_000,
+        pipelineFlowPerHour: 0,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const invById: Record<string, number> = { pipe: 0, creditor: 50_000 };
+    const effective = applySharedInventoryPipelineHour(invById, customers, config);
+    expect(effective.pipe).toBe(-46);
+    expect(invById.pipe).toBe(-46);
+    expect(invById.creditor).toBe(50_000);
+  });
+
+  it("shared_inventory outbound pipeline stops at customer deficit floor −x", () => {
+    const config: SimulationConfig = {
+      startDate: new Date("2025-01-01T00:00:00Z"),
+      endDate: new Date("2025-01-02T00:00:00Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100_000,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 1_000,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "pipe",
+        name: "Pipeline",
+        declaredInboundThroughput: 0,
+        currentInventory: -980,
+        pipelineFlowPerHour: 46,
+        pipelineOutboundPerHour: 46,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    expect(sharedInventoryPipelineOutboundTakeCap(-980, 46, config)).toBe(20);
+    const invById: Record<string, number> = { pipe: -980 };
+    const effective = applySharedInventoryPipelineHour(invById, customers, config);
+    expect(effective.pipe).toBe(-20);
+    expect(invById.pipe).toBe(-1000);
+
+    invById.pipe = -1000;
+    const blocked = applySharedInventoryPipelineHour(invById, customers, config);
+    expect(blocked.pipe).toBe(0);
+    expect(invById.pipe).toBe(-1000);
   });
 });
 

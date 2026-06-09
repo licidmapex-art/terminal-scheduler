@@ -114,6 +114,8 @@ export interface SimulationConfig {
    * cross-customer average DoC at that hour (others may still book). 0 disables.
    */
   optimizerRelativeDocMultiplier?: number;
+  /** Yield when leg fulfilment % exceeds this × pool average (shared shipping / shared inventory inbound). 0 = off. */
+  optimizerRelativeFulfillmentMultiplier?: number;
   minSlotIntervalHours: number; // minimum hours between consecutive slots on the same resource (default: 0)
   /** Hours alongside before cargo transfer (mooring / line-up). Occupies berth; no inventory flow. */
   preOpsHours: number;

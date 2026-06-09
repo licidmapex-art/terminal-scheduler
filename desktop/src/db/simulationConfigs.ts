@@ -38,6 +38,7 @@ function rowToConfig(r: {
   pacer_rounding_direction?: string;
   pacer_round_at_decile?: number;
   optimizer_relative_doc_multiplier?: number;
+  optimizer_relative_fulfillment_multiplier?: number;
   barge_berth_allocation?: string;
 }): SimulationConfigRow {
   const rawDirection = r.pacer_rounding_direction === "down" ? "down" : "up";
@@ -46,6 +47,10 @@ function rowToConfig(r: {
   const optimizerRelativeDocMultiplier = Math.max(
     0,
     Number(r.optimizer_relative_doc_multiplier ?? 0)
+  );
+  const optimizerRelativeFulfillmentMultiplier = Math.max(
+    0,
+    Number(r.optimizer_relative_fulfillment_multiplier ?? 0)
   );
   return {
     id: r.id,
@@ -63,6 +68,7 @@ function rowToConfig(r: {
     pacerRoundingDirection: rawDirection,
     pacerRoundAtDecile: decile,
     optimizerRelativeDocMultiplier,
+    optimizerRelativeFulfillmentMultiplier,
     preOpsHours: r.pre_ops_hours ?? 0,
     postOpsHours: r.post_ops_hours ?? 0,
     tankCount: r.tank_count ?? 4,
@@ -80,9 +86,13 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     0,
     Number(config.optimizerRelativeDocMultiplier ?? 0)
   );
+  const optimizerRelativeFulfillmentMultiplier = Math.max(
+    0,
+    Number(config.optimizerRelativeFulfillmentMultiplier ?? 0)
+  );
   db.prepare(`
-    INSERT INTO simulation_configs (id, start_date, end_date, pipeline_flow_rate, pipeline_direction, total_storage_capacity, storage_mode, shared_inventory_customer_deficit_limit_tonnes, pacer_rounding_direction, pacer_round_at_decile, optimizer_relative_doc_multiplier, min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO simulation_configs (id, start_date, end_date, pipeline_flow_rate, pipeline_direction, total_storage_capacity, storage_mode, shared_inventory_customer_deficit_limit_tonnes, pacer_rounding_direction, pacer_round_at_decile, optimizer_relative_doc_multiplier, optimizer_relative_fulfillment_multiplier, min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     config.startDate.toISOString(),
@@ -95,6 +105,7 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     pacerDirection,
     pacerDecile,
     optimizerRelativeDocMultiplier,
+    optimizerRelativeFulfillmentMultiplier,
     config.minSlotIntervalHours ?? 0,
     config.preOpsHours ?? 0,
     config.postOpsHours ?? 0,
@@ -124,6 +135,7 @@ export function getAllSimulationConfigs(): SimulationConfigRow[] {
     pacer_rounding_direction?: string;
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
+    optimizer_relative_fulfillment_multiplier?: number;
     barge_berth_allocation?: string;
   }>;
   return rows.map(rowToConfig);
@@ -148,6 +160,7 @@ export function getSimulationConfigById(id: string): SimulationConfigRow | null 
     pacer_rounding_direction?: string;
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
+    optimizer_relative_fulfillment_multiplier?: number;
     barge_berth_allocation?: string;
   } | undefined;
   if (!row) return null;
@@ -162,6 +175,10 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
     0,
     Number(config.optimizerRelativeDocMultiplier ?? 0)
   );
+  const optimizerRelativeFulfillmentMultiplier = Math.max(
+    0,
+    Number(config.optimizerRelativeFulfillmentMultiplier ?? 0)
+  );
   db.prepare(`
     UPDATE simulation_configs SET
       start_date = ?,
@@ -174,6 +191,7 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
       pacer_rounding_direction = ?,
       pacer_round_at_decile = ?,
       optimizer_relative_doc_multiplier = ?,
+      optimizer_relative_fulfillment_multiplier = ?,
       min_slot_interval_hours = ?,
       pre_ops_hours = ?,
       post_ops_hours = ?,
@@ -192,6 +210,7 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
     pacerDirection,
     pacerDecile,
     optimizerRelativeDocMultiplier,
+    optimizerRelativeFulfillmentMultiplier,
     config.minSlotIntervalHours ?? 0,
     config.preOpsHours ?? 0,
     config.postOpsHours ?? 0,

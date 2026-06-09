@@ -40,6 +40,7 @@ function makeLog(rows: Partial<SimulationLogRow>[]): SimulationLogRow[] {
     customerInventories: {},
     pipelineFlow: {},
     averageCustomerDaysOfCover: null,
+    combinedTerminalDaysOfCover: null,
     transportStatus: [],
     ...r
   }));

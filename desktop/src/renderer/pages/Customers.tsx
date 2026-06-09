@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import CustomerForm, { type CustomerFormHandle } from "../components/CustomerForm";
 import CustomerThroughputOverviewPanel from "../components/CustomerThroughputOverview";
 import UnsavedChangesDialog from "../components/UnsavedChangesDialog";
+import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import { buildCustomerThroughputOverview } from "../lib/customerThroughputOverview";
 import type { Customer as EngineCustomer, SimulationConfig as EngineSimulationConfig } from "../../types";
@@ -159,8 +160,10 @@ export default function Customers() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Customers</h1>
-          <p className="page-subtitle">Manage customer profiles and storage allocations</p>
+          <PageTitleWithHelp
+            title="Customers"
+            help="Manage customer profiles and storage allocations"
+          />
         </div>
         <button className="btn btn-primary" onClick={() => requestEditorAction({ type: "add" })}>
           Add Customer
@@ -230,12 +233,15 @@ export default function Customers() {
         <div className="card customer-inline-editor">
           <div className="customer-inline-editor-head">
             <div>
-              <div className="card-title" style={{ marginBottom: 4 }}>
-                {adding ? "Add customer" : `Edit customer: ${editing?.name ?? ""}`}
+              <div className="card-title-row" style={{ marginBottom: 4 }}>
+                <div className="card-title" style={{ margin: 0 }}>
+                  {adding ? "Add customer" : `Edit customer: ${editing?.name ?? ""}`}
+                </div>
+                <HelpPopover
+                  label="Customer editor help"
+                  content="Configure inbound and outbound behavior in clearly separated sections."
+                />
               </div>
-              <p className="page-subtitle" style={{ marginTop: 0 }}>
-                Configure inbound and outbound behavior in clearly separated sections.
-              </p>
             </div>
             <div className="customer-inline-editor-actions">
               <button type="button" className="btn btn-primary" onClick={() => void handleSaveAndClose()}>

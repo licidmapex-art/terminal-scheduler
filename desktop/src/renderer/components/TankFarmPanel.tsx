@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "react-router-dom";
+import { HelpPopover } from "./HelpPopover";
 
 export default function TankFarmPanel() {
   const location = useLocation();
@@ -72,6 +73,7 @@ export default function TankFarmPanel() {
         pacerRoundingDirection: c.pacerRoundingDirection === "down" ? "down" : "up",
         pacerRoundAtDecile: Number(c.pacerRoundAtDecile ?? 1),
         optimizerRelativeDocMultiplier: Number(c.optimizerRelativeDocMultiplier ?? 0),
+        optimizerRelativeFulfillmentMultiplier: Number(c.optimizerRelativeFulfillmentMultiplier ?? 0),
         minSlotIntervalHours: Number(c.minSlotIntervalHours ?? 0),
         preOpsHours: Number(c.preOpsHours ?? 0),
         postOpsHours: Number(c.postOpsHours ?? 0),
@@ -90,10 +92,13 @@ export default function TankFarmPanel() {
 
   return (
     <div className="card" style={{ marginBottom: 24 }}>
-      <div className="card-title">Storage</div>
-      <p className="form-helper" style={{ margin: "0 0 14px" }}>
-        Terminal-wide capacity for scheduling and inventory gates. Per-tank capacity sets the red reference lines on the Simulation schematic.
-      </p>
+      <div className="card-title-row">
+        <div className="card-title" style={{ margin: 0 }}>Storage</div>
+        <HelpPopover
+          label="Storage help"
+          content="Terminal-wide capacity for scheduling and inventory gates. Per-tank capacity sets the red reference lines on the Simulation schematic."
+        />
+      </div>
       {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
       <form onSubmit={handleSave} style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" }}>
         <div className="form-group" style={{ marginBottom: 0, maxWidth: 220 }}>

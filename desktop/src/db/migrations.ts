@@ -298,6 +298,13 @@ export function runMigrations(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN optimizer_relative_fulfillment_multiplier REAL NOT NULL DEFAULT 0"
+    );
+  } catch {
+    /* column already exists */
+  }
 
   migrateCustomerPipelineFlowPerHour(database);
 

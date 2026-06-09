@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import ResourceForm from "../components/ResourceForm";
 import TankFarmPanel from "../components/TankFarmPanel";
 import BerthAllocationPanel from "../components/BerthAllocationPanel";
+import { PageTitleWithHelp } from "../components/HelpPopover";
 interface Resource {
   id: string;
   name: string;
@@ -41,8 +42,10 @@ export default function Resources() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Resources</h1>
-          <p className="page-subtitle">Manage berths, rail sidings, flow rates, and storage capacity</p>
+          <PageTitleWithHelp
+            title="Resources"
+            help="Manage berths, rail sidings, flow rates, and storage capacity"
+          />
         </div>
         <button className="btn btn-primary" onClick={() => setAdding(true)}>
           Add Resource

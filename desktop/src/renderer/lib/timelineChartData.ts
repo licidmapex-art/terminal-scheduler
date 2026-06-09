@@ -1,7 +1,10 @@
 import type { Customer, ScheduledSlot, SimulationConfig } from "../../types";
 import type { SimulationLogRow } from "../../engine/simulationLog";
 import { simulationPeriodHoursFloored } from "../../engine/inventory";
-import { customerRepresentativeDaysOfCover } from "../../engine/customerLegTargets";
+import {
+  customerRepresentativeDaysOfCover,
+  terminalRepresentativeDaysOfCover
+} from "../../engine/customerLegTargets";
 import { customerPacingPctByDirectionMode, formatDirectionModeLabel } from "../../engine/pacing";
 import {
   SCHEDULING_CONSTRAINTS,
@@ -11,6 +14,13 @@ import {
 
 export const SAMPLE_HOUR_STEP = 6;
 export const AVERAGE_CUSTOMER_ID = "__all_customers_avg__";
+export const COMBINED_TERMINAL_ID = "__terminal_combined__";
+
+export const AGGREGATE_DOC_IDS = new Set([AVERAGE_CUSTOMER_ID, COMBINED_TERMINAL_ID]);
+
+function isRealCustomerDocId(id: string): boolean {
+  return !AGGREGATE_DOC_IDS.has(id);
+}
 
 export interface ConstraintHourRow {
   hour: number;
@@ -70,11 +80,28 @@ export function buildDocTrendByCustomer(
       }
       if (!series.every((x) => x == null)) out[customer.id] = series;
     }
+
+    const avgSeries: Array<number | null> = [];
+    const combinedSeries: Array<number | null> = [];
+    for (let h = 0; h <= maxHour; h++) {
+      const row = simulationLog.find((r) => r.hour === h);
+      const avg = row?.averageCustomerDaysOfCover;
+      const combined = row?.combinedTerminalDaysOfCover;
+      avgSeries.push(avg != null && Number.isFinite(avg) ? avg : null);
+      combinedSeries.push(combined != null && Number.isFinite(combined) ? combined : null);
+    }
+    if (!avgSeries.every((x) => x == null)) out[AVERAGE_CUSTOMER_ID] = avgSeries;
+    if (!combinedSeries.every((x) => x == null)) out[COMBINED_TERMINAL_ID] = combinedSeries;
     return out;
   }
 
   if (!timelineData?.timeline || !config) return out;
   const periodFloored = simulationPeriodHoursFloored(config);
+  const customerIds = Object.keys(timelineData.timeline);
+  const maxLen = Math.max(...customerIds.map((id) => timelineData.timeline[id]?.length ?? 0), 0);
+  const terminalByHour = new Array<number>(maxLen).fill(0);
+  const perCustomerSeries: Record<string, Array<number | null>> = {};
+
   for (const [customerId, values] of Object.entries(timelineData.timeline)) {
     const customer = customerById.get(customerId);
     if (!customer) continue;
@@ -84,9 +111,32 @@ export function buildDocTrendByCustomer(
     );
     if (series.every((x) => x == null)) continue;
     out[customerId] = series;
+    perCustomerSeries[customerId] = series;
+    for (let h = 0; h < arr.length; h++) terminalByHour[h] = (terminalByHour[h] ?? 0) + (arr[h] ?? 0);
+  }
+
+  if (maxLen > 0) {
+    const allCustomers = [...customerById.values()];
+    const combinedSeries = terminalByHour.map((inv) =>
+      terminalRepresentativeDaysOfCover(inv, allCustomers, config, periodFloored)
+    );
+    if (!combinedSeries.every((x) => x == null)) out[COMBINED_TERMINAL_ID] = combinedSeries;
+
+    const avgSeries: Array<number | null> = [];
+    for (let h = 0; h < maxLen; h++) {
+      const vals: number[] = [];
+      for (const series of Object.values(perCustomerSeries)) {
+        const v = series[h];
+        if (v != null && Number.isFinite(v)) vals.push(v);
+      }
+      avgSeries.push(vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : null);
+    }
+    if (!avgSeries.every((x) => x == null)) out[AVERAGE_CUSTOMER_ID] = avgSeries;
   }
   return out;
 }
+
+export { isRealCustomerDocId };
 
 export function buildPacingByCustomerMode(
   customers: Customer[],

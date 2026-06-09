@@ -19,6 +19,7 @@ import {
 } from "../lib/schedulingConstraints";
 import TransportStatusIcon, { WorstConstraintIcon } from "../components/TransportStatusIcon";
 import { ConstraintIcon, UncategorisedConstraintIcon } from "../components/ConstraintIcon";
+import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import { CheckCircle2, ClipboardList } from "lucide-react";
 
 interface Customer {
@@ -101,6 +102,8 @@ function constraintPriority(c: TransportModeStatus["blockingConstraint"]): numbe
   if (c === "resource_occupied") return 2;
   if (c === "pace_ahead") return 1;
   if (c === "optimizer_days_of_cover") return 1;
+  if (c === "optimizer_fulfillment") return 1;
+  if (c === "annual_target_met") return 0;
   return 0;
 }
 
@@ -296,7 +299,7 @@ function hourRowStylesFixed(
   if (worst === "insufficient_inventory") base.background = "#fef2f2";
   else if (worst === "tank_full") base.background = "#fffbeb";
   else if (worst === "roundtrip") base.background = "#eff6ff";
-  else if (worst === "pace_ahead" || worst === "optimizer_days_of_cover")
+  else if (worst === "pace_ahead" || worst === "optimizer_days_of_cover" || worst === "optimizer_fulfillment")
     base.background = "#f1f5f9";
   else Object.assign(base, zebra);
 
@@ -743,8 +746,10 @@ export default function SimulationLog() {
       <div>
         <div className="page-header">
           <div>
-            <h1 className="page-title">Simulation Log</h1>
-            <p className="page-subtitle">Hour-by-hour transport diagnostics</p>
+            <PageTitleWithHelp
+              title="Simulation Log"
+              help="Hour-by-hour transport diagnostics"
+            />
           </div>
         </div>
         <div className="card">
@@ -774,8 +779,10 @@ export default function SimulationLog() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Simulation Log</h1>
-          <p className="page-subtitle">Time-forward diagnostic: why each mode loaded or not, each hour</p>
+          <PageTitleWithHelp
+            title="Simulation Log"
+            help="Time-forward diagnostic: why each mode loaded or not, each hour"
+          />
         </div>
         <button type="button" className="btn btn-secondary" onClick={() => void handleExportExcel()}>
           Export to Excel
@@ -902,15 +909,31 @@ export default function SimulationLog() {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>VIEW</span>
         {(["daily", "events", "all"] as const).map((v) => (
-          <button
-            key={v}
-            type="button"
-            className={`btn ${viewMode === v ? "btn-primary" : "btn-secondary"}`}
-            style={{ padding: "4px 12px", fontSize: 12 }}
-            onClick={() => setViewMode(v)}
-          >
-            {v === "daily" ? "Daily summary" : v === "events" ? "Events only" : "All hours"}
-          </button>
+          <span key={v} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <button
+              type="button"
+              className={`btn ${viewMode === v ? "btn-primary" : "btn-secondary"}`}
+              style={{ padding: "4px 12px", fontSize: 12 }}
+              onClick={() => setViewMode(v)}
+            >
+              {v === "daily" ? "Daily summary" : v === "events" ? "Events only" : "All hours"}
+            </button>
+            {v === "daily" && (
+              <HelpPopover
+                label="Daily summary help"
+                content={
+                  <>
+                    <strong>Daily mode columns:</strong> the number is how many <strong>loads started</strong> that day
+                    for that single leg lane (customer + direction + mode + lane). A green check appears only when that
+                    count is greater than zero. <strong>0</strong> means no visit started on that leg — hover the cell for
+                    roll-up text. Row tint still highlights the worst idle reason seen that day across visible legs
+                    (inventory, berth, pace, etc.).
+                  </>
+                }
+                size={14}
+              />
+            )}
+          </span>
         ))}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
@@ -933,14 +956,6 @@ export default function SimulationLog() {
         {rowCountLabel}
         {activeConstraints.size > 0 && displayRows.length === 0 ? " — no rows match this constraint filter" : ""}
       </div>
-      {viewMode === "daily" && (
-        <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b", maxWidth: 900, lineHeight: 1.5 }}>
-          <strong>Daily mode columns:</strong> the number is how many <strong>loads started</strong> that day for that
-          single leg lane (customer + direction + mode + lane). A green check appears only when that count is greater
-          than zero. <strong>0</strong> means no visit started on that leg — hover the cell for roll-up text. Row tint
-          still highlights the worst idle reason seen that day across visible legs (inventory, berth, pace, etc.).
-        </p>
-      )}
 
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div

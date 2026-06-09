@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { ClipboardList, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import TerminalMapSvg from "../components/TerminalMapSvg";
+import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import {
   useSimulationData,
   isAnyOperationActive,
@@ -104,8 +105,10 @@ export default function Simulation() {
       <div>
         <div className="page-header">
           <div>
-            <h1 className="page-title">Visualization</h1>
-            <p className="page-subtitle">Animated playback of inventory and berth activity</p>
+            <PageTitleWithHelp
+              title="Visualization"
+              help="Animated playback of inventory and berth activity"
+            />
           </div>
         </div>
         <div className="card" style={{ padding: 48, textAlign: "center", color: "#64748b" }}>
@@ -130,12 +133,20 @@ export default function Simulation() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Terminal visualization</h1>
-          <p className="page-subtitle">
-            Playback from saved inventory timeline and slots
-            {timelineStart ? ` (from ${new Date(timelineStart).toLocaleDateString("en-GB")})` : ""}
-            {operationActive ? " · Auto slow-down during berth operations" : ""}
-          </p>
+          <div className="page-title-row">
+            <h1 className="page-title">Terminal visualization</h1>
+            <HelpPopover
+              label="Visualization help"
+              content="Playback from saved inventory timeline and scheduled berth slots."
+            />
+          </div>
+          {(timelineStart || operationActive) && (
+            <p className="page-subtitle" style={{ marginTop: 4 }}>
+              {timelineStart ? `From ${new Date(timelineStart).toLocaleDateString("en-GB")}` : ""}
+              {timelineStart && operationActive ? " · " : ""}
+              {operationActive ? "Auto slow-down during berth operations" : ""}
+            </p>
+          )}
         </div>
       </div>
 

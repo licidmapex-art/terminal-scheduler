@@ -17,6 +17,7 @@ import {
 } from "../lib/defaultStorageShare";
 import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
 import type { SimulationConfig as EngineSimulationConfig } from "../../types";
+import { FormLabelWithHelp, HelpPopover } from "./HelpPopover";
 
 interface Customer {
   id: string;
@@ -625,7 +626,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
               {fieldErrors.name && <div className="form-error">{fieldErrors.name}</div>}
             </div>
             <div className="form-group">
-              <label className="form-label">Starting inventory (tonnes)</label>
+              <FormLabelWithHelp help={'Stock at the start of the simulation window (same as Analytics "Starting").'}>
+                Starting inventory (tonnes)
+              </FormLabelWithHelp>
               <input
                 type="number"
                 min="0"
@@ -638,11 +641,18 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                 }}
                 required
               />
-              <div className="form-helper">Stock at the start of the simulation window (same as Analytics "Starting").</div>
               {fieldErrors.currentInventory && <div className="form-error">{fieldErrors.currentInventory}</div>}
             </div>
             <div className="form-group">
-              <label className="form-label">Chart &amp; map color</label>
+              <FormLabelWithHelp
+                help={
+                  useCustomChartColor
+                    ? "This color is used in the Gantt, simulation map, inventory chart, and Analytics sparklines."
+                    : "When off, a color is picked automatically from the default palette based on customer order."
+                }
+              >
+                Chart &amp; map color
+              </FormLabelWithHelp>
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <label
                   style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 14 }}
@@ -685,11 +695,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   />
                 )}
               </div>
-              <div className="form-helper">
-                {useCustomChartColor
-                  ? "This color is used in the Gantt, simulation map, inventory chart, and Analytics sparklines."
-                  : "When off, a color is picked automatically from the default palette based on customer order."}
-              </div>
             </div>
           </div>
         )}
@@ -708,7 +713,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         {openSections.inbound && (
           <div className="customer-form-section-content">
             <div className="form-group">
-              <label className="form-label">Inbound pipeline flow (t/h)</label>
+              <FormLabelWithHelp help="Rate at which the pipeline continuously fills this customer's inventory (tonnes per hour). Use 0 if no inbound pipeline.">
+                Inbound pipeline flow (t/h)
+              </FormLabelWithHelp>
               <input
                 type="number"
                 min="0"
@@ -717,13 +724,12 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                 value={inboundPipelineFlow}
                 onChange={(e) => setInboundPipelineFlow(e.target.value)}
               />
-              <div className="form-helper">
-                Rate at which the pipeline continuously fills this customer's inventory (tonnes per hour). Use 0 if no inbound pipeline.
-              </div>
             </div>
 
             <div className="form-group" style={{ borderTop: "1px solid #e2e8f0", paddingTop: 16, marginTop: 4 }}>
-              <label className="form-label">Inbound transport throughput (t)</label>
+              <FormLabelWithHelp help="Total inbound transport volume (excluding pipeline) over the simulation period.">
+                Inbound transport throughput (t)
+              </FormLabelWithHelp>
               <input
                 type="number"
                 min="0"
@@ -738,11 +744,15 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
               {fieldErrors.declaredInboundThroughput && (
                 <div className="form-error">{fieldErrors.declaredInboundThroughput}</div>
               )}
-              <div className="form-helper">Total inbound transport volume (excluding pipeline) over the simulation period.</div>
             </div>
 
             <div style={{ marginTop: 16 }}>
-              <div className="form-label" style={{ marginBottom: 8 }}>Inbound transport modes</div>
+              <div className="form-label form-label-with-help" style={{ marginBottom: 8 }}>
+                <span>Inbound transport modes</span>
+                {inboundRows.length > 0 && (
+                  <HelpPopover content="Up to 3 modes; shares must total 100%." label="Inbound transport modes help" />
+                )}
+              </div>
               {inboundRows.length === 0 ? (
                 <p className="form-helper" style={{ margin: "0 0 10px" }}>
                   No inbound transport modes configured. Inventory is filled by pipeline only.
@@ -756,11 +766,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                 <button type="button" className="btn btn-secondary btn-sm" onClick={() => addRow("inbound")}>
                   + Add inbound mode
                 </button>
-              )}
-              {inboundRows.length > 0 && (
-                <div className="form-helper" style={{ marginTop: 6 }}>
-                  Up to 3 modes; shares must total 100%.
-                </div>
               )}
             </div>
           </div>
@@ -780,7 +785,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         {openSections.outbound && (
           <div className="customer-form-section-content">
             <div className="form-group">
-              <label className="form-label">Outbound pipeline flow (t/h)</label>
+              <FormLabelWithHelp help="Rate at which the pipeline continuously drains this customer's inventory (tonnes per hour). Use 0 if no outbound pipeline.">
+                Outbound pipeline flow (t/h)
+              </FormLabelWithHelp>
               <input
                 type="number"
                 min="0"
@@ -789,13 +796,15 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                 value={outboundPipelineFlow}
                 onChange={(e) => setOutboundPipelineFlow(e.target.value)}
               />
-              <div className="form-helper">
-                Rate at which the pipeline continuously drains this customer's inventory (tonnes per hour). Use 0 if no outbound pipeline.
-              </div>
             </div>
 
             <div style={{ marginTop: 16, borderTop: "1px solid #e2e8f0", paddingTop: 16 }}>
-              <div className="form-label" style={{ marginBottom: 8 }}>Outbound transport modes</div>
+              <div className="form-label form-label-with-help" style={{ marginBottom: 8 }}>
+                <span>Outbound transport modes</span>
+                {outboundRows.length > 0 && (
+                  <HelpPopover content="Up to 3 modes; shares must total 100%." label="Outbound transport modes help" />
+                )}
+              </div>
               {outboundRows.length === 0 ? (
                 <p className="form-helper" style={{ margin: "0 0 10px" }}>
                   No outbound transport modes configured. Inventory drains by pipeline only.
@@ -810,11 +819,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   + Add outbound mode
                 </button>
               )}
-              {outboundRows.length > 0 && (
-                <div className="form-helper" style={{ marginTop: 6 }}>
-                  Up to 3 modes; shares must total 100%.
-                </div>
-              )}
             </div>
           </div>
         )}
@@ -827,27 +831,46 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           className="customer-form-section-toggle"
           onClick={() => toggleSection("storage")}
         >
-          <span>Storage</span>
+          <span className="section-heading-row">
+            Storage
+            <span onClick={(e) => e.stopPropagation()}>
+              <HelpPopover
+                label="Storage help"
+                content={
+                  capacityBandMode ? (
+                    <>
+                      Used in <strong>Fixed band</strong>
+                      {storageMode === "time_shared_storage" ? " and Time-shared" : ""} mode: this share × terminal
+                      total storage sets this customer&apos;s dedicated capacity band (tank-full and inventory gates).
+                    </>
+                  ) : (
+                    <>
+                      Terminal is in <strong>{storageMode.replace(/_/g, " ")}</strong> mode — storage share does not
+                      set a capacity band. It only weights how reported inventory is split between customers on charts
+                      and logs.
+                    </>
+                  )
+                }
+              />
+            </span>
+          </span>
           <span>{openSections.storage ? "Hide" : "Show"}</span>
         </button>
         {openSections.storage && (
           <div className="customer-form-section-content">
-            {capacityBandMode ? (
-              <p className="form-helper" style={{ marginTop: 0, marginBottom: 12, lineHeight: 1.5 }}>
-                Used in <strong>Fixed band</strong>
-                {storageMode === "time_shared_storage" ? " and Time-shared" : ""} mode: this share × terminal
-                total storage sets this customer&apos;s dedicated capacity band (tank-full and inventory gates).
-              </p>
-            ) : (
-              <p className="form-helper" style={{ marginTop: 0, marginBottom: 12, lineHeight: 1.5 }}>
-                Terminal is in <strong>{storageMode.replace(/_/g, " ")}</strong> mode — storage share does not
-                set a capacity band. It only weights how reported inventory is split between customers on charts
-                and logs.
-              </p>
-            )}
             <div className="form-grid">
               <div className="form-group">
-                <label className="form-label">Storage share (%)</label>
+                <FormLabelWithHelp
+                  help={
+                    <>
+                      Default: this customer&apos;s declared inbound throughput ÷ total declared inbound throughput
+                      across all customers
+                      {suggestedStorageShare != null ? ` (${suggestedStorageShare}%)` : ""}.
+                    </>
+                  }
+                >
+                  Storage share (%)
+                </FormLabelWithHelp>
                 <input
                   type="number"
                   min="0"
@@ -862,11 +885,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   }}
                   required
                 />
-                <div className="form-helper">
-                  Default: this customer&apos;s declared inbound throughput ÷ total declared inbound throughput
-                  across all customers
-                  {suggestedStorageShare != null ? ` (${suggestedStorageShare}%)` : ""}.
-                </div>
                 {suggestedStorageShare != null && (
                   <button
                     type="button"
@@ -891,15 +909,19 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           className="customer-form-section-toggle"
           onClick={() => toggleSection("timeShared")}
         >
-          <span>Time-shared storage</span>
+          <span className="section-heading-row">
+            Time-shared storage
+            <span onClick={(e) => e.stopPropagation()}>
+              <HelpPopover
+                label="Time-shared storage help"
+                content="Used in Time-shared mode on the inventory chart. Triangle starts at cargo size (t), decreases to 0 over cargo ÷ pipeline flow (h). Min band x is stored for compatibility."
+              />
+            </span>
+          </span>
           <span>{openSections.timeShared ? "Hide" : "Show"}</span>
         </button>
         {openSections.timeShared && (
           <div className="customer-form-section-content">
-            <p className="form-helper" style={{ marginBottom: 12 }}>
-              Used in Time-shared mode on the inventory chart. Triangle starts at cargo size (t), decreases to 0
-              over cargo ÷ pipeline flow (h). Min band x is stored for compatibility.
-            </p>
             <div className="form-grid">
               <div className="form-group">
                 <label className="form-label">Min band x (tonnes)</label>
@@ -913,7 +935,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">Triangle duration y (hours)</label>
+                <FormLabelWithHelp help="On the chart, duration is cargo ÷ pipeline flow; this field is kept for compatibility.">
+                  Triangle duration y (hours)
+                </FormLabelWithHelp>
                 <input
                   type="number"
                   min="0.1"
@@ -922,7 +946,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   value={timeSharedDuration}
                   onChange={(e) => setTimeSharedDuration(e.target.value)}
                 />
-                <span className="form-helper">On the chart, duration is cargo ÷ pipeline flow; this field is kept for compatibility.</span>
               </div>
             </div>
           </div>

@@ -257,6 +257,60 @@ describe("runScheduler", () => {
     expect(freeSmall.scheduledSlots.every((s) => s.resourceId === "berth-small")).toBe(true);
   });
 
+  it("shared_inventory: distributes inbound ship slots across customers without roundtrip", () => {
+    const config = makeConfig({ storageMode: "shared_inventory", totalStorageCapacity: 100000 });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c-a",
+        name: "Alpha",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        currentInventory: 0
+      }),
+      makeCustomer({
+        id: "c-b",
+        name: "Beta",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        currentInventory: 0
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth 1",
+        type: "berth_large",
+        flowRate: 100,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+    const slotsA = result.scheduledSlots.filter(
+      (s) => s.customerId === "c-a" && s.direction === "inbound"
+    );
+    const slotsB = result.scheduledSlots.filter(
+      (s) => s.customerId === "c-b" && s.direction === "inbound"
+    );
+
+    expect(slotsA.length).toBeGreaterThan(0);
+    expect(slotsB.length).toBeGreaterThan(0);
+    expect(slotsA.length).toBe(slotsB.length);
+
+    const ordered = [...result.scheduledSlots]
+      .filter((s) => s.direction === "inbound")
+      .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+    if (ordered.length >= 2) {
+      expect(ordered[0]!.customerId).not.toBe(ordered[1]!.customerId);
+    }
+  });
+
   it("shared_shipping: distributes inbound ship slots across customers without roundtrip", () => {
     const config = makeConfig({ storageMode: "shared_shipping" });
     const customers: Customer[] = [
@@ -808,6 +862,56 @@ describe("runScheduler", () => {
     expect(optimizerDisabled.scheduledSlots.length).toBe(baseline.scheduledSlots.length);
   });
 
+  it("relative fulfillment optimizer: ahead customer yields in shared_inventory inbound pool", () => {
+    const config = makeConfig({
+      storageMode: "shared_inventory",
+      totalStorageCapacity: 100_000,
+      optimizerRelativeFulfillmentMultiplier: 1
+    });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c-a",
+        name: "Alpha",
+        storageShare: 50,
+        declaredInboundThroughput: 450,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        currentInventory: 0
+      }),
+      makeCustomer({
+        id: "c-b",
+        name: "Beta",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        currentInventory: 0
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth 1",
+        type: "berth_large",
+        flowRate: 100,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+    const hasFulfillmentYield = result.simulationLog.some((row) =>
+      row.transportStatus.some(
+        (s) =>
+          s.customerId === "c-a" &&
+          s.blockingConstraint === "optimizer_fulfillment" &&
+          s.direction === "inbound"
+      )
+    );
+    expect(hasFulfillmentYield).toBe(true);
+  });
+
   it("relative optimizer: high-DoC customer yields so peer can schedule", () => {
     const customers: Customer[] = [
       makeCustomer({
@@ -1118,6 +1222,45 @@ describe("runScheduler", () => {
     expect(result.scheduledSlots.some((s) => s.customerId === "alpha" && s.direction === "outbound")).toBe(
       true
     );
+  });
+
+  it("simulation log shows annual_target_met when customer inbound ship target is fulfilled", () => {
+    const config = makeConfig({
+      storageMode: "shared_inventory",
+      totalStorageCapacity: 100_000
+    });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "ineos",
+        name: "Ineos",
+        declaredInboundThroughput: 30_000,
+        currentInventory: 0,
+        storageShare: 100,
+        inboundMEPS: 30_000,
+        inboundMode: "ship"
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth 1",
+        type: "berth_large",
+        flowRate: 2000,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+    expect(result.scheduledSlots.filter((s) => s.customerId === "ineos" && s.direction === "inbound")).toHaveLength(
+      1
+    );
+
+    const lastRow = result.simulationLog[result.simulationLog.length - 1]!;
+    const status = lastRow.transportStatus.find(
+      (t) => t.customerId === "ineos" && t.direction === "inbound" && t.mode === "ship"
+    );
+    expect(status?.action).toBe("idle");
+    expect(status?.blockingConstraint).toBe("annual_target_met");
   });
 
   it("creates separate lanes for same mode when outbound transports are split", () => {

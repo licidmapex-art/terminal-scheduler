@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import {
   buildAnalyticsAiSummary,
   summaryToPromptText,
+  questionToPromptText,
   type AnalyticsAiSummary
 } from "../lib/buildAnalyticsAiSummary";
 import {
@@ -10,9 +11,11 @@ import {
   setGeminiApiKey,
   clearGeminiApiKey,
   requestGeminiAnalysis,
-  testGeminiApiConnection
+  testGeminiApiConnection,
+  type AiAnalysisRequestMode
 } from "../lib/geminiApi";
 import type { SimulationLogRow } from "../../engine/simulationLog";
+import { HelpPopover } from "./HelpPopover";
 
 interface AiAnalysisPanelProps {
   config: {
@@ -117,6 +120,8 @@ function renderMarkdownish(text: string): ReactNode[] {
 export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
   const [apiKeyInput, setApiKeyInput] = useState(() => getGeminiApiKey());
   const [showKeyField, setShowKeyField] = useState(() => !getGeminiApiKey());
+  const [requestMode, setRequestMode] = useState<AiAnalysisRequestMode>("summary");
+  const [customQuestion, setCustomQuestion] = useState("");
   const [userNotes, setUserNotes] = useState("");
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -196,13 +201,32 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
       return;
     }
 
+    const question = customQuestion.trim();
+    if (requestMode === "question" && !question) {
+      setError("Enter a question to send to Gemini.");
+      return;
+    }
+
     setLoading(true);
-    setLoadingStatus(forceRefresh ? "Requesting fresh analysis…" : "Sending summary to Gemini…");
+    setLoadingStatus(
+      forceRefresh
+        ? requestMode === "question"
+          ? "Requesting fresh answer…"
+          : "Requesting fresh analysis…"
+        : requestMode === "question"
+          ? "Sending question to Gemini…"
+          : "Sending summary to Gemini…"
+    );
     try {
-      const promptText = summaryToPromptText(summary, userNotes);
+      const promptText =
+        requestMode === "question"
+          ? questionToPromptText(summary, question, userNotes)
+          : summaryToPromptText(summary, userNotes);
       let usedCache = false;
       const result = await requestGeminiAnalysis(promptText, {
         forceRefresh,
+        mode: requestMode,
+        question: requestMode === "question" ? question : undefined,
         onStatus: (msg) => {
           if (msg.startsWith("Using cached")) usedCache = true;
           setLoadingStatus(msg);
@@ -223,19 +247,26 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
     <div className="card ai-analysis-panel">
       <div className="ai-analysis-header">
         <div>
-          <div className="card-title" style={{ marginBottom: 4 }}>
-            AI analysis
+          <div className="card-title-row" style={{ marginBottom: 4 }}>
+            <div className="card-title" style={{ margin: 0 }}>
+              AI analysis
+            </div>
+            <HelpPopover
+              label="AI analysis help"
+              content={
+                <>
+                  Click <strong>Get AI summary</strong> for a structured overview, or choose <strong>Ask a question</strong> for a bespoke answer about the same run data.
+                  Nothing is sent until you click. If you see rate-limit errors on a new key, open AI Studio → API Keys
+                  → <strong>Set up billing</strong> on that project (free tier still applies). Use{" "}
+                  <strong>Test connection</strong> after saving a key. Your key stays in this browser only (
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
+                    get a free key
+                  </a>
+                  ).
+                </>
+              }
+            />
           </div>
-          <p className="ai-analysis-intro">
-            Click <strong>Get AI analysis</strong> to send a compact summary of this run to Google Gemini.
-            Nothing is sent until you click. If you see rate-limit errors on a new key, open AI Studio → API Keys →{" "}
-            <strong>Set up billing</strong> on that project (free tier still applies). Use{" "}
-            <strong>Test connection</strong> after saving a key. Your key stays in this browser only (
-            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
-              get a free key
-            </a>
-            ).
-          </p>
         </div>
       </div>
 
@@ -288,17 +319,68 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
       )}
 
       <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
+        <span className="form-label">Request type</span>
+        <div className="form-radio-group" style={{ marginTop: 6 }}>
+          <label className="form-radio-option">
+            <input
+              type="radio"
+              name="ai-request-mode"
+              value="summary"
+              checked={requestMode === "summary"}
+              onChange={() => setRequestMode("summary")}
+            />
+            <span>
+              <span className="form-radio-option-title">Summary</span>
+            </span>
+          </label>
+          <label className="form-radio-option">
+            <input
+              type="radio"
+              name="ai-request-mode"
+              value="question"
+              checked={requestMode === "question"}
+              onChange={() => setRequestMode("question")}
+            />
+            <span>
+              <span className="form-radio-option-title">Ask a question</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      {requestMode === "question" && (
+        <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
+          <label className="form-label" htmlFor="ai-custom-question">
+            Your question
+          </label>
+          <textarea
+            id="ai-custom-question"
+            className="form-input ai-analysis-notes"
+            rows={3}
+            placeholder="e.g. Why does Ineos get more inbound ships than AL despite similar throughput targets?"
+            value={customQuestion}
+            onChange={(e) => setCustomQuestion(e.target.value)}
+          />
+        </div>
+      )}
+
+      <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
         <label className="form-label" htmlFor="ai-user-notes">
-          Optional context (not sent unless you click analyse)
+          {requestMode === "summary" ? "Optional context" : "Optional extra context"}
         </label>
         <textarea
           id="ai-user-notes"
           className="form-input ai-analysis-notes"
           rows={2}
-          placeholder="e.g. Customer A has priority; testing optimizer at 1.2× average DoC…"
+          placeholder={
+            requestMode === "summary"
+              ? "e.g. Customer A has priority; testing optimizer at 1.2× average DoC…"
+              : "e.g. Focus on shared-inventory mode and berth pacing…"
+          }
           value={userNotes}
           onChange={(e) => setUserNotes(e.target.value)}
         />
+        <span className="form-helper">Included in the JSON sent to Gemini when you click analyse.</span>
       </div>
 
       <div className="ai-analysis-actions">
@@ -308,7 +390,13 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
           onClick={() => handleAnalyse(false)}
           disabled={loading || !props.hasRunData}
         >
-          {loading ? "Analysing…" : "Get AI analysis"}
+          {loading
+            ? requestMode === "question"
+              ? "Asking…"
+              : "Analysing…"
+            : requestMode === "question"
+              ? "Ask Gemini"
+              : "Get AI summary"}
         </button>
         {analysis && !loading && (
           <button
@@ -318,7 +406,7 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
             disabled={loading || !props.hasRunData}
             title="Bypass cache and call Gemini again"
           >
-            Refresh analysis
+            {requestMode === "question" ? "Refresh answer" : "Refresh summary"}
           </button>
         )}
         {!props.hasRunData && (
@@ -341,7 +429,8 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
       {loading && (
         <div className="ai-analysis-loading">
           <div className="ai-analysis-spinner" aria-hidden />
-          {loadingStatus ?? "Sending summary to Gemini…"}
+          {loadingStatus ??
+            (requestMode === "question" ? "Sending question to Gemini…" : "Sending summary to Gemini…")}
         </div>
       )}
 

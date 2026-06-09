@@ -87,6 +87,7 @@ function resolveExportSimulationConfig(): SimulationConfig {
         pacerRoundingDirection: configs[0].pacerRoundingDirection ?? "up",
         pacerRoundAtDecile: configs[0].pacerRoundAtDecile ?? 1,
         optimizerRelativeDocMultiplier: configs[0].optimizerRelativeDocMultiplier ?? 0,
+        optimizerRelativeFulfillmentMultiplier: configs[0].optimizerRelativeFulfillmentMultiplier ?? 0,
         minSlotIntervalHours: configs[0].minSlotIntervalHours ?? 0,
         preOpsHours: configs[0].preOpsHours ?? 0,
         postOpsHours: configs[0].postOpsHours ?? 0,
@@ -104,6 +105,7 @@ function resolveExportSimulationConfig(): SimulationConfig {
         pacerRoundingDirection: "up",
         pacerRoundAtDecile: 1,
         optimizerRelativeDocMultiplier: 0,
+        optimizerRelativeFulfillmentMultiplier: 0,
         minSlotIntervalHours: 0,
         preOpsHours: 0,
         postOpsHours: 0,
@@ -147,6 +149,7 @@ ipcMain.handle("scheduler:run", async () => {
         pacerRoundingDirection: configs[0].pacerRoundingDirection ?? "up",
         pacerRoundAtDecile: configs[0].pacerRoundAtDecile ?? 1,
         optimizerRelativeDocMultiplier: configs[0].optimizerRelativeDocMultiplier ?? 0,
+        optimizerRelativeFulfillmentMultiplier: configs[0].optimizerRelativeFulfillmentMultiplier ?? 0,
         minSlotIntervalHours: configs[0].minSlotIntervalHours ?? 0,
         preOpsHours: configs[0].preOpsHours ?? 0,
         postOpsHours: configs[0].postOpsHours ?? 0,
@@ -164,6 +167,7 @@ ipcMain.handle("scheduler:run", async () => {
         pacerRoundingDirection: "up" as const,
         pacerRoundAtDecile: 1,
         optimizerRelativeDocMultiplier: 0,
+        optimizerRelativeFulfillmentMultiplier: 0,
         minSlotIntervalHours: 0,
         preOpsHours: 0,
         postOpsHours: 0,
@@ -358,6 +362,7 @@ ipcMain.handle("db:createSimulationConfig", async (_e, config: unknown) => {
     pacerRoundingDirection?: "up" | "down";
     pacerRoundAtDecile?: number;
     optimizerRelativeDocMultiplier?: number;
+    optimizerRelativeFulfillmentMultiplier?: number;
     bargeBerthAllocation?: string;
   };
   const pacerDecileRaw = Math.round(c.pacerRoundAtDecile ?? 1);
@@ -378,6 +383,11 @@ ipcMain.handle("db:createSimulationConfig", async (_e, config: unknown) => {
     optimizerRelativeDocMultiplier:
       typeof c.optimizerRelativeDocMultiplier === "number" && Number.isFinite(c.optimizerRelativeDocMultiplier)
         ? Math.max(0, c.optimizerRelativeDocMultiplier)
+        : 0,
+    optimizerRelativeFulfillmentMultiplier:
+      typeof c.optimizerRelativeFulfillmentMultiplier === "number" &&
+      Number.isFinite(c.optimizerRelativeFulfillmentMultiplier)
+        ? Math.max(0, c.optimizerRelativeFulfillmentMultiplier)
         : 0,
     minSlotIntervalHours: c.minSlotIntervalHours ?? 0,
     preOpsHours: c.preOpsHours ?? 0,
@@ -408,6 +418,7 @@ ipcMain.handle("db:updateSimulationConfig", async (_e, id: string, config: unkno
     pacerRoundingDirection?: "up" | "down";
     pacerRoundAtDecile?: number;
     optimizerRelativeDocMultiplier?: number;
+    optimizerRelativeFulfillmentMultiplier?: number;
     bargeBerthAllocation?: string;
   };
   const pacerDecileRaw = Math.round(c.pacerRoundAtDecile ?? 1);
@@ -428,6 +439,11 @@ ipcMain.handle("db:updateSimulationConfig", async (_e, id: string, config: unkno
     optimizerRelativeDocMultiplier:
       typeof c.optimizerRelativeDocMultiplier === "number" && Number.isFinite(c.optimizerRelativeDocMultiplier)
         ? Math.max(0, c.optimizerRelativeDocMultiplier)
+        : 0,
+    optimizerRelativeFulfillmentMultiplier:
+      typeof c.optimizerRelativeFulfillmentMultiplier === "number" &&
+      Number.isFinite(c.optimizerRelativeFulfillmentMultiplier)
+        ? Math.max(0, c.optimizerRelativeFulfillmentMultiplier)
         : 0,
     minSlotIntervalHours: c.minSlotIntervalHours ?? 0,
     preOpsHours: c.preOpsHours ?? 0,

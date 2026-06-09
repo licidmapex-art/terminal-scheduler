@@ -18,7 +18,9 @@ export type TransportModeStatus = {
     | "roundtrip"
     | "resource_occupied"
     | "pace_ahead"
+    | "annual_target_met"
     | "optimizer_days_of_cover"
+    | "optimizer_fulfillment"
     | "insufficient_inventory"
     | "tank_full"
     | "customer_inventory_floor";
@@ -43,5 +45,7 @@ export interface SimulationLogRow {
   pipelineFlow: Record<string, number>;
   /** Mean of each customer's tightest leg DoC at this hour (relative optimizer). */
   averageCustomerDaysOfCover?: number | null;
+  /** Terminal inventory ÷ summed outbound pressure and headroom ÷ summed inbound pressure (min when both). */
+  combinedTerminalDaysOfCover?: number | null;
   transportStatus: TransportModeStatus[];
 }

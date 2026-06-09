@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import type { BargeBerthAllocation } from "../../engine/resourceAllocation";
 import { normalizeBargeBerthAllocation } from "../../engine/resourceAllocation";
+import { HelpPopover } from "./HelpPopover";
 
 interface BerthAllocationPanelProps {
   hasLargeBerth: boolean;
@@ -89,6 +90,7 @@ export default function BerthAllocationPanel({
         pacerRoundingDirection: c.pacerRoundingDirection === "down" ? "down" : "up",
         pacerRoundAtDecile: Number(c.pacerRoundAtDecile ?? 1),
         optimizerRelativeDocMultiplier: Number(c.optimizerRelativeDocMultiplier ?? 0),
+        optimizerRelativeFulfillmentMultiplier: Number(c.optimizerRelativeFulfillmentMultiplier ?? 0),
         minSlotIntervalHours: Number(c.minSlotIntervalHours ?? 0),
         preOpsHours: Number(c.preOpsHours ?? 0),
         postOpsHours: Number(c.postOpsHours ?? 0),
@@ -107,23 +109,20 @@ export default function BerthAllocationPanel({
 
   return (
     <div className="card" style={{ marginBottom: 24 }}>
-      <div className="card-title">Barge berth allocation</div>
-      <p className="form-helper" style={{ margin: "0 0 14px" }}>
-        When barges can use both large and small berths, choose how the scheduler assigns them.
-      </p>
+      <div className="card-title-row">
+        <div className="card-title" style={{ margin: 0 }}>Barge berth allocation</div>
+        <HelpPopover
+          label="Barge berth allocation help"
+          content="When barges can use both large and small berths, choose how the scheduler assigns them."
+        />
+      </div>
       {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
       <form onSubmit={handleSave}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+        <div className="form-radio-group" style={{ marginBottom: 14 }}>
           {OPTIONS.map((opt) => (
             <label
               key={opt.value}
-              style={{
-                display: "flex",
-                gap: 10,
-                alignItems: "flex-start",
-                cursor: busy || !configId ? "not-allowed" : "pointer",
-                opacity: busy || !configId ? 0.6 : 1
-              }}
+              className={`form-radio-option${busy || !configId ? " is-disabled" : ""}`}
             >
               <input
                 type="radio"
@@ -132,12 +131,13 @@ export default function BerthAllocationPanel({
                 checked={allocation === opt.value}
                 onChange={() => setAllocation(opt.value)}
                 disabled={busy || !configId}
-                style={{ marginTop: 3 }}
               />
               <span>
-                <span style={{ fontWeight: 500 }}>{opt.label}</span>
-                <span className="form-helper" style={{ display: "block", margin: "2px 0 0" }}>
-                  {opt.description}
+                <span className="form-radio-option-title">
+                  {opt.label}
+                  <span style={{ marginLeft: 6, verticalAlign: "middle" }} onClick={(e) => e.preventDefault()}>
+                    <HelpPopover content={opt.description} label={`${opt.label} help`} size={14} />
+                  </span>
                 </span>
               </span>
             </label>

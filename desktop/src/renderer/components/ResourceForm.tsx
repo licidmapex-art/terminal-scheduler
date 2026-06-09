@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { FormLabelWithHelp } from "./HelpPopover";
 
 type ResourceType = "berth_large" | "berth_small" | "rail_siding";
 
@@ -75,7 +76,9 @@ export default function ResourceForm({ resource, onSaved, onCancel }: ResourceFo
         {fieldErrors.name && <div className="form-error">{fieldErrors.name}</div>}
       </div>
       <div className="form-group">
-        <label className="form-label">Type</label>
+        <FormLabelWithHelp help="Used with vessel mode to pick compatible berths for each movement.">
+          Type
+        </FormLabelWithHelp>
         <select
           className="form-select"
           value={type}
@@ -85,10 +88,11 @@ export default function ResourceForm({ resource, onSaved, onCancel }: ResourceFo
           <option value="berth_small">Berth (small)</option>
           <option value="rail_siding">Rail siding</option>
         </select>
-        <div className="form-helper">Used with vessel mode to pick compatible berths for each movement.</div>
       </div>
       <div className="form-group">
-        <label className="form-label">Flow rate (t/h)</label>
+        <FormLabelWithHelp help="Transfer rate while alongside — drives slot duration (volume ÷ flow).">
+          Flow rate (t/h)
+        </FormLabelWithHelp>
         <input
           type="number"
           min="0.1"
@@ -103,7 +107,6 @@ export default function ResourceForm({ resource, onSaved, onCancel }: ResourceFo
           aria-invalid={!!fieldErrors.flowRate}
         />
         {fieldErrors.flowRate && <div className="form-error">{fieldErrors.flowRate}</div>}
-        <div className="form-helper">Transfer rate while alongside — drives slot duration (volume ÷ flow).</div>
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
         <button type="submit" className="btn btn-primary">Save</button>

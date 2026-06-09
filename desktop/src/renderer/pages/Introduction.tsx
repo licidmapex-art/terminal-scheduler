@@ -62,22 +62,40 @@ export default function Introduction() {
               attempt is subject to the constraints below.
             </p>
             <p style={{ marginBottom: 12 }}>
-              <strong>Who do constraints apply to?</strong> For <strong>fixed band</strong>, <strong>shared inventory</strong>,
-              and <strong>time-shared storage</strong>, slot <strong>targets</strong>, <strong>pace</strong>, and{" "}
-              <strong>roundtrip</strong> limits are tracked <strong>per leg</strong> — i.e. per <strong>customer</strong> and{" "}
-              <strong>direction</strong> and <strong>mode</strong> together — not as one shared budget per transport mode
-              across the whole terminal. (Two customers both using inbound ships each have their own counts and pacing.) The{" "}
-              <strong>exception</strong> is <strong>shared shipping</strong>: for that mode only, slot targets and pacing for
-              a given <strong>direction + mode</strong> (e.g. all inbound ships) are combined across customers, while
-              inventory checks still use the terminal pool or per-customer bands as usual.
+              <strong>Who do constraints apply to?</strong> Most limits are evaluated <strong>per leg</strong> (customer ×
+              direction × mode). <strong>Shared shipping</strong> combines pace and annual targets across customers for each
+              direction + mode. <strong>Shared inventory</strong> does that for <strong>inbound</strong> only; outbound stays
+              per leg. The table below summarises tie-breakers and constraints for each storage mode.
             </p>
             <p style={{ marginBottom: 12 }}>
-              <strong>Which leg runs first in that hour?</strong> Active legs are sorted by a <strong>priority score
-              </strong> (lower = tried earlier), then by customer name. The score is <strong>different for inbound vs
-              outbound</strong> so that berth competition follows operational need, not raw tank size alone.
+              <strong>Which leg runs first in that hour?</strong> Active legs are sorted (lower = tried earlier), then the
+              scheduler walks the list and assigns the first leg that passes every constraint check.
             </p>
             <p style={{ marginBottom: 8, fontWeight: 600, color: "#334155" }}>
-              Priority score (Simulation log tooltips — same as the sort)
+              Tie-breakers (merit order — sort only, not blocking icons)
+            </p>
+            <ol style={{ margin: "0 0 12px", paddingLeft: 20 }}>
+              <li style={{ marginBottom: 8 }}>
+                <strong>Fulfilment ratio</strong> — In <strong>shared shipping</strong> (all legs) and{" "}
+                <strong>shared inventory</strong> (inbound only), legs sharing the same direction + mode are ordered by{" "}
+                <strong>slots started ÷ that leg&apos;s annual target</strong>. The customer furthest behind their own target
+                is tried first. This is a <strong>priority rule</strong>, not a Simulation log icon — but it strongly shapes
+                who gets the berth when the pool is open.
+              </li>
+              <li style={{ marginBottom: 8 }}>
+                <strong>Days-of-cover priority score</strong> — When fulfilment ratios tie (or the mode has no pooled rotation),
+                the engine uses the DoC score below. <strong>Lower</strong> = tried earlier.
+              </li>
+              <li style={{ marginBottom: 8 }}>
+                <strong>Customer name</strong> — Final tie-break (stable alphabetical order).
+              </li>
+            </ol>
+            <p style={{ marginBottom: 8, fontSize: 13, color: "#64748b" }}>
+              Legs are tried in merit order each hour. The scheduler walks the sorted list and assigns the first leg that passes
+              every constraint check below.
+            </p>
+            <p style={{ marginBottom: 8, fontWeight: 600, color: "#334155" }}>
+              DoC priority score (Simulation log tooltips — same as the sort when ratios tie)
             </p>
             <p style={{ marginBottom: 12 }}>
               <strong>Inbound legs (ships, barges loading in).</strong> The engine compares each customer&apos;s{" "}
@@ -110,16 +128,138 @@ export default function Introduction() {
               tightest.
             </p>
             <p style={{ marginBottom: 8, fontWeight: 600, color: "#334155" }}>
+              Rules by storage mode
+            </p>
+            <p style={{ marginBottom: 12, fontSize: 13, color: "#64748b" }}>
+              <strong>Tie-breakers</strong> decide try order only. <strong>Constraints</strong> can block a slot start and
+              appear as icons in the Simulation log when the leg is idle. A leg higher in the queue can still lose the berth
+              to a lower leg if it fails a constraint (e.g. tank full on a larger MEPS while a smaller parcel still fits).
+            </p>
+            <div style={{ overflowX: "auto", marginBottom: 20 }}>
+              <table className="data-table intro-rules-table">
+                <thead>
+                  <tr>
+                    <th style={{ minWidth: 160 }}>Rule</th>
+                    <th style={{ minWidth: 56 }}>Merit order</th>
+                    <th style={{ minWidth: 72 }}>Kind</th>
+                    <th style={{ minWidth: 120 }}>Fixed band</th>
+                    <th style={{ minWidth: 120 }}>Time-shared</th>
+                    <th style={{ minWidth: 120 }}>Shared inventory</th>
+                    <th style={{ minWidth: 120 }}>Shared shipping</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Fulfilment ratio</td>
+                    <td>1st</td>
+                    <td>Tie-breaker</td>
+                    <td>—</td>
+                    <td>—</td>
+                    <td>Inbound only (pooled by direction + mode)</td>
+                    <td>All legs (pooled by direction + mode)</td>
+                  </tr>
+                  <tr>
+                    <td>DoC priority score</td>
+                    <td>2nd</td>
+                    <td>Tie-breaker</td>
+                    <td>Per customer inventory</td>
+                    <td>Per customer inventory</td>
+                    <td>Per customer inventory</td>
+                    <td>Terminal pool share</td>
+                  </tr>
+                  <tr>
+                    <td>Customer name</td>
+                    <td>3rd</td>
+                    <td>Tie-breaker</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                  </tr>
+                  <tr>
+                    <td>Annual target met</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td>Per leg</td>
+                    <td>Per leg</td>
+                    <td>Per leg; inbound also shares combined pace pool</td>
+                    <td>Per leg + combined pool cap</td>
+                  </tr>
+                  <tr>
+                    <td>Pace ahead</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td>Per leg</td>
+                    <td>Per leg</td>
+                    <td>Inbound combined; outbound per leg</td>
+                    <td>Combined per direction + mode</td>
+                  </tr>
+                  <tr>
+                    <td>Relative optimizer (DoC)</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td colSpan={4}>Optional (terminal config). Same check in all modes when enabled.</td>
+                  </tr>
+                  <tr>
+                    <td>Relative optimizer (fulfilment)</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td>—</td>
+                    <td>—</td>
+                    <td>Inbound pool only</td>
+                    <td>All legs (pooled by direction + mode)</td>
+                  </tr>
+                  <tr>
+                    <td>Roundtrip</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td colSpan={4}>Per leg (same customer, direction, mode). Same in all modes.</td>
+                  </tr>
+                  <tr>
+                    <td>Insufficient inventory</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td>Customer stock</td>
+                    <td>Customer stock</td>
+                    <td>Terminal pool</td>
+                    <td>Terminal pool</td>
+                  </tr>
+                  <tr>
+                    <td>Customer inventory floor</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td>—</td>
+                    <td>—</td>
+                    <td>Outbound only (booking customer −x limit)</td>
+                    <td>—</td>
+                  </tr>
+                  <tr>
+                    <td>Tank full</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td>Customer band</td>
+                    <td>Customer band</td>
+                    <td>Terminal capacity</td>
+                    <td>Terminal capacity</td>
+                  </tr>
+                  <tr>
+                    <td>Resource occupied</td>
+                    <td>—</td>
+                    <td>Constraint</td>
+                    <td colSpan={4}>Compatible berth/rail, blackouts, min gap, horizon end. Same in all modes.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p style={{ marginBottom: 8, fontWeight: 600, color: "#334155" }}>
               Constraints (icons match the Simulation log when a leg is idle with that block)
             </p>
             <ul style={{ margin: "0 0 12px", paddingLeft: 0, listStyle: "none" }}>
-              <li style={{ marginBottom: 8, paddingLeft: 0 }}>
-                <strong>Target count</strong> — Cannot schedule more slot starts for a <strong>leg</strong> than that leg&apos;s
-                computed target from declared throughput and MEPS (and roundtrip limits), <strong>per customer × direction ×
-                mode</strong> unless you use <strong>shared shipping</strong>, where inbound/outbound targets of the same mode
-                are combined across customers. (No separate log icon — the leg may idle for other reasons once the target is
-                reached.)
-              </li>
+              <IntroConstraintItem constraintKey="annual_target_met">
+                <strong>Annual target met</strong> — That leg has reached its computed slot target from declared throughput
+                and MEPS (and roundtrip limits). Under <strong>shared shipping</strong> or <strong>shared inventory</strong>{" "}
+                inbound, a customer can hit this while the combined pool still has spare capacity for others.
+              </IntroConstraintItem>
               <IntroConstraintItem constraintKey="pace_ahead">
                 <strong>Pace ahead</strong> — Slot starts are throttled so visits are spread across the horizon, not only
                 bunched at the beginning (continuous pace target <strong>per leg</strong>, except{" "}
@@ -129,6 +269,12 @@ export default function Introduction() {
                 <strong>Relative optimizer (days-of-cover)</strong> — Optional guard (terminal config) that skips a slot start
                 for a leg when its DoC exceeds <strong>× the cross-customer average</strong> at that hour, so other customers
                 can still book the berth. Set multiplier <strong>0</strong> to disable.
+              </IntroConstraintItem>
+              <IntroConstraintItem constraintKey="optimizer_fulfillment">
+                <strong>Relative optimizer (fulfilment)</strong> — Optional guard (terminal config) in{" "}
+                <strong>shared shipping</strong> and <strong>shared inventory</strong> inbound pools: skips a slot start when
+                this leg&apos;s annual fulfilment % exceeds <strong>× the pool average</strong> for that direction + mode.
+                Reduces streaks when a customer is ahead on ship quota. Set multiplier <strong>0</strong> to disable.
               </IntroConstraintItem>
               <IntroConstraintItem constraintKey="roundtrip">
                 <strong>Roundtrip</strong> — If configured, a minimum number of hours must pass after the previous visit on

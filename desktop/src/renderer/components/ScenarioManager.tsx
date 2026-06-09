@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { setLastSchedulerRun } from "../store";
+import { HelpPopover } from "./HelpPopover";
 
 interface ScenarioRow {
   id: string;
@@ -132,11 +133,18 @@ export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerPro
       <div className="config-section-header">
         <span className="config-section-num">0</span>
         <div>
-          <div className="config-section-title">Scenarios</div>
-          <p className="config-section-desc">
-            Save a snapshot of customers, resources, and terminal configuration. Loading replaces all of those in
-            the database (scheduled slots and run results are cleared); run the scheduler again after loading.
-          </p>
+          <div className="config-section-title-row">
+            <div className="config-section-title">Scenarios</div>
+            <HelpPopover
+              label="Scenarios help"
+              content={
+                <>
+                  Save a snapshot of customers, resources, and terminal configuration. Loading replaces all of those
+                  in the database (scheduled slots and run results are cleared); run the scheduler again after loading.
+                </>
+              }
+            />
+          </div>
         </div>
       </div>
 
