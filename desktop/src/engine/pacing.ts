@@ -4,30 +4,170 @@
 
 import type { Customer, ScheduledSlot, SimulationConfig } from "../types";
 import {
+  getCustomerMaxCapacity,
+  isTerminalTankBottom,
+  isTerminalTankTop
+} from "./inventory";
+import {
   inboundTargetSlotsByLane,
   outboundTargetSlotsByLane
 } from "./customerLegTargets";
 
 const HOUR_MS = 60 * 60 * 1000;
 
-function normalizedPacerDecile(config: SimulationConfig): number {
-  const raw = Math.round(config.pacerRoundAtDecile ?? 1);
-  return Number.isFinite(raw) ? Math.min(9, Math.max(1, raw)) : 1;
+export interface PacerDirectionSettings {
+  roundAtDecile: number;
+  allowance: number;
 }
 
-/** Same rounding as runScheduler / buildTransportStatuses pace_ahead. */
+function normalizePacerDecile(raw: number | undefined, fallback = 1): number {
+  const d = Math.round(raw ?? fallback);
+  return Number.isFinite(d) ? Math.min(9, Math.max(1, d)) : fallback;
+}
+
+function normalizePacerAllowance(raw: number | undefined, fallback = 0.5): number {
+  const a = Number(raw ?? fallback);
+  return Number.isFinite(a) ? a : fallback;
+}
+
+/** Per-direction pacer inputs (inbound vs outbound may differ for inventory buffer). */
+export function pacerSettingsForDirection(
+  config: SimulationConfig,
+  direction: "inbound" | "outbound"
+): PacerDirectionSettings {
+  const legacyDecile = normalizePacerDecile(config.pacerRoundAtDecile);
+  if (direction === "inbound") {
+    return {
+      roundAtDecile: normalizePacerDecile(config.pacerInboundRoundAtDecile, legacyDecile),
+      allowance: normalizePacerAllowance(config.pacerInboundAllowance, 0.5)
+    };
+  }
+  return {
+    roundAtDecile: normalizePacerDecile(config.pacerOutboundRoundAtDecile, legacyDecile),
+    allowance: normalizePacerAllowance(config.pacerOutboundAllowance, 0.5)
+  };
+}
+
+/** Continuous pace target at hour {@code h} before decile rounding. */
+export function pacerContinuousTarget(
+  h: number,
+  periodHours: number,
+  effTarget: number,
+  direction: "inbound" | "outbound",
+  config: SimulationConfig
+): number {
+  const periodHoursSafe = Math.max(periodHours, 1);
+  const { allowance } = pacerSettingsForDirection(config, direction);
+  return (h / periodHoursSafe) * effTarget + allowance;
+}
+
+/** Round up to the next whole slot once fractional pace reaches {@code roundAtDecile / 10}. */
 export function paceAllowanceSlots(
   paceTargetContinuous: number,
-  config: SimulationConfig
+  roundAtDecile: number
 ): number {
   const whole = Math.floor(paceTargetContinuous);
   const frac = paceTargetContinuous - whole;
-  const decile = normalizedPacerDecile(config) / 10;
-  const mode = config.pacerRoundingDirection === "down" ? "down" : "up";
-  if (mode === "up") {
-    return whole + (frac >= decile ? 1 : 0);
+  const decile = normalizePacerDecile(roundAtDecile) / 10;
+  return Math.max(0, whole + (frac >= decile ? 1 : 0));
+}
+
+export function paceAllowanceForDirection(
+  h: number,
+  periodHours: number,
+  effTarget: number,
+  direction: "inbound" | "outbound",
+  config: SimulationConfig
+): { continuous: number; allowance: number; settings: PacerDirectionSettings } {
+  const settings = pacerSettingsForDirection(config, direction);
+  const continuous = pacerContinuousTarget(h, periodHours, effTarget, direction, config);
+  return {
+    continuous,
+    allowance: paceAllowanceSlots(continuous, settings.roundAtDecile),
+    settings
+  };
+}
+
+/**
+ * Whether the pacer may block this leg at this hour. Disapplied when inbound at terminal tank
+ * bottom or outbound at terminal tank top for any evaluated inventory snapshot (hour start
+ * and/or after pipeline before new slots).
+ */
+export function pacerAppliesForLeg(
+  direction: "inbound" | "outbound",
+  config: SimulationConfig,
+  terminalTotal: number,
+  _customerInventory: number,
+  _customerMax: number
+): boolean {
+  const cap = config.totalStorageCapacity ?? 100_000;
+
+  if (direction === "inbound") {
+    if (isTerminalTankBottom(terminalTotal)) return false;
+    return true;
   }
-  return whole + (frac > 1 - decile ? 1 : 0);
+  if (isTerminalTankTop(terminalTotal, cap)) return false;
+  return true;
+}
+
+export interface PacerInventorySnapshot {
+  terminalRefTotal: number;
+  invById: Record<string, number>;
+}
+
+/** True when pacer may block — false if any snapshot is at a tank extreme that waives pacing. */
+export function pacerAppliesAtBookingTime(
+  direction: "inbound" | "outbound",
+  config: SimulationConfig,
+  customer: Customer,
+  customers: Customer[],
+  snapshots: PacerInventorySnapshot[]
+): boolean {
+  for (const snap of snapshots) {
+    const ctx = pacerInventoryContext(
+      config,
+      customer,
+      customers,
+      snap.terminalRefTotal,
+      snap.invById
+    );
+    if (
+      !pacerAppliesForLeg(
+        direction,
+        config,
+        ctx.terminalTotal,
+        ctx.customerInventory,
+        ctx.customerMax
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Resolve terminal total and customer inventory for {@link pacerAppliesForLeg}. */
+export function pacerInventoryContext(
+  config: SimulationConfig,
+  customer: Customer,
+  customers: Customer[],
+  terminalRefTotal: number,
+  customerInvById: Record<string, number>
+): { terminalTotal: number; customerInventory: number; customerMax: number } {
+  const mode = config.storageMode ?? "fixed_band";
+  const customerMax = getCustomerMaxCapacity(customer, config);
+  const customerInventory = customerInvById[customer.id] ?? 0;
+  if (mode === "shared_inventory") {
+    return {
+      terminalTotal: customers.reduce((s, c) => s + (customerInvById[c.id] ?? 0), 0),
+      customerInventory,
+      customerMax
+    };
+  }
+  if (mode === "shared_shipping") {
+    return { terminalTotal: terminalRefTotal, customerInventory, customerMax };
+  }
+  return { terminalTotal: customerInventory, customerInventory, customerMax };
 }
 
 function slotStartHour(slot: ScheduledSlot, simStartMs: number): number {
@@ -140,8 +280,13 @@ export function customerPacingPctByDirectionMode(
   for (const [dk, bucket] of buckets) {
     const series: number[] = [];
     for (let h = 0; h <= maxHour; h++) {
-      const paceTargetContinuous = (h / periodHoursSafe) * bucket.targetSlots + 1;
-      const foreseen = paceAllowanceSlots(paceTargetContinuous, config);
+      const { allowance: foreseen } = paceAllowanceForDirection(
+        h,
+        periodHoursSafe,
+        bucket.targetSlots,
+        bucket.direction,
+        config
+      );
       const allocated = countSlotsStartedByDirectionMode(
         customer.id,
         bucket.direction,

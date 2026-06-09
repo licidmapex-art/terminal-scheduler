@@ -11,6 +11,7 @@ import {
   tallyRefusedTonnesAtTankExtremes,
   applySharedInventoryPipelineHour,
   sharedInventoryPipelineOutboundTakeCap,
+  planSharedInventoryPipelineOutboundHour,
   theoreticalInventoryDeltaWithoutTankClamp,
   replaySharedShippingTerminalFlowTotals,
   attributeSharedShippingFlowsToCustomers,
@@ -306,7 +307,7 @@ describe("tallyRefusedTonnesAtTankExtremes", () => {
       }
     ];
     const m = tallyRefusedTonnesAtTankExtremes(customers, config, log);
-    expect(m.get("c1")?.refusedAtBottomTonnes).toBe(134);
+    expect(m.get("c1")?.refusedAtBottomTonnes).toBe(67);
     expect(m.get("c1")?.refusedAtTopTonnes).toBe(0);
   });
 });
@@ -776,7 +777,23 @@ describe("buildTimeline (shared_inventory)", () => {
         currentInventory: -980,
         pipelineFlowPerHour: 46,
         pipelineOutboundPerHour: 46,
-        storageShare: 100,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "creditor",
+        name: "Creditor",
+        declaredInboundThroughput: 0,
+        currentInventory: 5000,
+        pipelineFlowPerHour: 0,
+        storageShare: 50,
         inboundMEPS: 0,
         inboundMode: "ship",
         inboundRoundtripHours: 0,
@@ -788,7 +805,7 @@ describe("buildTimeline (shared_inventory)", () => {
       }
     ];
     expect(sharedInventoryPipelineOutboundTakeCap(-980, 46, config)).toBe(20);
-    const invById: Record<string, number> = { pipe: -980 };
+    const invById: Record<string, number> = { pipe: -980, creditor: 5000 };
     const effective = applySharedInventoryPipelineHour(invById, customers, config);
     expect(effective.pipe).toBe(-20);
     expect(invById.pipe).toBe(-1000);
@@ -797,6 +814,102 @@ describe("buildTimeline (shared_inventory)", () => {
     const blocked = applySharedInventoryPipelineHour(invById, customers, config);
     expect(blocked.pipe).toBe(0);
     expect(invById.pipe).toBe(-1000);
+  });
+
+  it("shared_inventory outbound pipeline cannot borrow when terminal physical stock is empty", () => {
+    const config: SimulationConfig = {
+      startDate: new Date("2025-01-01T00:00:00Z"),
+      endDate: new Date("2025-01-02T00:00:00Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100_000,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 50_000,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "pipe",
+        name: "Pipeline",
+        declaredInboundThroughput: 0,
+        currentInventory: 0,
+        pipelineFlowPerHour: 46,
+        pipelineOutboundPerHour: 46,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "borrower",
+        name: "Borrower",
+        declaredInboundThroughput: 0,
+        currentInventory: -10_000,
+        pipelineFlowPerHour: 0,
+        storageShare: 50,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const invById: Record<string, number> = { pipe: 0, borrower: -10_000 };
+    const effective = applySharedInventoryPipelineHour(invById, customers, config);
+    expect(effective.pipe).toBe(0);
+    expect(invById.pipe).toBe(0);
+    expect(invById.borrower).toBe(-10_000);
+  });
+
+  it("shared_inventory outbound pipeline is capped by remaining terminal physical stock", () => {
+    const config: SimulationConfig = {
+      startDate: new Date("2025-01-01T00:00:00Z"),
+      endDate: new Date("2025-01-02T00:00:00Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "outbound",
+      totalStorageCapacity: 100_000,
+      storageMode: "shared_inventory",
+      sharedInventoryCustomerDeficitLimitTonnes: 50_000,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const customers: Customer[] = [
+      {
+        id: "pipe",
+        name: "Pipeline",
+        declaredInboundThroughput: 0,
+        currentInventory: 30,
+        pipelineFlowPerHour: 46,
+        pipelineOutboundPerHour: 46,
+        storageShare: 100,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const invById: Record<string, number> = { pipe: 30 };
+    const { takes } = planSharedInventoryPipelineOutboundHour(invById, customers, config);
+    expect(takes.pipe).toBe(30);
   });
 });
 

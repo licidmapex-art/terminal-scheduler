@@ -325,6 +325,64 @@ export function runMigrations(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  migratePacerInboundOutboundSettings(database);
+}
+
+function migratePacerInboundOutboundSettings(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(simulation_configs)").all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+
+  if (!names.has("pacer_inbound_round_at_decile")) {
+    try {
+      database.exec(
+        "ALTER TABLE simulation_configs ADD COLUMN pacer_inbound_round_at_decile INTEGER NOT NULL DEFAULT 1"
+      );
+    } catch {
+      return;
+    }
+  }
+  if (!names.has("pacer_inbound_allowance")) {
+    try {
+      database.exec(
+        "ALTER TABLE simulation_configs ADD COLUMN pacer_inbound_allowance REAL NOT NULL DEFAULT 0.5"
+      );
+    } catch {
+      return;
+    }
+  }
+  if (!names.has("pacer_outbound_round_at_decile")) {
+    try {
+      database.exec(
+        "ALTER TABLE simulation_configs ADD COLUMN pacer_outbound_round_at_decile INTEGER NOT NULL DEFAULT 1"
+      );
+    } catch {
+      return;
+    }
+  }
+  if (!names.has("pacer_outbound_allowance")) {
+    try {
+      database.exec(
+        "ALTER TABLE simulation_configs ADD COLUMN pacer_outbound_allowance REAL NOT NULL DEFAULT 0.5"
+      );
+    } catch {
+      return;
+    }
+  }
+
+  try {
+    database.exec(`
+      UPDATE simulation_configs SET
+        pacer_inbound_round_at_decile = COALESCE(pacer_round_at_decile, 1),
+        pacer_outbound_round_at_decile = COALESCE(pacer_round_at_decile, 1)
+      WHERE pacer_inbound_round_at_decile = 1
+        AND pacer_outbound_round_at_decile = 1
+        AND pacer_round_at_decile IS NOT NULL
+        AND pacer_round_at_decile != 1
+    `);
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Split legacy signed net pipeline into explicit inbound/outbound columns (t/h). */

@@ -48,7 +48,10 @@ interface ScenarioPayload {
     pipelineDirection: string;
     totalStorageCapacity: number;
     storageMode: string;
-    pacerRoundingDirection?: "up" | "down";
+    pacerInboundRoundAtDecile?: number;
+    pacerInboundAllowance?: number;
+    pacerOutboundRoundAtDecile?: number;
+    pacerOutboundAllowance?: number;
     pacerRoundAtDecile?: number;
     minSlotIntervalHours: number;
     preOpsHours?: number;
@@ -99,8 +102,10 @@ function buildScenarioPayload(): ScenarioPayload {
           pipelineDirection: cfg.pipelineDirection,
           totalStorageCapacity: cfg.totalStorageCapacity ?? 100000,
           storageMode: cfg.storageMode ?? "fixed_band",
-          pacerRoundingDirection: cfg.pacerRoundingDirection ?? "up",
-          pacerRoundAtDecile: cfg.pacerRoundAtDecile ?? 1,
+          pacerInboundRoundAtDecile: cfg.pacerInboundRoundAtDecile ?? 1,
+          pacerInboundAllowance: cfg.pacerInboundAllowance ?? 0.5,
+          pacerOutboundRoundAtDecile: cfg.pacerOutboundRoundAtDecile ?? 1,
+          pacerOutboundAllowance: cfg.pacerOutboundAllowance ?? 0.5,
           minSlotIntervalHours: cfg.minSlotIntervalHours ?? 0,
           preOpsHours: cfg.preOpsHours ?? 0,
           postOpsHours: cfg.postOpsHours ?? 0,
@@ -217,8 +222,38 @@ export function loadScenario(id: string): void {
         pipelineDirection: payload.config.pipelineDirection as SimulationConfig["pipelineDirection"],
         totalStorageCapacity: payload.config.totalStorageCapacity ?? 100000,
         storageMode: normalizeStorageMode(payload.config.storageMode),
-        pacerRoundingDirection: payload.config.pacerRoundingDirection === "down" ? "down" : "up",
-        pacerRoundAtDecile: Math.min(9, Math.max(1, Math.round(payload.config.pacerRoundAtDecile ?? 1))),
+        pacerInboundRoundAtDecile: Math.min(
+          9,
+          Math.max(
+            1,
+            Math.round(
+              payload.config.pacerInboundRoundAtDecile ??
+                payload.config.pacerRoundAtDecile ??
+                1
+            )
+          )
+        ),
+        pacerInboundAllowance:
+          typeof payload.config.pacerInboundAllowance === "number" &&
+          Number.isFinite(payload.config.pacerInboundAllowance)
+            ? payload.config.pacerInboundAllowance
+            : 0.5,
+        pacerOutboundRoundAtDecile: Math.min(
+          9,
+          Math.max(
+            1,
+            Math.round(
+              payload.config.pacerOutboundRoundAtDecile ??
+                payload.config.pacerRoundAtDecile ??
+                1
+            )
+          )
+        ),
+        pacerOutboundAllowance:
+          typeof payload.config.pacerOutboundAllowance === "number" &&
+          Number.isFinite(payload.config.pacerOutboundAllowance)
+            ? payload.config.pacerOutboundAllowance
+            : 0.5,
         minSlotIntervalHours: payload.config.minSlotIntervalHours ?? 0,
         preOpsHours: payload.config.preOpsHours ?? 0,
         postOpsHours: payload.config.postOpsHours ?? 0,

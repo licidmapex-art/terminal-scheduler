@@ -101,13 +101,15 @@ export interface SimulationConfig {
    * Outbound blocked when (attributed inv − MEPS) would be below −x. x = 0 means attributed inv cannot go negative.
    */
   sharedInventoryCustomerDeficitLimitTonnes: number;
-  /**
-   * Pacer rounding policy:
-   * - up: allow the next slot once fractional pace reaches `pacerRoundAtDecile / 10`
-   * - down: keep rounding down until fraction exceeds `1 - pacerRoundAtDecile / 10`
-   */
-  pacerRoundingDirection?: "up" | "down";
-  /** Decile (1..9) controlling when pace allowance rounds to the next whole slot. */
+  /** Inbound: decile (1–9) — round up to next slot once fractional pace reaches decile/10. */
+  pacerInboundRoundAtDecile?: number;
+  /** Inbound offset (slots) added to the linear pace tracker; may be negative to delay starts. */
+  pacerInboundAllowance?: number;
+  /** Outbound: decile (1–9) — round up to next slot once fractional pace reaches decile/10. */
+  pacerOutboundRoundAtDecile?: number;
+  /** Outbound offset (slots) added to the linear pace tracker; may be negative to delay starts. */
+  pacerOutboundAllowance?: number;
+  /** @deprecated Legacy single decile — migrated to inbound/outbound fields. */
   pacerRoundAtDecile?: number;
   /**
    * Relative optimizer: skip scheduling this leg when its DoC exceeds this multiple of the

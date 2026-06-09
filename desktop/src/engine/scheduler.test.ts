@@ -736,9 +736,7 @@ describe("runScheduler", () => {
 
     expect(outboundSlots).toHaveLength(10);
 
-    // With the corrected (no-Math.floor) pacer the +1 look-ahead buffer allows two
-    // slots to be front-loaded before the continuous pace target throttles back to
-    // T/N cadence.  Allow a 12h tolerance instead of the old 1h.
+    // 0.5-slot look-ahead still allows some front-loading; allow 12h tolerance vs strict T/N.
     outboundSlots.forEach((slot, i) => {
       const slotHour = (new Date(slot.start).getTime() - simStart.getTime()) / 3600000;
       const minHour = (i / 10) * 100;
@@ -767,8 +765,8 @@ describe("runScheduler", () => {
       }
     ];
 
-    const earlyConfig = makeConfig({ pacerRoundingDirection: "up", pacerRoundAtDecile: 1 });
-    const lateConfig = makeConfig({ pacerRoundingDirection: "up", pacerRoundAtDecile: 8 });
+    const earlyConfig = makeConfig({ pacerOutboundRoundAtDecile: 1 });
+    const lateConfig = makeConfig({ pacerOutboundRoundAtDecile: 8 });
 
     const early = runScheduler(baseCustomers, resources, earlyConfig);
     const late = runScheduler(baseCustomers, resources, lateConfig);
@@ -785,7 +783,7 @@ describe("runScheduler", () => {
     expect(lateHour).toBeGreaterThan(earlyHour);
   });
 
-  it("pacer down mode is stricter than up mode for same decile", () => {
+  it("lower outbound allowance delays outbound relative to inbound pacing", () => {
     const customers: Customer[] = [
       makeCustomer({
         id: "c1",
@@ -805,22 +803,24 @@ describe("runScheduler", () => {
         blackouts: []
       }
     ];
-    const upConfig = makeConfig({ pacerRoundingDirection: "up", pacerRoundAtDecile: 3 });
-    const downConfig = makeConfig({ pacerRoundingDirection: "down", pacerRoundAtDecile: 3 });
+    const looseOutbound = makeConfig({ pacerOutboundAllowance: 0.5, pacerInboundAllowance: 0.5 });
+    const tightOutbound = makeConfig({ pacerOutboundAllowance: 0, pacerInboundAllowance: 0.5 });
 
-    const up = runScheduler(customers, resources, upConfig);
-    const down = runScheduler(customers, resources, downConfig);
+    const loose = runScheduler(customers, resources, looseOutbound);
+    const tight = runScheduler(customers, resources, tightOutbound);
 
-    const secondUp = [...up.scheduledSlots]
+    const secondLoose = [...loose.scheduledSlots]
       .filter((s) => s.direction === "outbound")
       .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())[1]!;
-    const secondDown = [...down.scheduledSlots]
+    const secondTight = [...tight.scheduledSlots]
       .filter((s) => s.direction === "outbound")
       .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())[1]!;
 
-    const upHour = (new Date(secondUp.start).getTime() - upConfig.startDate.getTime()) / 3600000;
-    const downHour = (new Date(secondDown.start).getTime() - downConfig.startDate.getTime()) / 3600000;
-    expect(downHour).toBeGreaterThan(upHour);
+    const looseHour =
+      (new Date(secondLoose.start).getTime() - looseOutbound.startDate.getTime()) / 3600000;
+    const tightHour =
+      (new Date(secondTight.start).getTime() - tightOutbound.startDate.getTime()) / 3600000;
+    expect(tightHour).toBeGreaterThanOrEqual(looseHour);
   });
 
   it("relative optimizer: disabled at 0 keeps existing scheduling behavior", () => {

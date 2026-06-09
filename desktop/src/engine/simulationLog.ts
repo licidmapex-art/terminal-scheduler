@@ -31,6 +31,12 @@ export type TransportModeStatus = {
   daysOfCover?: number | null;
   /** Optimizer metric at hour start using relevant inventory context (terminal for shared modes, customer otherwise). `null` when infinite. */
   optimizerDaysOfCover?: number | null;
+  /** Annual target fulfilment ratio (slots ÷ target) at hour start; lower = tried earlier in pooled legs. */
+  fulfillmentRatio?: number | null;
+  /** Hours since this leg's last slot start (sim start if none yet); higher = tried earlier when other metrics tie. */
+  hoursSinceLastSlot?: number | null;
+  /** Direction+mode pool average fulfilment at hour start (shared pools only). */
+  poolFulfillmentAvg?: number | null;
 
   slotId?: string;
   volume?: number;

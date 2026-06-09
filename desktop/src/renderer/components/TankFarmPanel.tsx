@@ -70,8 +70,10 @@ export default function TankFarmPanel() {
         sharedInventoryCustomerDeficitLimitTonnes: Number(
           c.sharedInventoryCustomerDeficitLimitTonnes ?? 0
         ),
-        pacerRoundingDirection: c.pacerRoundingDirection === "down" ? "down" : "up",
-        pacerRoundAtDecile: Number(c.pacerRoundAtDecile ?? 1),
+        pacerInboundRoundAtDecile: Number(c.pacerInboundRoundAtDecile ?? c.pacerRoundAtDecile ?? 1),
+        pacerInboundAllowance: Number(c.pacerInboundAllowance ?? 0.5),
+        pacerOutboundRoundAtDecile: Number(c.pacerOutboundRoundAtDecile ?? c.pacerRoundAtDecile ?? 1),
+        pacerOutboundAllowance: Number(c.pacerOutboundAllowance ?? 0.5),
         optimizerRelativeDocMultiplier: Number(c.optimizerRelativeDocMultiplier ?? 0),
         optimizerRelativeFulfillmentMultiplier: Number(c.optimizerRelativeFulfillmentMultiplier ?? 0),
         minSlotIntervalHours: Number(c.minSlotIntervalHours ?? 0),

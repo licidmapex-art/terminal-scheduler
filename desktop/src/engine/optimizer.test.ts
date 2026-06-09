@@ -83,6 +83,36 @@ describe("compareSchedulingLegs", () => {
     );
     expect(cmp).toBeLessThan(0);
   });
+
+  it("when fulfilment and DoC tie, prefers the customer who has waited longest since their last slot", () => {
+    const { leg: legA } = makeLeg(alpha, "outbound", 4);
+    const { leg: legB } = makeLeg(beta, "outbound", 4);
+    const doc = 5;
+    const cmp = compareSchedulingLegs(legB, legA, doc, doc, false, 2, 2, false, 120, 40);
+    expect(cmp).toBeLessThan(0);
+  });
+
+  it("when fulfilment, DoC, and wait tie, falls back to customer id", () => {
+    const { leg: legA } = makeLeg(alpha, "outbound", 4);
+    const { leg: legB } = makeLeg(beta, "outbound", 4);
+    const doc = 5;
+    expect(compareSchedulingLegs(legA, legB, doc, doc, false, 2, 2, false, 80, 80)).toBeLessThan(0);
+  });
+
+  it("negative sort metric overrides fulfilment in shared inventory inbound pool", () => {
+    const { leg: legA, slotsScheduled: slotsA } = makeLeg(alpha, "inbound", 9, 7);
+    const { leg: legB, slotsScheduled: slotsB } = makeLeg(beta, "inbound", 9, 0);
+    // Beta far behind on fulfilment would normally win; Alpha's negative DoC should win instead.
+    const cmp = compareSchedulingLegs(legA, legB, -20, 20, false, slotsA, slotsB, true);
+    expect(cmp).toBeLessThan(0);
+  });
+
+  it("when both sort metrics negative, more distressed (lower) leg is tried first", () => {
+    const { leg: legA } = makeLeg(alpha, "inbound", 9, 7);
+    const { leg: legB } = makeLeg(beta, "inbound", 9, 7);
+    const cmp = compareSchedulingLegs(legB, legA, -10, -5, false, 7, 7, true);
+    expect(cmp).toBeLessThan(0);
+  });
 });
 
 function makeConfig(overrides?: Partial<SimulationConfig>): SimulationConfig {

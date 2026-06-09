@@ -15,10 +15,8 @@ import { formatRelativeTime } from "../lib/formatRelativeTime";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import {
   totalInboundPipelineTph,
-  totalOutboundPipelineTph,
-  resolveCustomerPipelineRates
+  totalOutboundPipelineTph
 } from "../lib/pipelineFlows";
-import { sharedInventoryPipelineOutboundTakeCap } from "../../engine/inventory";
 import {
   AVERAGE_CUSTOMER_ID,
   COMBINED_TERMINAL_ID,
@@ -38,6 +36,7 @@ import {
   inboundTargetSlots,
   outboundTargetSlots
 } from "../../engine/customerLegTargets";
+import { pacerContinuousTarget } from "../../engine/pacing";
 import { ConstraintIcon } from "./ConstraintIcon";
 import TimelineChartLegend, { type LegendEntry } from "./TimelineChartLegend";
 
@@ -917,7 +916,8 @@ export default function GanttChart() {
       invAtStart != null && dailyPipe > 0 ? Math.round((invAtStart / dailyPipe) * 10) / 10 : null;
     const target = c ? legTargetSlots(c, dir, cfg, periodHoursSafe) : 0;
     const nThroughPrev = loadsStartedThroughHour(H - 1, hoverSlot, slots, simStart);
-    const paceTarget = target > 0 ? (H / periodHoursSafe) * target + 1 : 0;
+    const paceTarget =
+      target > 0 ? pacerContinuousTarget(H, periodHoursSafe, target, dir, cfg as EngineSimulationConfig) : 0;
     const rt = dir === "outbound" ? c?.outboundRoundtripHours ?? 0 : c?.inboundRoundtripHours ?? 0;
     const meps = dir === "outbound" ? c?.outboundMEPS ?? 0 : c?.inboundMEPS ?? 0;
     const logHour = slotLoadHourMap.get(hoverSlot.id);
@@ -1000,33 +1000,19 @@ export default function GanttChart() {
       if (!terminalTotalByHour.length) return [];
       const cap = cfg.totalStorageCapacity ?? 100000;
       const EPS = 1;
-      const storageMode = cfg.storageMode ?? "fixed_band";
-      const sharedInventory = storageMode === "shared_inventory";
       const segments: PipelineSegment[] = [];
       let curStatus: PipelineSegment["status"] | null = null;
       let segStart = 0;
       for (let h = 0; h < terminalTotalByHour.length; h++) {
-        const total = terminalTotalByHour[h] ?? 0;
+        const terminalBefore =
+          h === 0
+            ? (terminalTotalByHour[0] ?? 0)
+            : (terminalTotalByHour[h - 1] ?? 0);
         let status: PipelineSegment["status"];
         if (direction === "inbound") {
-          status = total >= cap - EPS ? "tank_top" : "flowing";
-        } else if (sharedInventory) {
-          const canFlow = customers.some((c) => {
-            const { outboundTph } = resolveCustomerPipelineRates(c, cfg as EngineSimulationConfig);
-            if (outboundTph <= 0) return false;
-            const inv =
-              h === 0
-                ? (c.currentInventory ?? 0)
-                : (ganttInventorySeries.byCustomer.get(c.id)?.[h - 1] ?? 0);
-            return sharedInventoryPipelineOutboundTakeCap(
-              inv,
-              outboundTph,
-              cfg as EngineSimulationConfig
-            ) > EPS;
-          });
-          status = canFlow ? "flowing" : "tank_bottom";
+          status = terminalBefore >= cap - EPS ? "tank_top" : "flowing";
         } else {
-          status = total <= EPS ? "tank_bottom" : "flowing";
+          status = terminalBefore <= EPS ? "tank_bottom" : "flowing";
         }
         if (status !== curStatus) {
           if (curStatus !== null) segments.push({ startH: segStart, endH: h, status: curStatus });
@@ -1039,7 +1025,7 @@ export default function GanttChart() {
       }
       return segments;
     },
-    [terminalTotalByHour, cfg, customers, ganttInventorySeries.byCustomer]
+    [terminalTotalByHour, cfg]
   );
 
   const inboundPipelineSegments = useMemo(

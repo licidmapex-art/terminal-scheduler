@@ -21,6 +21,38 @@ export interface SimulationConfigRow extends SimulationConfig {
   id: string;
 }
 
+function normalizePacerDecile(raw: number | undefined, fallback = 1): number {
+  const d = Math.round(raw ?? fallback);
+  return Number.isFinite(d) ? Math.min(9, Math.max(1, d)) : fallback;
+}
+
+function normalizePacerAllowance(raw: number | undefined, fallback = 0.5): number {
+  const a = Number(raw ?? fallback);
+  return Number.isFinite(a) ? a : fallback;
+}
+
+function pacerFieldsFromRow(r: {
+  pacer_inbound_round_at_decile?: number;
+  pacer_inbound_allowance?: number;
+  pacer_outbound_round_at_decile?: number;
+  pacer_outbound_allowance?: number;
+  pacer_round_at_decile?: number;
+}): Pick<
+  SimulationConfig,
+  | "pacerInboundRoundAtDecile"
+  | "pacerInboundAllowance"
+  | "pacerOutboundRoundAtDecile"
+  | "pacerOutboundAllowance"
+> {
+  const legacyDecile = normalizePacerDecile(r.pacer_round_at_decile);
+  return {
+    pacerInboundRoundAtDecile: normalizePacerDecile(r.pacer_inbound_round_at_decile, legacyDecile),
+    pacerInboundAllowance: normalizePacerAllowance(r.pacer_inbound_allowance, 0.5),
+    pacerOutboundRoundAtDecile: normalizePacerDecile(r.pacer_outbound_round_at_decile, legacyDecile),
+    pacerOutboundAllowance: normalizePacerAllowance(r.pacer_outbound_allowance, 0.5)
+  };
+}
+
 function rowToConfig(r: {
   id: string;
   start_date: string;
@@ -35,15 +67,15 @@ function rowToConfig(r: {
   post_ops_hours?: number;
   tank_count?: number;
   tank_capacity?: number;
-  pacer_rounding_direction?: string;
+  pacer_inbound_round_at_decile?: number;
+  pacer_inbound_allowance?: number;
+  pacer_outbound_round_at_decile?: number;
+  pacer_outbound_allowance?: number;
   pacer_round_at_decile?: number;
   optimizer_relative_doc_multiplier?: number;
   optimizer_relative_fulfillment_multiplier?: number;
   barge_berth_allocation?: string;
 }): SimulationConfigRow {
-  const rawDirection = r.pacer_rounding_direction === "down" ? "down" : "up";
-  const rawDecile = Math.round(r.pacer_round_at_decile ?? 1);
-  const decile = Number.isFinite(rawDecile) ? Math.min(9, Math.max(1, rawDecile)) : 1;
   const optimizerRelativeDocMultiplier = Math.max(
     0,
     Number(r.optimizer_relative_doc_multiplier ?? 0)
@@ -65,8 +97,7 @@ function rowToConfig(r: {
       r.shared_inventory_customer_deficit_limit_tonnes ?? 0
     ),
     minSlotIntervalHours: r.min_slot_interval_hours ?? 0,
-    pacerRoundingDirection: rawDirection,
-    pacerRoundAtDecile: decile,
+    ...pacerFieldsFromRow(r),
     optimizerRelativeDocMultiplier,
     optimizerRelativeFulfillmentMultiplier,
     preOpsHours: r.pre_ops_hours ?? 0,
@@ -77,11 +108,20 @@ function rowToConfig(r: {
   };
 }
 
+function pacerFieldsFromConfig(config: SimulationConfig) {
+  const legacy = normalizePacerDecile(config.pacerRoundAtDecile);
+  return {
+    inboundDecile: normalizePacerDecile(config.pacerInboundRoundAtDecile, legacy),
+    inboundAllowance: normalizePacerAllowance(config.pacerInboundAllowance, 0.5),
+    outboundDecile: normalizePacerDecile(config.pacerOutboundRoundAtDecile, legacy),
+    outboundAllowance: normalizePacerAllowance(config.pacerOutboundAllowance, 0.5)
+  };
+}
+
 export function createSimulationConfig(config: SimulationConfig): SimulationConfigRow {
   const db = getDatabase();
   const id = randomUUID();
-  const pacerDirection = config.pacerRoundingDirection === "down" ? "down" : "up";
-  const pacerDecile = Math.min(9, Math.max(1, Math.round(config.pacerRoundAtDecile ?? 1)));
+  const pacer = pacerFieldsFromConfig(config);
   const optimizerRelativeDocMultiplier = Math.max(
     0,
     Number(config.optimizerRelativeDocMultiplier ?? 0)
@@ -91,8 +131,16 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     Number(config.optimizerRelativeFulfillmentMultiplier ?? 0)
   );
   db.prepare(`
-    INSERT INTO simulation_configs (id, start_date, end_date, pipeline_flow_rate, pipeline_direction, total_storage_capacity, storage_mode, shared_inventory_customer_deficit_limit_tonnes, pacer_rounding_direction, pacer_round_at_decile, optimizer_relative_doc_multiplier, optimizer_relative_fulfillment_multiplier, min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO simulation_configs (
+      id, start_date, end_date, pipeline_flow_rate, pipeline_direction, total_storage_capacity,
+      storage_mode, shared_inventory_customer_deficit_limit_tonnes,
+      pacer_rounding_direction, pacer_round_at_decile,
+      pacer_inbound_round_at_decile, pacer_inbound_allowance,
+      pacer_outbound_round_at_decile, pacer_outbound_allowance,
+      optimizer_relative_doc_multiplier, optimizer_relative_fulfillment_multiplier,
+      min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     config.startDate.toISOString(),
@@ -102,8 +150,12 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     config.totalStorageCapacity ?? 100000,
     config.storageMode ?? "fixed_band",
     Math.max(0, config.sharedInventoryCustomerDeficitLimitTonnes ?? 0),
-    pacerDirection,
-    pacerDecile,
+    "up",
+    pacer.inboundDecile,
+    pacer.inboundDecile,
+    pacer.inboundAllowance,
+    pacer.outboundDecile,
+    pacer.outboundAllowance,
     optimizerRelativeDocMultiplier,
     optimizerRelativeFulfillmentMultiplier,
     config.minSlotIntervalHours ?? 0,
@@ -132,7 +184,10 @@ export function getAllSimulationConfigs(): SimulationConfigRow[] {
     shared_inventory_customer_deficit_limit_tonnes?: number;
     tank_count?: number;
     tank_capacity?: number;
-    pacer_rounding_direction?: string;
+    pacer_inbound_round_at_decile?: number;
+    pacer_inbound_allowance?: number;
+    pacer_outbound_round_at_decile?: number;
+    pacer_outbound_allowance?: number;
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
     optimizer_relative_fulfillment_multiplier?: number;
@@ -157,7 +212,10 @@ export function getSimulationConfigById(id: string): SimulationConfigRow | null 
     shared_inventory_customer_deficit_limit_tonnes?: number;
     tank_count?: number;
     tank_capacity?: number;
-    pacer_rounding_direction?: string;
+    pacer_inbound_round_at_decile?: number;
+    pacer_inbound_allowance?: number;
+    pacer_outbound_round_at_decile?: number;
+    pacer_outbound_allowance?: number;
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
     optimizer_relative_fulfillment_multiplier?: number;
@@ -169,8 +227,7 @@ export function getSimulationConfigById(id: string): SimulationConfigRow | null 
 
 export function updateSimulationConfig(id: string, config: SimulationConfig): SimulationConfigRow {
   const db = getDatabase();
-  const pacerDirection = config.pacerRoundingDirection === "down" ? "down" : "up";
-  const pacerDecile = Math.min(9, Math.max(1, Math.round(config.pacerRoundAtDecile ?? 1)));
+  const pacer = pacerFieldsFromConfig(config);
   const optimizerRelativeDocMultiplier = Math.max(
     0,
     Number(config.optimizerRelativeDocMultiplier ?? 0)
@@ -190,6 +247,10 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
       shared_inventory_customer_deficit_limit_tonnes = ?,
       pacer_rounding_direction = ?,
       pacer_round_at_decile = ?,
+      pacer_inbound_round_at_decile = ?,
+      pacer_inbound_allowance = ?,
+      pacer_outbound_round_at_decile = ?,
+      pacer_outbound_allowance = ?,
       optimizer_relative_doc_multiplier = ?,
       optimizer_relative_fulfillment_multiplier = ?,
       min_slot_interval_hours = ?,
@@ -207,8 +268,12 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
     config.totalStorageCapacity ?? 100000,
     config.storageMode ?? "fixed_band",
     Math.max(0, config.sharedInventoryCustomerDeficitLimitTonnes ?? 0),
-    pacerDirection,
-    pacerDecile,
+    "up",
+    pacer.inboundDecile,
+    pacer.inboundDecile,
+    pacer.inboundAllowance,
+    pacer.outboundDecile,
+    pacer.outboundAllowance,
     optimizerRelativeDocMultiplier,
     optimizerRelativeFulfillmentMultiplier,
     config.minSlotIntervalHours ?? 0,

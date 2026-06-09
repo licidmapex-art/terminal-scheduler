@@ -85,8 +85,10 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
   const [storageMode, setStorageMode] = useState<StorageMode>("fixed_band");
   const [sharedInventoryCustomerDeficitLimitTonnes, setSharedInventoryCustomerDeficitLimitTonnes] =
     useState("0");
-  const [pacerRoundingDirection, setPacerRoundingDirection] = useState<"up" | "down">("up");
-  const [pacerRoundAtDecile, setPacerRoundAtDecile] = useState("1");
+  const [pacerInboundRoundAtDecile, setPacerInboundRoundAtDecile] = useState("1");
+  const [pacerInboundAllowance, setPacerInboundAllowance] = useState("0.5");
+  const [pacerOutboundRoundAtDecile, setPacerOutboundRoundAtDecile] = useState("1");
+  const [pacerOutboundAllowance, setPacerOutboundAllowance] = useState("0");
   const [optimizerRelativeDocMultiplier, setOptimizerRelativeDocMultiplier] = useState("0");
   const [optimizerRelativeFulfillmentMultiplier, setOptimizerRelativeFulfillmentMultiplier] = useState("0");
   const [minSlotIntervalHours, setMinSlotIntervalHours] = useState("0");
@@ -137,14 +139,21 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
           setSharedInventoryCustomerDeficitLimitTonnes(String(parsedX));
           const minI = c.minSlotIntervalHours;
           setMinSlotIntervalHours(String(typeof minI === "number" ? minI : 0));
-          const paceDir = c.pacerRoundingDirection;
-          setPacerRoundingDirection(paceDir === "down" ? "down" : "up");
-          const paceDec = c.pacerRoundAtDecile;
-          const paceDecNorm =
-            typeof paceDec === "number" && Number.isFinite(paceDec)
-              ? Math.min(9, Math.max(1, Math.round(paceDec)))
-              : 1;
-          setPacerRoundAtDecile(String(paceDecNorm));
+          const normDecile = (v: unknown, fallback: number) =>
+            typeof v === "number" && Number.isFinite(v)
+              ? Math.min(9, Math.max(1, Math.round(v)))
+              : fallback;
+          const normAllowance = (v: unknown, fallback: number) =>
+            typeof v === "number" && Number.isFinite(v) ? v : fallback;
+          const legacyDecile = normDecile(c.pacerRoundAtDecile, 1);
+          setPacerInboundRoundAtDecile(
+            String(normDecile(c.pacerInboundRoundAtDecile, legacyDecile))
+          );
+          setPacerInboundAllowance(String(normAllowance(c.pacerInboundAllowance, 0.5)));
+          setPacerOutboundRoundAtDecile(
+            String(normDecile(c.pacerOutboundRoundAtDecile, legacyDecile))
+          );
+          setPacerOutboundAllowance(String(normAllowance(c.pacerOutboundAllowance, 0.5)));
           const optimizerRaw = c.optimizerRelativeDocMultiplier;
           const optimizerNorm =
             typeof optimizerRaw === "number" && Number.isFinite(optimizerRaw)
@@ -180,7 +189,10 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
     const start = new Date(startDate);
     const end = new Date(endDate);
     const minInterval = parseFloat(minSlotIntervalHours);
-    const pacerDecile = parseInt(pacerRoundAtDecile, 10);
+    const inboundDecile = parseInt(pacerInboundRoundAtDecile, 10);
+    const outboundDecile = parseInt(pacerOutboundRoundAtDecile, 10);
+    const inboundAllowance = parseFloat(pacerInboundAllowance);
+    const outboundAllowance = parseFloat(pacerOutboundAllowance);
     const optimizerMult = parseFloat(optimizerRelativeDocMultiplier);
     const fulfillmentOptimizerMult = parseFloat(optimizerRelativeFulfillmentMultiplier);
     const preOps = parseFloat(preOpsHours);
@@ -197,8 +209,30 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
       setError("Minimum interval must be between 0 and 48 hours");
       return;
     }
-    if (isNaN(pacerDecile) || !Number.isInteger(pacerDecile) || pacerDecile < 1 || pacerDecile > 9) {
-      setError("Pacer rounding decile must be an integer between 1 and 9");
+    if (
+      isNaN(inboundDecile) ||
+      !Number.isInteger(inboundDecile) ||
+      inboundDecile < 1 ||
+      inboundDecile > 9
+    ) {
+      setError("Inbound pacer decile must be an integer between 1 and 9");
+      return;
+    }
+    if (
+      isNaN(outboundDecile) ||
+      !Number.isInteger(outboundDecile) ||
+      outboundDecile < 1 ||
+      outboundDecile > 9
+    ) {
+      setError("Outbound pacer decile must be an integer between 1 and 9");
+      return;
+    }
+    if (isNaN(inboundAllowance) || !Number.isFinite(inboundAllowance)) {
+      setError("Inbound pacer allowance must be a number");
+      return;
+    }
+    if (isNaN(outboundAllowance) || !Number.isFinite(outboundAllowance)) {
+      setError("Outbound pacer allowance must be a number");
       return;
     }
     if (isNaN(optimizerMult) || optimizerMult < 0) {
@@ -251,8 +285,10 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         storageMode,
         sharedInventoryCustomerDeficitLimitTonnes:
           storageMode === "shared_inventory" ? Math.max(0, deficitXParsed) : 0,
-        pacerRoundingDirection,
-        pacerRoundAtDecile: pacerDecile,
+        pacerInboundRoundAtDecile: inboundDecile,
+        pacerInboundAllowance: inboundAllowance,
+        pacerOutboundRoundAtDecile: outboundDecile,
+        pacerOutboundAllowance: outboundAllowance,
         optimizerRelativeDocMultiplier: Math.max(0, optimizerMult),
         optimizerRelativeFulfillmentMultiplier: Math.max(0, fulfillmentOptimizerMult),
         minSlotIntervalHours: minInterval,
@@ -379,8 +415,9 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               help={
                 <>
                   For the booking customer only: attributed inventory may not go below −x after an outbound
-                  parcel (full MEPS) or outbound pipeline hour. x = 0 disables this customer-floor check
-                  (pool borrowing/lending allowed). Terminal total must still cover MEPS for berth moves.
+                  parcel (full MEPS) or outbound pipeline hour. Borrowing still requires terminal physical stock
+                  (sum of attributions &gt; 0). x = 0 disables the customer-floor check. Terminal total must still
+                  cover MEPS for berth moves.
                 </>
               }
             >
@@ -471,28 +508,23 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               <div className="config-section-title">Pacing behavior</div>
               <HelpPopover
                 label="Pacing behavior help"
-                content="Controls when the pacer allows the next slot relative to the fractional pace tracker."
+                content={
+                  <>
+                    Each hour the scheduler compares slot starts so far to a linear pace target:{" "}
+                    <strong>(hour ÷ period) × target slots + allowance</strong>, rounded up when the
+                    fractional part reaches <strong>decile ÷ 10</strong>. Inbound and outbound can differ —
+                    higher inbound allowance starts fills sooner; lower outbound allowance keeps stock in the
+                    tank longer.
+                  </>
+                }
               />
             </div>
           </div>
         </div>
         <div className="form-grid">
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <FormLabelWithHelp help="Up: 1.3 becomes 2 when decile ≤ 3. Down: with decile 3, 1.3 stays 1 until pace exceeds 1.7.">
-              Rounding mode
-            </FormLabelWithHelp>
-            <select
-              className="form-select"
-              value={pacerRoundingDirection}
-              onChange={(e) => setPacerRoundingDirection(e.target.value as "up" | "down")}
-            >
-              <option value="up">Round up from decile</option>
-              <option value="down">Round down until mirrored decile</option>
-            </select>
-          </div>
-          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
-            <FormLabelWithHelp help="Example: 3 = threshold 0.3. Use higher values to delay extra slots.">
-              Round threshold decile (1–9)
+            <FormLabelWithHelp help="Inbound: round up to the next allowed slot when fractional pace reaches decile ÷ 10 (e.g. 1 → 0.1).">
+              Inbound round decile (1–9)
             </FormLabelWithHelp>
             <input
               type="number"
@@ -500,8 +532,46 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
               min={1}
               max={9}
               step={1}
-              value={pacerRoundAtDecile}
-              onChange={(e) => setPacerRoundAtDecile(e.target.value)}
+              value={pacerInboundRoundAtDecile}
+              onChange={(e) => setPacerInboundRoundAtDecile(e.target.value)}
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
+            <FormLabelWithHelp help="Added to the inbound pace line before rounding. Positive brings starts forward; negative delays them.">
+              Inbound allowance (slots)
+            </FormLabelWithHelp>
+            <input
+              type="number"
+              className="form-input"
+              step={0.1}
+              value={pacerInboundAllowance}
+              onChange={(e) => setPacerInboundAllowance(e.target.value)}
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
+            <FormLabelWithHelp help="Outbound: round up when fractional pace reaches decile ÷ 10.">
+              Outbound round decile (1–9)
+            </FormLabelWithHelp>
+            <input
+              type="number"
+              className="form-input"
+              min={1}
+              max={9}
+              step={1}
+              value={pacerOutboundRoundAtDecile}
+              onChange={(e) => setPacerOutboundRoundAtDecile(e.target.value)}
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>
+            <FormLabelWithHelp help="Added to the outbound pace line. Negative values delay outbound lifts and help preserve tank stock.">
+              Outbound allowance (slots)
+            </FormLabelWithHelp>
+            <input
+              type="number"
+              className="form-input"
+              step={0.1}
+              value={pacerOutboundAllowance}
+              onChange={(e) => setPacerOutboundAllowance(e.target.value)}
             />
           </div>
           <div className="form-group" style={{ marginBottom: 0, maxWidth: 320 }}>

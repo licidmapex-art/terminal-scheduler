@@ -34,10 +34,44 @@ export function countLegSlotsThroughHour(
   }).length;
 }
 
+/** Latest slot start hour for this leg among slots already started through `throughHour`. */
+export function lastLegSlotStartHour(
+  leg: SchedulingLeg,
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  throughHour: number
+): number | null {
+  const laneKey = leg.laneKey ?? "lane0";
+  let best: number | null = null;
+  for (const s of assignedSlots) {
+    if (s.customerId !== leg.customer.id || s.direction !== leg.direction || s.mode !== leg.mode) {
+      continue;
+    }
+    if ((s.legKey ?? "lane0") !== laneKey) continue;
+    const startHour = Math.round((new Date(s.start).getTime() - simStartMs) / HOUR_MS);
+    if (startHour <= throughHour && (best === null || startHour > best)) {
+      best = startHour;
+    }
+  }
+  return best;
+}
+
+/** Hours since this leg's last slot start (or since sim start if none yet). */
+export function hoursSinceLastLegSlot(
+  leg: SchedulingLeg,
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  h: number
+): number {
+  const last = lastLegSlotStartHour(leg, assignedSlots, simStartMs, h - 1);
+  return last === null ? h : h - last;
+}
+
 /**
  * Sort legs for scheduling. In shared shipping (all legs) and shared inventory (inbound only),
  * legs in the same direction/mode pool rotate by fulfillment ratio so one customer cannot
- * monopolize early slots.
+ * monopolize early slots — unless either leg has negative sort metric (borrowed stock), in
+ * which case DoC urgency overrides fulfilment fairness.
  */
 export function compareSchedulingLegs(
   a: SchedulingLeg,
@@ -47,26 +81,51 @@ export function compareSchedulingLegs(
   sharedShipping: boolean,
   slotsA: number,
   slotsB: number,
-  sharedInventoryInboundPool = false
+  sharedInventoryInboundPool = false,
+  waitA = 0,
+  waitB = 0
 ): number {
   const sharedPool =
     a.direction === b.direction &&
     a.mode === b.mode &&
     (sharedShipping || (sharedInventoryInboundPool && a.direction === "inbound"));
 
-  if (sharedPool) {
+  const compareDoc = (): number | null => {
+    if (Number.isFinite(metricA) && Number.isFinite(metricB)) {
+      if (Math.abs(metricA - metricB) > SORT_METRIC_EPS) return metricA - metricB;
+      return null;
+    }
+    if (Number.isFinite(metricA) && !Number.isFinite(metricB)) return -1;
+    if (!Number.isFinite(metricA) && Number.isFinite(metricB)) return 1;
+    return null;
+  };
+
+  const compareFulfillment = (): number | null => {
     const ratioA = customerLegFulfillmentRatio(a, slotsA);
     const ratioB = customerLegFulfillmentRatio(b, slotsB);
     if (Math.abs(ratioA - ratioB) > SORT_METRIC_EPS) return ratioA - ratioB;
+    return null;
+  };
+
+  if (sharedPool) {
+    const inventoryDistress = metricA < 0 || metricB < 0;
+    if (inventoryDistress) {
+      const docCmp = compareDoc();
+      if (docCmp !== null) return docCmp;
+      const fulCmp = compareFulfillment();
+      if (fulCmp !== null) return fulCmp;
+    } else {
+      const fulCmp = compareFulfillment();
+      if (fulCmp !== null) return fulCmp;
+      const docCmp = compareDoc();
+      if (docCmp !== null) return docCmp;
+    }
+  } else {
+    const docCmp = compareDoc();
+    if (docCmp !== null) return docCmp;
   }
 
-  if (Number.isFinite(metricA) && Number.isFinite(metricB)) {
-    if (Math.abs(metricA - metricB) > SORT_METRIC_EPS) return metricA - metricB;
-  } else if (Number.isFinite(metricA) && !Number.isFinite(metricB)) {
-    return -1;
-  } else if (!Number.isFinite(metricA) && Number.isFinite(metricB)) {
-    return 1;
-  }
+  if (Math.abs(waitA - waitB) > SORT_METRIC_EPS) return waitB - waitA;
 
   return a.customer.id.localeCompare(b.customer.id);
 }

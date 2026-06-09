@@ -33,10 +33,26 @@ import {
   deleteScenario,
   renameScenario
 } from "../db";
-import { runScheduler } from "../engine";
 import { buildSimulationWorkbook, writeSimulationWorkbookToBuffer } from "../engine/simulationExcelExport";
-import type { SimulationConfig, ScheduledSlot, ResourceType } from "../types";
+import type { ScheduleResult } from "../engine/scheduler";
+import type { SimulationConfig, ScheduledSlot, ResourceType, Customer, Resource } from "../types";
 import type { SimulationLogRow } from "../engine/simulationLog";
+
+/** Reload engine modules so `npm run build` takes effect without restarting Electron. */
+function reloadRunScheduler(): (
+  customers: Customer[],
+  resources: Resource[],
+  config: SimulationConfig
+) => ScheduleResult {
+  const engineRoot = path.join(__dirname, "..", "engine");
+  for (const cached of Object.keys(require.cache)) {
+    if (cached.startsWith(engineRoot)) {
+      delete require.cache[cached];
+    }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require("../engine").runScheduler;
+}
 
 let lastInventoryTimeline: Record<string, number[]> = {};
 let lastSimulationConfig: SimulationConfig | null = null;
@@ -84,8 +100,10 @@ function resolveExportSimulationConfig(): SimulationConfig {
         totalStorageCapacity: configs[0].totalStorageCapacity ?? 100000,
         storageMode: configs[0].storageMode ?? "fixed_band",
         sharedInventoryCustomerDeficitLimitTonnes: configs[0].sharedInventoryCustomerDeficitLimitTonnes ?? 0,
-        pacerRoundingDirection: configs[0].pacerRoundingDirection ?? "up",
-        pacerRoundAtDecile: configs[0].pacerRoundAtDecile ?? 1,
+        pacerInboundRoundAtDecile: configs[0].pacerInboundRoundAtDecile ?? 1,
+        pacerInboundAllowance: configs[0].pacerInboundAllowance ?? 0.5,
+        pacerOutboundRoundAtDecile: configs[0].pacerOutboundRoundAtDecile ?? 1,
+        pacerOutboundAllowance: configs[0].pacerOutboundAllowance ?? 0.5,
         optimizerRelativeDocMultiplier: configs[0].optimizerRelativeDocMultiplier ?? 0,
         optimizerRelativeFulfillmentMultiplier: configs[0].optimizerRelativeFulfillmentMultiplier ?? 0,
         minSlotIntervalHours: configs[0].minSlotIntervalHours ?? 0,
@@ -102,8 +120,10 @@ function resolveExportSimulationConfig(): SimulationConfig {
         totalStorageCapacity: 100000,
         storageMode: "fixed_band",
         sharedInventoryCustomerDeficitLimitTonnes: 0,
-        pacerRoundingDirection: "up",
-        pacerRoundAtDecile: 1,
+        pacerInboundRoundAtDecile: 1,
+        pacerInboundAllowance: 0.5,
+        pacerOutboundRoundAtDecile: 1,
+        pacerOutboundAllowance: 0.5,
         optimizerRelativeDocMultiplier: 0,
         optimizerRelativeFulfillmentMultiplier: 0,
         minSlotIntervalHours: 0,
@@ -146,8 +166,10 @@ ipcMain.handle("scheduler:run", async () => {
         totalStorageCapacity: configs[0].totalStorageCapacity ?? 100000,
         storageMode: configs[0].storageMode ?? "fixed_band",
         sharedInventoryCustomerDeficitLimitTonnes: configs[0].sharedInventoryCustomerDeficitLimitTonnes ?? 0,
-        pacerRoundingDirection: configs[0].pacerRoundingDirection ?? "up",
-        pacerRoundAtDecile: configs[0].pacerRoundAtDecile ?? 1,
+        pacerInboundRoundAtDecile: configs[0].pacerInboundRoundAtDecile ?? 1,
+        pacerInboundAllowance: configs[0].pacerInboundAllowance ?? 0.5,
+        pacerOutboundRoundAtDecile: configs[0].pacerOutboundRoundAtDecile ?? 1,
+        pacerOutboundAllowance: configs[0].pacerOutboundAllowance ?? 0.5,
         optimizerRelativeDocMultiplier: configs[0].optimizerRelativeDocMultiplier ?? 0,
         optimizerRelativeFulfillmentMultiplier: configs[0].optimizerRelativeFulfillmentMultiplier ?? 0,
         minSlotIntervalHours: configs[0].minSlotIntervalHours ?? 0,
@@ -164,8 +186,10 @@ ipcMain.handle("scheduler:run", async () => {
         totalStorageCapacity: 100000,
         storageMode: "fixed_band" as const,
         sharedInventoryCustomerDeficitLimitTonnes: 0,
-        pacerRoundingDirection: "up" as const,
-        pacerRoundAtDecile: 1,
+        pacerInboundRoundAtDecile: 1,
+        pacerInboundAllowance: 0.5,
+        pacerOutboundRoundAtDecile: 1,
+        pacerOutboundAllowance: 0.5,
         optimizerRelativeDocMultiplier: 0,
         optimizerRelativeFulfillmentMultiplier: 0,
         minSlotIntervalHours: 0,
@@ -175,7 +199,7 @@ ipcMain.handle("scheduler:run", async () => {
         tankCapacity: 7000
       };
 
-  const result = runScheduler(customers, resources, config);
+  const result = reloadRunScheduler()(customers, resources, config);
 
   console.log("[scheduler:run] Scheduled slots:", result.scheduledSlots.length);
 
@@ -359,13 +383,16 @@ ipcMain.handle("db:createSimulationConfig", async (_e, config: unknown) => {
     tankCount?: number;
     tankCapacity?: number;
     sharedInventoryCustomerDeficitLimitTonnes?: number;
-    pacerRoundingDirection?: "up" | "down";
+    pacerInboundRoundAtDecile?: number;
+    pacerInboundAllowance?: number;
+    pacerOutboundRoundAtDecile?: number;
+    pacerOutboundAllowance?: number;
     pacerRoundAtDecile?: number;
     optimizerRelativeDocMultiplier?: number;
     optimizerRelativeFulfillmentMultiplier?: number;
     bargeBerthAllocation?: string;
   };
-  const pacerDecileRaw = Math.round(c.pacerRoundAtDecile ?? 1);
+  const legacyDecile = Math.min(9, Math.max(1, Math.round(c.pacerRoundAtDecile ?? 1)));
   return createSimulationConfig({
     startDate: new Date(c.startDate),
     endDate: new Date(c.endDate),
@@ -377,9 +404,22 @@ ipcMain.handle("db:createSimulationConfig", async (_e, config: unknown) => {
       typeof c.sharedInventoryCustomerDeficitLimitTonnes === "number" && c.sharedInventoryCustomerDeficitLimitTonnes >= 0
         ? c.sharedInventoryCustomerDeficitLimitTonnes
         : 0,
-    pacerRoundingDirection: c.pacerRoundingDirection === "down" ? "down" : "up",
-    pacerRoundAtDecile:
-      Number.isFinite(pacerDecileRaw) ? Math.min(9, Math.max(1, pacerDecileRaw)) : 1,
+    pacerInboundRoundAtDecile: Math.min(
+      9,
+      Math.max(1, Math.round(c.pacerInboundRoundAtDecile ?? legacyDecile))
+    ),
+    pacerInboundAllowance:
+      typeof c.pacerInboundAllowance === "number" && Number.isFinite(c.pacerInboundAllowance)
+        ? c.pacerInboundAllowance
+        : 0.5,
+    pacerOutboundRoundAtDecile: Math.min(
+      9,
+      Math.max(1, Math.round(c.pacerOutboundRoundAtDecile ?? legacyDecile))
+    ),
+    pacerOutboundAllowance:
+      typeof c.pacerOutboundAllowance === "number" && Number.isFinite(c.pacerOutboundAllowance)
+        ? c.pacerOutboundAllowance
+        : 0.5,
     optimizerRelativeDocMultiplier:
       typeof c.optimizerRelativeDocMultiplier === "number" && Number.isFinite(c.optimizerRelativeDocMultiplier)
         ? Math.max(0, c.optimizerRelativeDocMultiplier)
@@ -415,13 +455,16 @@ ipcMain.handle("db:updateSimulationConfig", async (_e, id: string, config: unkno
     tankCount?: number;
     tankCapacity?: number;
     sharedInventoryCustomerDeficitLimitTonnes?: number;
-    pacerRoundingDirection?: "up" | "down";
+    pacerInboundRoundAtDecile?: number;
+    pacerInboundAllowance?: number;
+    pacerOutboundRoundAtDecile?: number;
+    pacerOutboundAllowance?: number;
     pacerRoundAtDecile?: number;
     optimizerRelativeDocMultiplier?: number;
     optimizerRelativeFulfillmentMultiplier?: number;
     bargeBerthAllocation?: string;
   };
-  const pacerDecileRaw = Math.round(c.pacerRoundAtDecile ?? 1);
+  const legacyDecile = Math.min(9, Math.max(1, Math.round(c.pacerRoundAtDecile ?? 1)));
   return updateSimulationConfig(id, {
     startDate: new Date(c.startDate),
     endDate: new Date(c.endDate),
@@ -433,9 +476,22 @@ ipcMain.handle("db:updateSimulationConfig", async (_e, id: string, config: unkno
       typeof c.sharedInventoryCustomerDeficitLimitTonnes === "number" && c.sharedInventoryCustomerDeficitLimitTonnes >= 0
         ? c.sharedInventoryCustomerDeficitLimitTonnes
         : 0,
-    pacerRoundingDirection: c.pacerRoundingDirection === "down" ? "down" : "up",
-    pacerRoundAtDecile:
-      Number.isFinite(pacerDecileRaw) ? Math.min(9, Math.max(1, pacerDecileRaw)) : 1,
+    pacerInboundRoundAtDecile: Math.min(
+      9,
+      Math.max(1, Math.round(c.pacerInboundRoundAtDecile ?? legacyDecile))
+    ),
+    pacerInboundAllowance:
+      typeof c.pacerInboundAllowance === "number" && Number.isFinite(c.pacerInboundAllowance)
+        ? c.pacerInboundAllowance
+        : 0.5,
+    pacerOutboundRoundAtDecile: Math.min(
+      9,
+      Math.max(1, Math.round(c.pacerOutboundRoundAtDecile ?? legacyDecile))
+    ),
+    pacerOutboundAllowance:
+      typeof c.pacerOutboundAllowance === "number" && Number.isFinite(c.pacerOutboundAllowance)
+        ? c.pacerOutboundAllowance
+        : 0.5,
     optimizerRelativeDocMultiplier:
       typeof c.optimizerRelativeDocMultiplier === "number" && Number.isFinite(c.optimizerRelativeDocMultiplier)
         ? Math.max(0, c.optimizerRelativeDocMultiplier)

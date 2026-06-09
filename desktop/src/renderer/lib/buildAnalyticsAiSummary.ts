@@ -48,8 +48,10 @@ export interface AnalyticsAiSummary {
     storageMode: string;
     totalStorageCapacityT: number;
     optimizerRelativeDocMultiplier: number;
-    pacerRoundingDirection: string;
-    pacerRoundAtDecile: number;
+    pacerInboundRoundAtDecile: number;
+    pacerInboundAllowance: number;
+    pacerOutboundRoundAtDecile: number;
+    pacerOutboundAllowance: number;
   };
   feasibilityWarnings: string[];
   customers: AiSummaryCustomer[];
@@ -120,8 +122,10 @@ interface ConfigLike {
   storageMode?: string;
   totalStorageCapacity?: number;
   optimizerRelativeDocMultiplier?: number;
-  pacerRoundingDirection?: string;
-  pacerRoundAtDecile?: number;
+  pacerInboundRoundAtDecile?: number;
+  pacerInboundAllowance?: number;
+  pacerOutboundRoundAtDecile?: number;
+  pacerOutboundAllowance?: number;
 }
 
 function tallyConstraints(simulationLog: SimulationLogRow[]): {
@@ -219,8 +223,10 @@ export function buildAnalyticsAiSummary(input: {
       storageMode: input.config.storageMode ?? "fixed_band",
       totalStorageCapacityT: input.config.totalStorageCapacity ?? 100000,
       optimizerRelativeDocMultiplier: input.config.optimizerRelativeDocMultiplier ?? 0,
-      pacerRoundingDirection: input.config.pacerRoundingDirection ?? "up",
-      pacerRoundAtDecile: input.config.pacerRoundAtDecile ?? 1
+      pacerInboundRoundAtDecile: input.config.pacerInboundRoundAtDecile ?? 1,
+      pacerInboundAllowance: input.config.pacerInboundAllowance ?? 0.5,
+      pacerOutboundRoundAtDecile: input.config.pacerOutboundRoundAtDecile ?? 1,
+      pacerOutboundAllowance: input.config.pacerOutboundAllowance ?? 0.5
     },
     feasibilityWarnings: input.feasibilityWarnings,
     customers,

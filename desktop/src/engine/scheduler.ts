@@ -15,6 +15,7 @@ import {
   getCustomerMaxCapacity,
   normalizeSharedInventoryToCap,
   applySharedInventoryPipelineHour,
+  applySharedInventoryOutboundFlow,
   type InventoryTimeline
 } from "./inventory";
 import { runFeasibilityChecks, type SchedulingLeg } from "./feasibility";
@@ -35,12 +36,13 @@ import {
   inboundTargetSlotsByLane,
   outboundTargetSlotsByLane
 } from "./customerLegTargets";
-import { paceAllowanceSlots } from "./pacing";
+import { paceAllowanceForDirection, pacerAppliesAtBookingTime } from "./pacing";
 import {
   averageCustomerDaysOfCoverAtHour,
   averagePoolFulfillmentRatioAtHour,
   combinedTerminalDaysOfCoverAtHour,
   compareSchedulingLegs,
+  hoursSinceLastLegSlot,
   countLegSlotsThroughHour,
   customerLegFulfillmentRatio,
   legSortMetric,
@@ -54,11 +56,6 @@ import {
 import { getCompatibleResources, pickBerthCandidate } from "./resourceAllocation";
 
 const HOUR_MS = 60 * 60 * 1000;
-
-function normalizedPacerDecile(config: SimulationConfig): number {
-  const raw = Math.round(config.pacerRoundAtDecile ?? 1);
-  return Number.isFinite(raw) ? Math.min(9, Math.max(1, raw)) : 1;
-}
 
 export interface ScheduleResult {
   scheduledSlots: ScheduledSlot[];
@@ -221,8 +218,12 @@ function applySlotFlowsFixedBand(
     if (loadingHours <= 0) continue;
     if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
     const flowPerHour = slot.volume / loadingHours;
-    const sign = slot.direction === "inbound" ? 1 : -1;
-    invById[slot.customerId] = (invById[slot.customerId] ?? 0) + sign * flowPerHour;
+    if (config.storageMode === "shared_inventory" && slot.direction === "outbound") {
+      applySharedInventoryOutboundFlow(invById, customers, slot.customerId, flowPerHour);
+    } else {
+      const sign = slot.direction === "inbound" ? 1 : -1;
+      invById[slot.customerId] = (invById[slot.customerId] ?? 0) + sign * flowPerHour;
+    }
   }
   const totalCap = config.totalStorageCapacity ?? 100000;
   if (config.storageMode === "shared_inventory") {
@@ -360,6 +361,35 @@ function lastCompletedEndHour(
   return Math.round((bestEndMs - simStartMs) / HOUR_MS);
 }
 
+function tieBreakerSnapshots(
+  leg: SchedulingLeg,
+  legs: SchedulingLeg[],
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  h: number,
+  sharedShipping: boolean,
+  sharedInventory: boolean
+): Pick<TransportModeStatus, "fulfillmentRatio" | "hoursSinceLastSlot" | "poolFulfillmentAvg"> {
+  const slotsThrough = countLegSlotsThroughHour(leg, assignedSlots, simStartMs, h - 1);
+  const ratio = customerLegFulfillmentRatio(leg, slotsThrough);
+  const fulfillmentRatio = Number.isFinite(ratio) ? Math.round(ratio * 1000) / 1000 : null;
+  const wait = hoursSinceLastLegSlot(leg, assignedSlots, simStartMs, h);
+  let poolFulfillmentAvg: number | null = null;
+  if (legUsesFulfillmentPool(leg, sharedShipping, sharedInventory)) {
+    const avg = averagePoolFulfillmentRatioAtHour(
+      leg,
+      legs,
+      assignedSlots,
+      simStartMs,
+      h,
+      sharedShipping,
+      sharedInventory
+    );
+    poolFulfillmentAvg = avg != null && Number.isFinite(avg) ? Math.round(avg * 1000) / 1000 : null;
+  }
+  return { fulfillmentRatio, hoursSinceLastSlot: wait, poolFulfillmentAvg };
+}
+
 function buildTransportStatuses(
   h: number,
   legs: SchedulingLeg[],
@@ -375,8 +405,14 @@ function buildTransportStatuses(
   minInterval: number,
   /** State after pipeline + overlapping-slot flows for this hour, before any new slot is assigned — must match runScheduler's inventory checks for this hour. */
   invBeforeNewSlotsThisHour: Record<string, number>,
-  terminalBeforeNewSlotsThisHour: number
+  terminalBeforeNewSlotsThisHour: number,
+  invAtHourStart: Record<string, number>,
+  terminalAtHourStart: number
 ): TransportModeStatus[] {
+  const pacerSnapshots = [
+    { terminalRefTotal: terminalAtHourStart, invById: invAtHourStart },
+    { terminalRefTotal: terminalBeforeNewSlotsThisHour, invById: invBeforeNewSlotsThisHour }
+  ];
   const candidateStart = new Date(simStartMs + h * HOUR_MS);
   const { preOps, postOps } = laytimeFromConfig(config);
   const periodHoursSafe = Math.max(periodHours, 1);
@@ -485,6 +521,7 @@ function buildTransportStatuses(
         constraintDetail: detail,
         daysOfCover: daysOfCoverSnapshot,
         optimizerDaysOfCover: optimizerMetricSnapshot,
+        ...tieBreakerSnapshots(leg, legs, assignedSlots, simStartMs, h, sharedShipping, sharedInventory),
         slotId: activeSlot.id,
         volume: activeSlot.volume,
         resourceName: resource?.name
@@ -511,15 +548,20 @@ function buildTransportStatuses(
       const nBefore = poolPace
         ? loadsStartedByHourAgg(h - 1, leg.direction, leg.mode, assignedSlots, simStartMs)
         : loadsStartedByHour(h - 1, key, assignedSlots, simStartMs);
-      const paceTargetContinuous = (h / periodHoursSafe) * effTarget + 1;
-      const paceAllowance = paceAllowanceSlots(paceTargetContinuous, config);
-      if (nBefore >= effTarget || nBefore >= paceAllowance) {
+      const pacerApplies = pacerAppliesAtBookingTime(
+        leg.direction,
+        config,
+        c,
+        customers,
+        pacerSnapshots
+      );
+      const { continuous: paceTargetContinuous, allowance: paceAllowance, settings: paceSettings } =
+        paceAllowanceForDirection(h, periodHoursSafe, effTarget, leg.direction, config);
+      if (pacerApplies && (nBefore >= effTarget || nBefore >= paceAllowance)) {
         blockingConstraint = "pace_ahead";
-        const paceMode = config.pacerRoundingDirection === "down" ? "down" : "up";
-        const paceDecile = normalizedPacerDecile(config);
         constraintDetail = poolPace
-          ? `scheduled ${nBefore}/${effTarget} (combined), pace ${paceTargetContinuous.toFixed(2)} → allow ${paceAllowance} (${paceMode}@0.${paceDecile})`
-          : `scheduled ${nBefore}/${effTarget}, pace ${paceTargetContinuous.toFixed(2)} → allow ${paceAllowance} (${paceMode}@0.${paceDecile})`;
+          ? `scheduled ${nBefore}/${effTarget} (combined), pace ${paceTargetContinuous.toFixed(2)} → allow ${paceAllowance} (${leg.direction} decile ${paceSettings.roundAtDecile}, allowance ${paceSettings.allowance})`
+          : `scheduled ${nBefore}/${effTarget}, pace ${paceTargetContinuous.toFixed(2)} → allow ${paceAllowance} (${leg.direction} decile ${paceSettings.roundAtDecile}, allowance ${paceSettings.allowance})`;
       }
     }
 
@@ -665,7 +707,8 @@ function buildTransportStatuses(
       blockingConstraint,
       constraintDetail,
       daysOfCover: daysOfCoverSnapshot,
-      optimizerDaysOfCover: optimizerMetricSnapshot
+      optimizerDaysOfCover: optimizerMetricSnapshot,
+      ...tieBreakerSnapshots(leg, legs, assignedSlots, simStartMs, h, sharedShipping, sharedInventory)
     });
   }
 
@@ -710,6 +753,11 @@ export function runScheduler(
   for (const c of customers) invTimeline[c.id] = [];
 
   for (let h = 0; h <= periodHours; h++) {
+    const invAtHourStart: Record<string, number> = { ...invById };
+    const terminalAtHourStart = sharedInventory
+      ? sumCustomerInventory(invById, customers)
+      : terminalRef.t;
+
     let hourPipelineForLog: Record<string, number> = pipelineFlow;
     if (sharedShipping) {
       applyPipelineCommingled(h, customers, config, terminalRef);
@@ -753,13 +801,28 @@ export function runScheduler(
       );
       const slotsA = countLegSlotsThroughHour(a, assignedSlots, simStartMs, h);
       const slotsB = countLegSlotsThroughHour(b, assignedSlots, simStartMs, h);
-      return compareSchedulingLegs(a, b, mA, mB, sharedShipping, slotsA, slotsB, sharedInventory);
+      const waitA = hoursSinceLastLegSlot(a, assignedSlots, simStartMs, h);
+      const waitB = hoursSinceLastLegSlot(b, assignedSlots, simStartMs, h);
+      return compareSchedulingLegs(
+        a,
+        b,
+        mA,
+        mB,
+        sharedShipping,
+        slotsA,
+        slotsB,
+        sharedInventory,
+        waitA,
+        waitB
+      );
     });
 
     const candidateStartBase = new Date(simStartMs + h * HOUR_MS);
 
     const invBeforeNewSlotsThisHour: Record<string, number> = { ...invById };
-    const terminalBeforeNewSlotsThisHour = terminalRef.t;
+    const terminalBeforeNewSlotsThisHour = sharedInventory
+      ? sumCustomerInventory(invById, customers)
+      : terminalRef.t;
     const averageDoc = averageCustomerDaysOfCoverAtHour(
       customers,
       legs,
@@ -801,9 +864,25 @@ export function runScheduler(
         : loadsStartedByHour(h - 1, key, assignedSlots, simStartMs);
       // Hard cap: never schedule more slots than the computed target (per leg, or combined for shared_shipping).
       if (nBeforeThisHour >= effTarget) continue;
-      const paceTargetContinuous = (h / periodHoursSafe) * effTarget + 1;
-      const paceAllowance = paceAllowanceSlots(paceTargetContinuous, config);
-      if (nBeforeThisHour >= paceAllowance) continue;
+      const pacerSnapshots = [
+        { terminalRefTotal: terminalAtHourStart, invById: invAtHourStart },
+        { terminalRefTotal: terminalBeforeNewSlotsThisHour, invById: invBeforeNewSlotsThisHour }
+      ];
+      const pacerApplies = pacerAppliesAtBookingTime(
+        leg.direction,
+        config,
+        leg.customer,
+        customers,
+        pacerSnapshots
+      );
+      const { allowance: paceAllowance } = paceAllowanceForDirection(
+        h,
+        periodHoursSafe,
+        effTarget,
+        leg.direction,
+        config
+      );
+      if (pacerApplies && nBeforeThisHour >= paceAllowance) continue;
 
       const c = leg.customer;
       const inv = poolProportional ? custInvCommingled(terminalRef.t, c, customers) : (invById[c.id] ?? 0);
@@ -928,8 +1007,12 @@ export function runScheduler(
           hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)
         ) {
           const flowPerHour = slot.volume / loadingHours;
-          const sign = slot.direction === "inbound" ? 1 : -1;
-          invById[slot.customerId] = (invById[slot.customerId] ?? 0) + sign * flowPerHour;
+          if (sharedInventory && slot.direction === "outbound") {
+            applySharedInventoryOutboundFlow(invById, customers, slot.customerId, flowPerHour);
+          } else {
+            const sign = slot.direction === "inbound" ? 1 : -1;
+            invById[slot.customerId] = (invById[slot.customerId] ?? 0) + sign * flowPerHour;
+          }
           if (sharedInventory) {
             normalizeSharedInventoryToCap(invById, customers, config.totalStorageCapacity ?? 100000);
           } else {
@@ -967,7 +1050,9 @@ export function runScheduler(
       simEnd.getTime(),
       minInterval,
       invBeforeNewSlotsThisHour,
-      terminalBeforeNewSlotsThisHour
+      terminalBeforeNewSlotsThisHour,
+      invAtHourStart,
+      terminalAtHourStart
     );
 
     simulationLog.push({

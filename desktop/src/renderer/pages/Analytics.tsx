@@ -78,8 +78,10 @@ interface SimulationConfig {
   preOpsHours?: number;
   postOpsHours?: number;
   optimizerRelativeDocMultiplier?: number;
-  pacerRoundingDirection?: string;
-  pacerRoundAtDecile?: number;
+  pacerInboundRoundAtDecile?: number;
+  pacerInboundAllowance?: number;
+  pacerOutboundRoundAtDecile?: number;
+  pacerOutboundAllowance?: number;
 }
 
 interface InventoryTimelineResponse {
@@ -1009,10 +1011,11 @@ export default function Analytics() {
               label="Tank bottoms and tops help"
               content={
                 <>
-                  Bottom = inventory at 0 t; top = at customer max capacity (storage share × total capacity). Hours =
-                  total hours in that state; occurrences = separate stretches (each consecutive run counts as one).
-                  Refused tonnes = that customer&apos;s pipeline flow (t/h) × terminal pipeline-interruption hours (tank
-                  top or tank bottom on the Gantt — same rules).
+                  Bottom hours = that customer&apos;s <strong>attributed</strong> inventory at 0 t (not the same as
+                  pipeline interruption). Refused at bottom = pipeline tonnes blocked each hour by the engine (terminal
+                  physical stock empty and/or customer −x floor) — same rules as the Gantt pipeline row. Top hours =
+                  attributed inventory at customer max capacity; refused at top = inbound pipeline blocked when the
+                  terminal is full.
                 </>
               }
             />

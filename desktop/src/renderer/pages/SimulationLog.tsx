@@ -41,6 +41,26 @@ type ViewMode = "events" | "daily" | "all";
 
 type ConstraintFilterKey = BlockingConstraintKey | "uncategorised";
 
+type TieBreakerKey = "fulfillment" | "sortMetric" | "wait";
+
+const TIE_BREAKER_DEFS: { key: TieBreakerKey; label: string; title: string }[] = [
+  {
+    key: "fulfillment",
+    label: "Fulfilment %",
+    title: "Leg slots ÷ annual target at hour start (lower = tried earlier in pooled legs)"
+  },
+  {
+    key: "sortMetric",
+    label: "Sort metric",
+    title: "Days-of-cover sort score at hour start (lower = tried earlier when fulfilment ties)"
+  },
+  {
+    key: "wait",
+    label: "Wait",
+    title: "Hours since this leg's last slot start (higher = tried earlier when other metrics tie)"
+  }
+];
+
 const VISIBLE_ROWS = 150;
 const ROW_HEIGHT = 48;
 
@@ -119,6 +139,63 @@ function formatDaysOfCover(doc: number | null | undefined): string {
   return doc >= 10 ? doc.toFixed(1) : doc.toFixed(2);
 }
 
+function formatFulfillmentRatio(ratio: number | null | undefined): string {
+  if (ratio == null || !Number.isFinite(ratio)) return "∞";
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
+function formatWaitHours(hours: number | null | undefined): string {
+  if (hours == null || !Number.isFinite(hours)) return "—";
+  return `${Math.round(hours)}h`;
+}
+
+function tieBreakerTooltipLines(status: TransportModeStatus): string[] {
+  const lines: string[] = [];
+  if (status.fulfillmentRatio !== undefined) {
+    const pool =
+      status.poolFulfillmentAvg != null && Number.isFinite(status.poolFulfillmentAvg)
+        ? `, pool avg ${formatFulfillmentRatio(status.poolFulfillmentAvg)}`
+        : "";
+    lines.push(`Fulfilment: ${formatFulfillmentRatio(status.fulfillmentRatio)}${pool}`);
+  }
+  if (status.hoursSinceLastSlot !== undefined) {
+    lines.push(`Wait since last slot: ${formatWaitHours(status.hoursSinceLastSlot)}`);
+  }
+  return lines;
+}
+
+function LegCellContent({
+  status,
+  activeTieBreakers
+}: {
+  status: TransportModeStatus | undefined;
+  activeTieBreakers: Set<TieBreakerKey>;
+}) {
+  const tieLines: string[] = [];
+  if (status && activeTieBreakers.size > 0) {
+    if (activeTieBreakers.has("fulfillment")) {
+      const pool =
+        status.poolFulfillmentAvg != null && Number.isFinite(status.poolFulfillmentAvg)
+          ? ` / ${formatFulfillmentRatio(status.poolFulfillmentAvg)}`
+          : "";
+      tieLines.push(`${formatFulfillmentRatio(status.fulfillmentRatio)}${pool}`);
+    }
+    if (activeTieBreakers.has("sortMetric")) tieLines.push(formatDaysOfCover(status.daysOfCover));
+    if (activeTieBreakers.has("wait")) tieLines.push(formatWaitHours(status.hoursSinceLastSlot));
+  }
+
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+      <TransportStatusIcon status={status} />
+      {tieLines.length > 0 ? (
+        <span style={{ fontSize: 10, lineHeight: 1.15, color: "#64748b", whiteSpace: "nowrap" }}>
+          {tieLines.join(" · ")}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 /** Multiline text for the floating leg/mode cell tooltip (hour rows). */
 function buildHourLegModeTooltipContent(
   row: SimulationLogRow,
@@ -149,11 +226,13 @@ function buildHourLegModeTooltipContent(
     status.daysOfCover !== undefined
       ? `Sort metric: ${formatDaysOfCover(status.daysOfCover)} (lower = tried earlier). Inbound leg: inventory ÷ total outbound pull (t/d). Outbound leg: headroom ÷ total inbound fill (t/d), or raw headroom if no inbound fill.`
       : null;
+  const tieLines = tieBreakerTooltipLines(status);
 
   const head = [
     legLine,
     timeLine,
     ...(docLine ? ["", docLine] : []),
+    ...(tieLines.length > 0 ? ["", ...tieLines] : []),
     "",
     "● This column is one leg (customer + direction + mode only).",
     ""
@@ -275,7 +354,8 @@ function hourRowStylesFixed(
   row: SimulationLogRow,
   activeCustomers: Set<string>,
   activeModes: Set<string>,
-  zebra: CSSProperties
+  zebra: CSSProperties,
+  showLegColumns: boolean
 ): CSSProperties {
   const relevant = (row.transportStatus ?? []).filter((s) =>
     matchesFilters(s, activeCustomers, activeModes)
@@ -296,6 +376,11 @@ function hourRowStylesFixed(
     maxHeight: ROW_HEIGHT,
     overflow: "hidden"
   };
+  if (!showLegColumns) {
+    Object.assign(base, zebra);
+    if (hasLoadedStart) base.borderLeft = "4px solid #22c55e";
+    return base;
+  }
   if (worst === "insufficient_inventory") base.background = "#fef2f2";
   else if (worst === "tank_full") base.background = "#fffbeb";
   else if (worst === "roundtrip") base.background = "#eff6ff";
@@ -425,6 +510,8 @@ export default function SimulationLog() {
   const [activeCustomers, setActiveCustomers] = useState<Set<string>>(() => new Set());
   const [activeModes, setActiveModes] = useState<Set<string>>(() => new Set());
   const [activeConstraints, setActiveConstraints] = useState<Set<ConstraintFilterKey>>(() => new Set());
+  const [activeTieBreakers, setActiveTieBreakers] = useState<Set<TieBreakerKey>>(() => new Set());
+  const [forceLegColumnsFromLink, setForceLegColumnsFromLink] = useState(false);
   const [maxLegColumns, setMaxLegColumns] = useState(16);
 
   useEffect(() => {
@@ -567,6 +654,9 @@ export default function SimulationLog() {
     return cols.slice(0, Math.max(1, Math.min(maxLegColumns, cols.length)));
   }, [logRows, activeCustomers, activeModes, activeCustomerList, customers, maxLegColumns]);
 
+  const showLegColumns = activeConstraints.size > 0 || forceLegColumnsFromLink;
+  const visibleLegColumns = showLegColumns ? inventoryLegColumns : [];
+
   const filterKey = `${[...activeCustomers].sort().join(",")}|${[...activeModes].sort().join(",")}|${[...activeConstraints].sort().join(",")}`;
 
   const searchKey = searchParams.toString();
@@ -596,6 +686,7 @@ export default function SimulationLog() {
       if (customerId) setActiveCustomers((prev) => new Set(prev).add(customerId));
       if (direction && mode) setActiveModes((prev) => new Set(prev).add(`${direction}:${mode}`));
       setViewMode("all");
+      setForceLegColumnsFromLink(true);
     });
 
     const frame = requestAnimationFrame(() => {
@@ -694,7 +785,7 @@ export default function SimulationLog() {
     return `Showing ${vis} of ${total.toLocaleString()} rows`;
   }, [displayRows.length, virtualSlice]);
 
-  const colCount = 2 + activeCustomerList.length + 1 + inventoryLegColumns.length;
+  const colCount = 2 + activeCustomerList.length + 1 + visibleLegColumns.length;
 
   const topSpacerHeight = virtualSlice.start * ROW_HEIGHT;
   const bottomSpacerHeight = Math.max(
@@ -720,7 +811,17 @@ export default function SimulationLog() {
     });
   };
 
+  const toggleTieBreaker = (key: TieBreakerKey) => {
+    setActiveTieBreakers((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const toggleConstraint = (key: ConstraintFilterKey) => {
+    setForceLegColumnsFromLink(false);
     setActiveConstraints((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
@@ -844,14 +945,28 @@ export default function SimulationLog() {
       </div>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>CONSTRAINTS</span>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>FILTER BY CONSTRAINT</span>
+        <HelpPopover
+          label="Constraint filter help"
+          content={
+            <>
+              Toggle a constraint to add <strong>leg columns</strong> (per customer + mode) and filter rows to hours where
+              that leg was idle for that reason. With no constraint selected, the grid shows inventory only.{" "}
+              <strong>Tie-breakers</strong> overlay merit-order values on leg cells when columns are visible.
+            </>
+          }
+          size={14}
+        />
         <button
           type="button"
           className={`btn ${activeConstraints.size === 0 ? "btn-primary" : "btn-secondary"}`}
           style={{ padding: "4px 12px", fontSize: 12 }}
-          onClick={() => setActiveConstraints(new Set())}
+          onClick={() => {
+            setForceLegColumnsFromLink(false);
+            setActiveConstraints(new Set());
+          }}
         >
-          All
+          Inventory only
         </button>
         {SCHEDULING_CONSTRAINTS.map((def) => {
           const total = constraintCounts.get(def.key) ?? 0;
@@ -899,12 +1014,38 @@ export default function SimulationLog() {
           </button>
         )}
       </div>
-      {constraintFilterLabel && (
+      {activeConstraints.size === 0 && !forceLegColumnsFromLink ? (
+        <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b" }}>
+          Inventory columns only — toggle a constraint above to show leg columns for the selected customers and modes.
+        </p>
+      ) : null}
+      {constraintFilterLabel ? (
         <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b" }}>
           Showing rows where at least one visible leg was idle due to:{" "}
           <strong>{constraintFilterLabel}</strong>
         </p>
-      )}
+      ) : null}
+
+      {showLegColumns ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>TIE-BREAKERS</span>
+          {TIE_BREAKER_DEFS.map((def) => {
+            const on = activeTieBreakers.has(def.key);
+            return (
+              <button
+                key={def.key}
+                type="button"
+                title={def.title}
+                className={`btn ${on ? "btn-primary" : "btn-secondary"}`}
+                style={{ padding: "4px 12px", fontSize: 12 }}
+                onClick={() => toggleTieBreaker(def.key)}
+              >
+                {def.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>VIEW</span>
@@ -936,21 +1077,23 @@ export default function SimulationLog() {
           </span>
         ))}
       </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>LEG COLUMNS</span>
-        <input
-          type="number"
-          min={1}
-          max={64}
-          className="form-input"
-          style={{ width: 90, padding: "4px 8px", fontSize: 12 }}
-          value={maxLegColumns}
-          onChange={(e) => setMaxLegColumns(Math.max(1, Math.min(64, parseInt(e.target.value || "1", 10))))}
-        />
-        <span style={{ fontSize: 12, color: "#64748b" }}>
-          Showing top {inventoryLegColumns.length} filtered leg columns
-        </span>
-      </div>
+      {showLegColumns ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>LEG COLUMNS</span>
+          <input
+            type="number"
+            min={1}
+            max={64}
+            className="form-input"
+            style={{ width: 90, padding: "4px 8px", fontSize: 12 }}
+            value={maxLegColumns}
+            onChange={(e) => setMaxLegColumns(Math.max(1, Math.min(64, parseInt(e.target.value || "1", 10))))}
+          />
+          <span style={{ fontSize: 12, color: "#64748b" }}>
+            Showing top {visibleLegColumns.length} leg columns
+          </span>
+        </div>
+      ) : null}
 
       <div style={{ marginBottom: 8, fontSize: 13, color: "#64748b" }}>
         {rowCountLabel}
@@ -972,15 +1115,15 @@ export default function SimulationLog() {
             <div style={{ padding: 24, color: "#64748b" }}>
               Select at least one customer and one transport mode to see the grid.
             </div>
-          ) : inventoryLegColumns.length === 0 ? (
+          ) : showLegColumns && inventoryLegColumns.length === 0 ? (
             <div style={{ padding: 24, color: "#64748b" }}>
               No transport legs in this run match the selected customers and modes.
             </div>
           ) : displayRows.length === 0 ? (
             <div style={{ padding: 24, color: "#64748b" }}>
               No rows match the selected constraint filter
-              {constraintFilterLabel ? ` (${constraintFilterLabel})` : ""}. Clear constraints with{" "}
-              <strong>All</strong> or select different types.
+              {constraintFilterLabel ? ` (${constraintFilterLabel})` : ""}. Reset with{" "}
+              <strong>Inventory only</strong> or select different types.
             </div>
           ) : (
             <table className="data-table" style={{ width: "100%", tableLayout: "fixed" }}>
@@ -1000,7 +1143,7 @@ export default function SimulationLog() {
                   <th style={{ textAlign: "right", minWidth: 100 }}>
                     {viewMode === "daily" ? "Terminal min–max" : "Terminal total"}
                   </th>
-                  {inventoryLegColumns.map((col) => (
+                  {visibleLegColumns.map((col) => (
                     <th
                       key={`${col.customerId}-${modeKey(col)}-${col.legKey ?? "lane0"}`}
                       style={{ textAlign: "center", minWidth: 72, fontSize: 12 }}
@@ -1034,7 +1177,13 @@ export default function SimulationLog() {
                   if (dr.kind === "hour") {
                     const row = dr.row;
                     const z = zebra(rowIdx);
-                    const rowStyle = hourRowStylesFixed(row, activeCustomers, activeModes, z);
+                    const rowStyle = hourRowStylesFixed(
+                      row,
+                      activeCustomers,
+                      activeModes,
+                      z,
+                      showLegColumns
+                    );
                     const dt = new Date(row.datetime).toLocaleString();
                     return (
                       <tr key={`h-${row.hour}-${row.datetime}-${virtualSlice.start + rowIdx}`} style={rowStyle}>
@@ -1046,7 +1195,7 @@ export default function SimulationLog() {
                           </td>
                         ))}
                         <td style={{ textAlign: "right" }}>{row.terminalTotal.toLocaleString()}</td>
-                        {inventoryLegColumns.map((col) => {
+                        {visibleLegColumns.map((col) => {
                           const status = findTransportStatusForLeg(
                             row,
                             col.customerId,
@@ -1079,7 +1228,7 @@ export default function SimulationLog() {
                                 fontSize: 14
                               }}
                             >
-                              <TransportStatusIcon status={status} />
+                              <LegCellContent status={status} activeTieBreakers={activeTieBreakers} />
                             </td>
                           );
                         })}
@@ -1089,7 +1238,7 @@ export default function SimulationLog() {
 
                   const d = dr.row;
                   let worstDay: TransportModeStatus["blockingConstraint"] = null;
-                  for (const col of inventoryLegColumns) {
+                  for (const col of visibleLegColumns) {
                     const a = d.modeAgg[aggKey(col.customerId, col)];
                     if (a?.worst) worstDay = higherConstraint(worstDay, a.worst);
                   }
@@ -1102,11 +1251,17 @@ export default function SimulationLog() {
                     overflow: "hidden",
                     fontSize: 12
                   };
-                  if (worstDay === "insufficient_inventory") dailyStyle.background = "#fef2f2";
-                  else if (worstDay === "tank_full") dailyStyle.background = "#fffbeb";
-                  else if (worstDay === "roundtrip") dailyStyle.background = "#eff6ff";
-                  else if (worstDay === "pace_ahead" || worstDay === "optimizer_days_of_cover")
-                    dailyStyle.background = "#f1f5f9";
+                  if (showLegColumns) {
+                    if (worstDay === "insufficient_inventory") dailyStyle.background = "#fef2f2";
+                    else if (worstDay === "tank_full") dailyStyle.background = "#fffbeb";
+                    else if (worstDay === "roundtrip") dailyStyle.background = "#eff6ff";
+                    else if (
+                      worstDay === "pace_ahead" ||
+                      worstDay === "optimizer_days_of_cover" ||
+                      worstDay === "optimizer_fulfillment"
+                    )
+                      dailyStyle.background = "#f1f5f9";
+                  }
 
                   return (
                     <tr key={`d-${d.dayKey}-${virtualSlice.start + rowIdx}`} style={dailyStyle}>
@@ -1121,7 +1276,7 @@ export default function SimulationLog() {
                       <td style={{ textAlign: "right" }}>
                         {d.terminalMin.toLocaleString()} – {d.terminalMax.toLocaleString()}
                       </td>
-                      {inventoryLegColumns.map((col) => {
+                      {visibleLegColumns.map((col) => {
                         const a = d.modeAgg[aggKey(col.customerId, col)] ?? {
                           loadedCount: 0,
                           worst: null,
@@ -1157,7 +1312,7 @@ export default function SimulationLog() {
                                 "0"
                               )}
                             </span>
-                            {wIcon ? (
+                            {showLegColumns && wIcon ? (
                               <span
                                 style={{ marginLeft: 4, display: "inline-flex", verticalAlign: "middle" }}
                                 aria-hidden

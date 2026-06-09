@@ -24,8 +24,10 @@ interface AiAnalysisPanelProps {
     storageMode?: string;
     totalStorageCapacity?: number;
     optimizerRelativeDocMultiplier?: number;
-    pacerRoundingDirection?: string;
-    pacerRoundAtDecile?: number;
+    pacerInboundRoundAtDecile?: number;
+    pacerInboundAllowance?: number;
+    pacerOutboundRoundAtDecile?: number;
+    pacerOutboundAllowance?: number;
   } | null;
   periodHours: number;
   customers: Array<{ name: string; pipelineFlowPerHour?: number; storageShare?: number }>;
