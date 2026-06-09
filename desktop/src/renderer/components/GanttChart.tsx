@@ -8,8 +8,9 @@ import React, {
   type CSSProperties
 } from "react";
 import { Loader2, Zap } from "lucide-react";
-import { useNavigate } from "react-router-dom";
-import { setLastSchedulerRun } from "../store";
+import { Link, useNavigate } from "react-router-dom";
+import { setLastSchedulerRun, useStore } from "../store";
+import { formatRelativeTime } from "../lib/formatRelativeTime";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import {
   totalInboundPipelineTph,
@@ -319,7 +320,7 @@ export default function GanttChart() {
   const [viewportClientW, setViewportClientW] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const minimapRef = useRef<HTMLDivElement>(null);
-  const feasibilityWarningsRef = useRef<HTMLDivElement>(null);
+  const lastSchedulerRun = useStore((s) => s.lastSchedulerRun);
 
   useEffect(() => {
     let mounted = true;
@@ -421,11 +422,6 @@ export default function GanttChart() {
       setFeasibilityWarnings(warnList);
       setHasRun(true);
       setLastSchedulerRun();
-      if (warnList.length > 0) {
-        setTimeout(() => {
-          feasibilityWarningsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        }, 0);
-      }
     } finally {
       setIsRunning(false);
     }
@@ -1184,6 +1180,25 @@ export default function GanttChart() {
 
   const dateRangeLabel = `${formatDDMMYYYY(new Date(cfg.startDate))} – ${formatDDMMYYYY(new Date(cfg.endDate))}`;
 
+  const scheduleSummary = useMemo(() => {
+    const inboundSlots = slots.filter((s) => s.direction === "inbound").length;
+    const outboundSlots = slots.filter((s) => s.direction === "outbound").length;
+    const inboundVolume = slots
+      .filter((s) => s.direction === "inbound")
+      .reduce((sum, s) => sum + s.volume, 0);
+    const outboundVolume = slots
+      .filter((s) => s.direction === "outbound")
+      .reduce((sum, s) => sum + s.volume, 0);
+    return {
+      totalSlots: slots.length,
+      inboundSlots,
+      outboundSlots,
+      inboundVolume,
+      outboundVolume,
+      totalVolume: inboundVolume + outboundVolume
+    };
+  }, [slots]);
+
   const legendEntries = useMemo((): LegendEntry[] => {
     const entries: LegendEntry[] = [];
     if (showInventory && hasInventoryData) {
@@ -1375,6 +1390,39 @@ export default function GanttChart() {
           <div className="dashboard-hero-meta">
             <strong style={{ color: "#e2e8f0", fontSize: 15 }}>{dateRangeLabel}</strong>
             <span style={{ marginLeft: 8 }}>· {Math.round(periodHoursSafe).toLocaleString()} h</span>
+            {lastSchedulerRun > 0 && (
+              <div style={{ marginTop: 6, fontSize: 13, color: "#94a3b8" }}>
+                Last run: {formatRelativeTime(lastSchedulerRun)}
+              </div>
+            )}
+          </div>
+          <div className="schedule-hero-kpis">
+            <span className="schedule-hero-kpi">
+              <span className="schedule-hero-kpi-value">{scheduleSummary.totalSlots}</span>
+              <span className="schedule-hero-kpi-label">
+                slots · in {scheduleSummary.inboundSlots} / out {scheduleSummary.outboundSlots}
+              </span>
+            </span>
+            <span className="schedule-hero-kpi">
+              <span className="schedule-hero-kpi-value">
+                {Math.round(scheduleSummary.totalVolume).toLocaleString()}
+              </span>
+              <span className="schedule-hero-kpi-label">
+                t · in {Math.round(scheduleSummary.inboundVolume).toLocaleString()} / out{" "}
+                {Math.round(scheduleSummary.outboundVolume).toLocaleString()}
+              </span>
+            </span>
+            {hasRun && (
+              <Link
+                to="/analytics"
+                className={`badge ${feasibilityWarnings.length ? "badge-amber" : "badge-green"}`}
+                style={{ textDecoration: "none", alignSelf: "center" }}
+              >
+                {feasibilityWarnings.length
+                  ? `${feasibilityWarnings.length} feasibility warning${feasibilityWarnings.length === 1 ? "" : "s"}`
+                  : "No feasibility warnings"}
+              </Link>
+            )}
           </div>
         </div>
         <div className="dashboard-hero-actions">
@@ -2208,23 +2256,6 @@ export default function GanttChart() {
           </div>
         )}
       </div>
-
-      {feasibilityWarnings.length > 0 && (
-        <div
-          ref={feasibilityWarningsRef}
-          className="alert alert-warning"
-          style={{ marginTop: 16, marginBottom: 0 }}
-        >
-          <strong>Feasibility warnings</strong>
-          <ul style={{ margin: "8px 0 0", paddingLeft: 20 }}>
-            {feasibilityWarnings.map((w, i) => (
-              <li key={i} style={{ marginBottom: 4 }}>
-                {w}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       <TimelineChartLegend entries={legendEntries} />
 

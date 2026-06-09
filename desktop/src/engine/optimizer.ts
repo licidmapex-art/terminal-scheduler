@@ -3,13 +3,68 @@
  * x × the cross-customer average (same hour), so other customers can use the berth.
  */
 
-import type { Customer, SimulationConfig } from "../types";
+import type { Customer, ScheduledSlot, SimulationConfig } from "../types";
 import type { SchedulingLeg } from "./feasibility";
 import { customerRepresentativeDaysOfCover } from "./customerLegTargets";
 import { getCustomerMaxCapacity } from "./inventory";
 import { resolveCustomerPipelineRates } from "./pipelineFlows";
 
 const SORT_METRIC_EPS = 1e-6;
+const HOUR_MS = 60 * 60 * 1000;
+
+export function customerLegFulfillmentRatio(leg: SchedulingLeg, slotsScheduled: number): number {
+  if (leg.targetSlots <= 0) return Number.POSITIVE_INFINITY;
+  return slotsScheduled / leg.targetSlots;
+}
+
+export function countLegSlotsThroughHour(
+  leg: SchedulingLeg,
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  throughHour: number
+): number {
+  const laneKey = leg.laneKey ?? "lane0";
+  return assignedSlots.filter((s) => {
+    if (s.customerId !== leg.customer.id || s.direction !== leg.direction || s.mode !== leg.mode) {
+      return false;
+    }
+    if ((s.legKey ?? "lane0") !== laneKey) return false;
+    const startHour = Math.round((new Date(s.start).getTime() - simStartMs) / HOUR_MS);
+    return startHour <= throughHour;
+  }).length;
+}
+
+/**
+ * Sort legs for scheduling. In shared shipping, legs in the same direction/mode pool
+ * rotate by fulfillment ratio so one customer cannot take the whole aggregate target.
+ */
+export function compareSchedulingLegs(
+  a: SchedulingLeg,
+  b: SchedulingLeg,
+  metricA: number,
+  metricB: number,
+  sharedShipping: boolean,
+  slotsA: number,
+  slotsB: number
+): number {
+  const sharedPool = sharedShipping && a.direction === b.direction && a.mode === b.mode;
+
+  if (sharedPool) {
+    const ratioA = customerLegFulfillmentRatio(a, slotsA);
+    const ratioB = customerLegFulfillmentRatio(b, slotsB);
+    if (Math.abs(ratioA - ratioB) > SORT_METRIC_EPS) return ratioA - ratioB;
+  }
+
+  if (Number.isFinite(metricA) && Number.isFinite(metricB)) {
+    if (Math.abs(metricA - metricB) > SORT_METRIC_EPS) return metricA - metricB;
+  } else if (Number.isFinite(metricA) && !Number.isFinite(metricB)) {
+    return -1;
+  } else if (!Number.isFinite(metricA) && Number.isFinite(metricB)) {
+    return 1;
+  }
+
+  return a.customer.id.localeCompare(b.customer.id);
+}
 
 export function normalizedOptimizerRelativeDocMultiplier(config: SimulationConfig): number {
   const raw = Number(config.optimizerRelativeDocMultiplier ?? 0);

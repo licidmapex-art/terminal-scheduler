@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { getDatabase } from "./database";
 import type { SimulationConfig, StorageMode } from "../types";
+import { normalizeBargeBerthAllocation } from "../engine/resourceAllocation";
 
 const STORAGE_MODES: readonly StorageMode[] = [
   "fixed_band",
@@ -37,6 +38,7 @@ function rowToConfig(r: {
   pacer_rounding_direction?: string;
   pacer_round_at_decile?: number;
   optimizer_relative_doc_multiplier?: number;
+  barge_berth_allocation?: string;
 }): SimulationConfigRow {
   const rawDirection = r.pacer_rounding_direction === "down" ? "down" : "up";
   const rawDecile = Math.round(r.pacer_round_at_decile ?? 1);
@@ -64,7 +66,8 @@ function rowToConfig(r: {
     preOpsHours: r.pre_ops_hours ?? 0,
     postOpsHours: r.post_ops_hours ?? 0,
     tankCount: r.tank_count ?? 4,
-    tankCapacity: r.tank_capacity ?? 7000
+    tankCapacity: r.tank_capacity ?? 7000,
+    bargeBerthAllocation: normalizeBargeBerthAllocation(r.barge_berth_allocation)
   };
 }
 
@@ -78,8 +81,8 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     Number(config.optimizerRelativeDocMultiplier ?? 0)
   );
   db.prepare(`
-    INSERT INTO simulation_configs (id, start_date, end_date, pipeline_flow_rate, pipeline_direction, total_storage_capacity, storage_mode, shared_inventory_customer_deficit_limit_tonnes, pacer_rounding_direction, pacer_round_at_decile, optimizer_relative_doc_multiplier, min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO simulation_configs (id, start_date, end_date, pipeline_flow_rate, pipeline_direction, total_storage_capacity, storage_mode, shared_inventory_customer_deficit_limit_tonnes, pacer_rounding_direction, pacer_round_at_decile, optimizer_relative_doc_multiplier, min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     config.startDate.toISOString(),
@@ -96,7 +99,8 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     config.preOpsHours ?? 0,
     config.postOpsHours ?? 0,
     config.tankCount ?? 4,
-    config.tankCapacity ?? 7000
+    config.tankCapacity ?? 7000,
+    normalizeBargeBerthAllocation(config.bargeBerthAllocation)
   );
   return { ...config, id };
 }
@@ -120,6 +124,7 @@ export function getAllSimulationConfigs(): SimulationConfigRow[] {
     pacer_rounding_direction?: string;
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
+    barge_berth_allocation?: string;
   }>;
   return rows.map(rowToConfig);
 }
@@ -143,6 +148,7 @@ export function getSimulationConfigById(id: string): SimulationConfigRow | null 
     pacer_rounding_direction?: string;
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
+    barge_berth_allocation?: string;
   } | undefined;
   if (!row) return null;
   return rowToConfig(row);
@@ -172,7 +178,8 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
       pre_ops_hours = ?,
       post_ops_hours = ?,
       tank_count = ?,
-      tank_capacity = ?
+      tank_capacity = ?,
+      barge_berth_allocation = ?
     WHERE id = ?
   `).run(
     config.startDate.toISOString(),
@@ -190,6 +197,7 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
     config.postOpsHours ?? 0,
     config.tankCount ?? 4,
     config.tankCapacity ?? 7000,
+    normalizeBargeBerthAllocation(config.bargeBerthAllocation),
     id
   );
   return { ...config, id };

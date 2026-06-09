@@ -168,6 +168,234 @@ describe("runScheduler", () => {
     expect(resourceIds).toContain("berth-large");
   });
 
+  it("barge small_only: uses only small berths when both are available", () => {
+    const config = makeConfig({ bargeBerthAllocation: "small_only" });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c1",
+        name: "Customer 1",
+        declaredInboundThroughput: 600,
+        currentInventory: 10000,
+        outboundMEPS: 150,
+        outboundMode: "barge"
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-small",
+        name: "Berth Small",
+        type: "berth_small",
+        flowRate: 50,
+        blackouts: []
+      },
+      {
+        id: "berth-large",
+        name: "Berth Large",
+        type: "berth_large",
+        flowRate: 100,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+
+    expect(result.scheduledSlots.length).toBeGreaterThan(0);
+    expect(result.scheduledSlots.every((s) => s.resourceId === "berth-small")).toBe(true);
+  });
+
+  it("barge prefer_small: uses small when free and large when small is blocked", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const config = makeConfig({ bargeBerthAllocation: "prefer_small", startDate: start });
+    const blackoutStart = addHours(start, 0);
+    const blackoutEnd = addHours(start, 200);
+
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c1",
+        name: "Customer 1",
+        declaredInboundThroughput: 300,
+        currentInventory: 10000,
+        outboundMEPS: 150,
+        outboundMode: "barge"
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-small",
+        name: "Berth Small",
+        type: "berth_small",
+        flowRate: 50,
+        blackouts: [
+          {
+            id: "b1",
+            resourceId: "berth-small",
+            start: blackoutStart,
+            end: blackoutEnd
+          }
+        ]
+      },
+      {
+        id: "berth-large",
+        name: "Berth Large",
+        type: "berth_large",
+        flowRate: 100,
+        blackouts: []
+      }
+    ];
+
+    const blocked = runScheduler(customers, resources, config);
+    expect(blocked.scheduledSlots.every((s) => s.resourceId === "berth-large")).toBe(true);
+
+    const freeSmall = runScheduler(
+      customers,
+      resources.map((r) =>
+        r.id === "berth-small" ? { ...r, blackouts: [] } : r
+      ),
+      config
+    );
+    expect(freeSmall.scheduledSlots.length).toBeGreaterThan(0);
+    expect(freeSmall.scheduledSlots.every((s) => s.resourceId === "berth-small")).toBe(true);
+  });
+
+  it("shared_shipping: distributes inbound ship slots across customers without roundtrip", () => {
+    const config = makeConfig({ storageMode: "shared_shipping" });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c-a",
+        name: "Alpha",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        currentInventory: 0
+      }),
+      makeCustomer({
+        id: "c-b",
+        name: "Beta",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        currentInventory: 0
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth 1",
+        type: "berth_large",
+        flowRate: 100,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+    const slotsA = result.scheduledSlots.filter((s) => s.customerId === "c-a");
+    const slotsB = result.scheduledSlots.filter((s) => s.customerId === "c-b");
+
+    expect(slotsA.length).toBeGreaterThan(0);
+    expect(slotsB.length).toBeGreaterThan(0);
+    expect(slotsA.length).toBe(slotsB.length);
+
+    const ordered = [...result.scheduledSlots].sort(
+      (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()
+    );
+    if (ordered.length >= 2) {
+      expect(ordered[0]!.customerId).not.toBe(ordered[1]!.customerId);
+    }
+  });
+
+  it("shared_shipping: distributes outbound barge slots across customers without roundtrip", () => {
+    const config = makeConfig({ storageMode: "shared_shipping" });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c-a",
+        name: "Alpha",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        outboundMEPS: 150,
+        outboundMode: "barge",
+        outboundRoundtripHours: 0,
+        currentInventory: 25000
+      }),
+      makeCustomer({
+        id: "c-b",
+        name: "Beta",
+        storageShare: 50,
+        declaredInboundThroughput: 600,
+        inboundMEPS: 150,
+        inboundMode: "ship",
+        outboundMEPS: 150,
+        outboundMode: "barge",
+        outboundRoundtripHours: 0,
+        currentInventory: 25000
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-small",
+        name: "Berth Small",
+        type: "berth_small",
+        flowRate: 50,
+        blackouts: []
+      },
+      {
+        id: "berth-large",
+        name: "Berth Large",
+        type: "berth_large",
+        flowRate: 100,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+    const outboundBarge = result.scheduledSlots.filter(
+      (s) => s.direction === "outbound" && s.mode === "barge"
+    );
+    expect(outboundBarge.filter((s) => s.customerId === "c-a").length).toBeGreaterThan(0);
+    expect(outboundBarge.filter((s) => s.customerId === "c-b").length).toBeGreaterThan(0);
+  });
+
+  it("barge alternate: balances across large and small berths", () => {
+    const config = makeConfig({ bargeBerthAllocation: "alternate" });
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c1",
+        name: "Customer 1",
+        declaredInboundThroughput: 900,
+        currentInventory: 10000,
+        outboundMEPS: 150,
+        outboundMode: "barge"
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-small",
+        name: "Berth Small",
+        type: "berth_small",
+        flowRate: 50,
+        blackouts: []
+      },
+      {
+        id: "berth-large",
+        name: "Berth Large",
+        type: "berth_large",
+        flowRate: 50,
+        blackouts: []
+      }
+    ];
+
+    const result = runScheduler(customers, resources, config);
+
+    const resourceIds = new Set(result.scheduledSlots.map((s) => s.resourceId));
+    expect(resourceIds.has("berth-small")).toBe(true);
+    expect(resourceIds.has("berth-large")).toBe(true);
+  });
+
   it("two customers on one berth: sequential, not overlapping", () => {
     const config = makeConfig();
     const customers: Customer[] = [

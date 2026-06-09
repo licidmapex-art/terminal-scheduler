@@ -358,6 +358,7 @@ ipcMain.handle("db:createSimulationConfig", async (_e, config: unknown) => {
     pacerRoundingDirection?: "up" | "down";
     pacerRoundAtDecile?: number;
     optimizerRelativeDocMultiplier?: number;
+    bargeBerthAllocation?: string;
   };
   const pacerDecileRaw = Math.round(c.pacerRoundAtDecile ?? 1);
   return createSimulationConfig({
@@ -382,7 +383,11 @@ ipcMain.handle("db:createSimulationConfig", async (_e, config: unknown) => {
     preOpsHours: c.preOpsHours ?? 0,
     postOpsHours: c.postOpsHours ?? 0,
     tankCount: typeof c.tankCount === "number" && c.tankCount >= 1 ? Math.floor(c.tankCount) : 4,
-    tankCapacity: typeof c.tankCapacity === "number" && c.tankCapacity > 0 ? c.tankCapacity : 7000
+    tankCapacity: typeof c.tankCapacity === "number" && c.tankCapacity > 0 ? c.tankCapacity : 7000,
+    bargeBerthAllocation:
+      c.bargeBerthAllocation === "small_only" || c.bargeBerthAllocation === "prefer_small"
+        ? c.bargeBerthAllocation
+        : "alternate"
   });
 });
 
@@ -403,6 +408,7 @@ ipcMain.handle("db:updateSimulationConfig", async (_e, id: string, config: unkno
     pacerRoundingDirection?: "up" | "down";
     pacerRoundAtDecile?: number;
     optimizerRelativeDocMultiplier?: number;
+    bargeBerthAllocation?: string;
   };
   const pacerDecileRaw = Math.round(c.pacerRoundAtDecile ?? 1);
   return updateSimulationConfig(id, {
@@ -427,7 +433,11 @@ ipcMain.handle("db:updateSimulationConfig", async (_e, id: string, config: unkno
     preOpsHours: c.preOpsHours ?? 0,
     postOpsHours: c.postOpsHours ?? 0,
     tankCount: typeof c.tankCount === "number" && c.tankCount >= 1 ? Math.floor(c.tankCount) : 4,
-    tankCapacity: typeof c.tankCapacity === "number" && c.tankCapacity > 0 ? c.tankCapacity : 7000
+    tankCapacity: typeof c.tankCapacity === "number" && c.tankCapacity > 0 ? c.tankCapacity : 7000,
+    bargeBerthAllocation:
+      c.bargeBerthAllocation === "small_only" || c.bargeBerthAllocation === "prefer_small"
+        ? c.bargeBerthAllocation
+        : "alternate"
   });
 });
 

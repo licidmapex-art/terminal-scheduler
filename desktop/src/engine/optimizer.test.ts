@@ -1,5 +1,66 @@
 import { describe, it, expect } from "vitest";
-import { relativeOptimizerShouldYield } from "./optimizer";
+import type { Customer } from "../types";
+import type { SchedulingLeg } from "./feasibility";
+import { compareSchedulingLegs, relativeOptimizerShouldYield } from "./optimizer";
+
+function makeLeg(
+  customer: Customer,
+  direction: "inbound" | "outbound",
+  targetSlots: number,
+  slotsScheduled = 0
+): { leg: SchedulingLeg; slotsScheduled: number } {
+  return {
+    leg: {
+      customer,
+      direction,
+      mode: "ship",
+      laneKey: `${direction}-ship-1`,
+      meps: 150,
+      targetSlots,
+      roundtripHours: 0
+    },
+    slotsScheduled
+  };
+}
+
+describe("compareSchedulingLegs", () => {
+  const alpha: Customer = {
+    id: "c-a",
+    name: "Alpha",
+    declaredInboundThroughput: 600,
+    currentInventory: 0,
+    storageShare: 50,
+    pipelineFlowPerHour: 0,
+    inboundMEPS: 150,
+    inboundMode: "ship",
+    outboundMEPS: 0,
+    outboundMode: "ship",
+    inboundRoundtripHours: 0,
+    outboundRoundtripHours: 0,
+    timeSharedMinBand: 0,
+    timeSharedDuration: 24
+  };
+  const beta: Customer = {
+    ...alpha,
+    id: "c-b",
+    name: "Beta"
+  };
+
+  it("prefers the customer further behind their target in shared shipping", () => {
+    const { leg: legA, slotsScheduled: slotsA } = makeLeg(alpha, "inbound", 4, 2);
+    const { leg: legB, slotsScheduled: slotsB } = makeLeg(beta, "inbound", 4, 0);
+    const cmp = compareSchedulingLegs(
+      legB,
+      legA,
+      Number.POSITIVE_INFINITY,
+      Number.POSITIVE_INFINITY,
+      true,
+      slotsB,
+      slotsA
+    );
+    expect(cmp).toBeLessThan(0);
+  });
+});
 
 describe("relativeOptimizerShouldYield", () => {
   it("disabled when multiplier is 0", () => {

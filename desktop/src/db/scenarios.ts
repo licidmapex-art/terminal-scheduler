@@ -56,6 +56,8 @@ interface ScenarioPayload {
     tankCount?: number;
     tankCapacity?: number;
     sharedInventoryCustomerDeficitLimitTonnes?: number;
+    optimizerRelativeDocMultiplier?: number;
+    bargeBerthAllocation?: "alternate" | "small_only" | "prefer_small";
   } | null;
 }
 
@@ -104,7 +106,9 @@ function buildScenarioPayload(): ScenarioPayload {
           tankCount: cfg.tankCount ?? 4,
           tankCapacity: cfg.tankCapacity ?? 7000,
           sharedInventoryCustomerDeficitLimitTonnes:
-            cfg.sharedInventoryCustomerDeficitLimitTonnes ?? 0
+            cfg.sharedInventoryCustomerDeficitLimitTonnes ?? 0,
+          optimizerRelativeDocMultiplier: cfg.optimizerRelativeDocMultiplier ?? 0,
+          bargeBerthAllocation: cfg.bargeBerthAllocation ?? "alternate"
         }
       : null
   };
@@ -223,7 +227,16 @@ export function loadScenario(id: string): void {
           payload.config.sharedInventoryCustomerDeficitLimitTonnes ??
             (payload.config as { sharedInventoryMinStockTonnes?: number }).sharedInventoryMinStockTonnes ??
             0
-        )
+        ),
+        optimizerRelativeDocMultiplier: Math.max(
+          0,
+          Number(payload.config.optimizerRelativeDocMultiplier ?? 0)
+        ),
+        bargeBerthAllocation:
+          payload.config.bargeBerthAllocation === "small_only" ||
+          payload.config.bargeBerthAllocation === "prefer_small"
+            ? payload.config.bargeBerthAllocation
+            : "alternate"
       };
       const created = createSimulationConfig(cfg);
       updateSimulationConfig(created.id, cfg);

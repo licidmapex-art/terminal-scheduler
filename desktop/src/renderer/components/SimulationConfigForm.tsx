@@ -174,11 +174,13 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
     let tanks = 4;
     let perTankCapacity = 7000;
     let totalCap = 100_000;
+    let preservedBargeBerthAllocation: string | undefined;
     if (window.dbAPI?.getSimulationConfigs) {
       const existing = (await window.dbAPI.getSimulationConfigs()) as Array<{
         tankCount?: number;
         tankCapacity?: number;
         totalStorageCapacity?: number;
+        bargeBerthAllocation?: string;
       }>;
       const tc = existing[0]?.tankCount;
       const cap = existing[0]?.tankCapacity;
@@ -186,6 +188,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
       if (typeof tc === "number" && tc >= 1) tanks = tc;
       if (typeof cap === "number" && cap > 0) perTankCapacity = cap;
       if (typeof total === "number" && total > 0) totalCap = total;
+      preservedBargeBerthAllocation = existing[0]?.bargeBerthAllocation;
     }
     try {
       const config = {
@@ -204,7 +207,12 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
         preOpsHours: preOps,
         postOpsHours: postOps,
         tankCount: tanks,
-        tankCapacity: perTankCapacity
+        tankCapacity: perTankCapacity,
+        bargeBerthAllocation:
+          preservedBargeBerthAllocation === "small_only" ||
+          preservedBargeBerthAllocation === "prefer_small"
+            ? preservedBargeBerthAllocation
+            : "alternate"
       };
       if (configId) {
         await window.dbAPI.updateSimulationConfig(configId, config);

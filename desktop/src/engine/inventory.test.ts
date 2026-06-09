@@ -10,7 +10,11 @@ import {
   tallyPipelineTonnesFromSimulationLog,
   tallyRefusedTonnesAtTankExtremes,
   applySharedInventoryPipelineHour,
-  theoreticalInventoryDeltaWithoutTankClamp
+  theoreticalInventoryDeltaWithoutTankClamp,
+  replaySharedShippingTerminalFlowTotals,
+  attributeSharedShippingFlowsToCustomers,
+  attributeSharedShippingFlowsForAnalytics,
+  customerStorageShareFrac
 } from "./inventory";
 import { runScheduler } from "./scheduler";
 import type { Customer, Resource, SimulationConfig } from "../types";
@@ -73,6 +77,141 @@ describe("tallyPipelineTonnesFromSimulationLog", () => {
     const m = tallyPipelineTonnesFromSimulationLog(rows);
     expect(m.get("c1")).toEqual({ inbound: 20, outbound: 0 });
     expect(m.get("c2")).toEqual({ inbound: 0, outbound: 10 });
+  });
+});
+
+describe("shared_shipping flow attribution", () => {
+  it("splits terminal berth tonnes by storage share, not slot owner", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-08T00:00:00Z");
+    const config = makeConfig({ startDate: start, endDate: end, storageMode: "shared_shipping" });
+    const customers: Customer[] = [
+      {
+        id: "c-a",
+        name: "Alpha",
+        declaredInboundThroughput: 0,
+        currentInventory: 0,
+        storageShare: 50,
+        pipelineFlowPerHour: 0,
+        inboundMEPS: 300,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "c-b",
+        name: "Beta",
+        declaredInboundThroughput: 0,
+        currentInventory: 0,
+        storageShare: 50,
+        pipelineFlowPerHour: 0,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const slots: import("../types").ScheduledSlot[] = [
+      {
+        id: "s1",
+        customerId: "c-a",
+        resourceId: "berth-1",
+        direction: "inbound",
+        mode: "ship",
+        legKey: null,
+        volume: 600,
+        start: start,
+        end: new Date(start.getTime() + 6 * 60 * 60 * 1000),
+        status: "scheduled",
+        conflictReason: null
+      }
+    ];
+    const totals = replaySharedShippingTerminalFlowTotals(customers, config, slots);
+    expect(totals.berthInbound).toBeCloseTo(600, 0);
+    const attr = attributeSharedShippingFlowsToCustomers(customers, totals);
+    expect(attr.get("c-a")?.berthInbound).toBeCloseTo(300, 0);
+    expect(attr.get("c-b")?.berthInbound).toBeCloseTo(300, 0);
+    const timeline = buildTimeline(customers, config, slots);
+    const scaled = attributeSharedShippingFlowsForAnalytics(customers, timeline, totals);
+    for (const c of customers) {
+      const arr = timeline.get(c.id)!;
+      const delta = arr[arr.length - 1]! - arr[0]!;
+      expect(scaled.get(c.id)?.berthInbound).toBeCloseTo(delta, 0);
+    }
+    expect(customerStorageShareFrac(customers[0]!, customers)).toBe(0.5);
+  });
+
+  it("attributed flows reconcile with proportional inventory delta", () => {
+    const start = new Date("2025-01-01T00:00:00Z");
+    const end = new Date("2025-01-03T00:00:00Z");
+    const config = makeConfig({ startDate: start, endDate: end, storageMode: "shared_shipping" });
+    const customers: Customer[] = [
+      {
+        id: "c-a",
+        name: "Alpha",
+        declaredInboundThroughput: 0,
+        currentInventory: 1000,
+        storageShare: 60,
+        pipelineFlowPerHour: 0,
+        inboundMEPS: 200,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      },
+      {
+        id: "c-b",
+        name: "Beta",
+        declaredInboundThroughput: 0,
+        currentInventory: 0,
+        storageShare: 40,
+        pipelineFlowPerHour: 0,
+        inboundMEPS: 0,
+        inboundMode: "ship",
+        inboundRoundtripHours: 0,
+        outboundMEPS: 0,
+        outboundMode: "ship",
+        outboundRoundtripHours: 0,
+        timeSharedMinBand: 0,
+        timeSharedDuration: 24
+      }
+    ];
+    const slots: import("../types").ScheduledSlot[] = [
+      {
+        id: "s1",
+        customerId: "c-a",
+        resourceId: "berth-1",
+        direction: "inbound",
+        mode: "ship",
+        legKey: null,
+        volume: 400,
+        start: start,
+        end: new Date(start.getTime() + 4 * 60 * 60 * 1000),
+        status: "scheduled",
+        conflictReason: null
+      }
+    ];
+    const timeline = buildTimeline(customers, config, slots);
+    const totals = replaySharedShippingTerminalFlowTotals(customers, config, slots);
+    const attr = attributeSharedShippingFlowsForAnalytics(customers, timeline, totals);
+    for (const c of customers) {
+      const a = attr.get(c.id)!;
+      const massNet = a.berthInbound + a.pipelineInbound - a.berthOutbound - a.pipelineOutbound;
+      const arr = timeline.get(c.id)!;
+      const delta = arr[arr.length - 1]! - arr[0]!;
+      expect(massNet).toBeCloseTo(delta, 0);
+    }
   });
 });
 

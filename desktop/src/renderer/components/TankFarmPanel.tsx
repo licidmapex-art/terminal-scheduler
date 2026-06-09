@@ -76,7 +76,8 @@ export default function TankFarmPanel() {
         preOpsHours: Number(c.preOpsHours ?? 0),
         postOpsHours: Number(c.postOpsHours ?? 0),
         tankCount: typeof c.tankCount === "number" && c.tankCount >= 1 ? c.tankCount : 4,
-        tankCapacity: capacity
+        tankCapacity: capacity,
+        bargeBerthAllocation: c.bargeBerthAllocation ?? "alternate"
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);

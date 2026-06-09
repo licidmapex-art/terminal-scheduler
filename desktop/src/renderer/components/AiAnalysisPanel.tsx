@@ -323,7 +323,7 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
         )}
         {!props.hasRunData && (
           <span className="form-helper" style={{ margin: 0 }}>
-            Run the scheduler on the Dashboard first.
+            Run the scheduler on the Schedule page first.
           </span>
         )}
       </div>

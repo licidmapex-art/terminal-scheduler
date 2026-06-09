@@ -306,6 +306,14 @@ export function runMigrations(database: Database.Database): void {
   migrateScheduledSlotsDropRequests(database);
 
   try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN barge_berth_allocation TEXT NOT NULL DEFAULT 'alternate'"
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
     database.exec("ALTER TABLE scheduled_slots ADD COLUMN leg_key TEXT");
   } catch {
     /* column already exists */

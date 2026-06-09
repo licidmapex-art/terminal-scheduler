@@ -123,6 +123,13 @@ export interface SimulationConfig {
   tankCount: number;
   /** Visual: per-tank capacity in tonnes (default: 7000) */
   tankCapacity: number;
+  /**
+   * When barges can use both berth sizes:
+   * - alternate: balance load across compatible berths (default)
+   * - small_only: barges only use small berths
+   * - prefer_small: use small berths when free; otherwise large
+   */
+  bargeBerthAllocation?: "alternate" | "small_only" | "prefer_small";
 }
 
 /** Persisted inventory audit row (database). */

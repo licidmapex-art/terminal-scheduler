@@ -12,9 +12,18 @@ export {
   tallyPipelineTonnesFromSimulationLog,
   tallyRefusedTonnesAtTankExtremes,
   countPipelineInterruptionHours,
-  theoreticalInventoryDeltaWithoutTankClamp
+  theoreticalInventoryDeltaWithoutTankClamp,
+  customerStorageShareFrac,
+  replaySharedShippingTerminalFlowTotals,
+  attributeSharedShippingFlowsToCustomers,
+  attributeSharedShippingFlowsForAnalytics
 } from "./inventory";
-export type { InventoryTimeline, TankExtremeRefusalTonnes } from "./inventory";
+export type {
+  InventoryTimeline,
+  TankExtremeRefusalTonnes,
+  SharedShippingTerminalFlowTotals,
+  SharedShippingAttributedFlows
+} from "./inventory";
 export { runFeasibilityChecks } from "./feasibility";
 export { runPostRunFeasibilityChecks } from "./postRunFeasibility";
 export type { SchedulingLeg } from "./feasibility";

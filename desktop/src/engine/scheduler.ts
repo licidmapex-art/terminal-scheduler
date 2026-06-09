@@ -38,11 +38,14 @@ import {
 import { paceAllowanceSlots } from "./pacing";
 import {
   averageCustomerDaysOfCoverAtHour,
+  compareSchedulingLegs,
+  countLegSlotsThroughHour,
   legSortMetric,
   normalizedOptimizerRelativeDocMultiplier,
   optimizerMetric,
   relativeOptimizerShouldYield
 } from "./optimizer";
+import { getCompatibleResources, pickBerthCandidate } from "./resourceAllocation";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -76,17 +79,6 @@ function legKey(
   return `${customerId}:${direction}:${mode}:${laneKey ?? "lane0"}`;
 }
 
-function getCompatibleResources(
-  mode: "ship" | "barge" | "train",
-  resources: Resource[]
-): Resource[] {
-  if (mode === "ship") return resources.filter((r) => r.type === "berth_large");
-  if (mode === "barge")
-    return resources.filter((r) => r.type === "berth_large" || r.type === "berth_small");
-  if (mode === "train") return resources.filter((r) => r.type === "rail_siding");
-  return [];
-}
-
 function getBlackoutsForResource(resource: Resource): Blackout[] {
   return resource.blackouts;
 }
@@ -118,12 +110,6 @@ function findConflict(
     }
   }
   return null;
-}
-
-function lastAssignedSlotEndMs(resourceId: string, assignedSlots: ScheduledSlot[]): number {
-  return assignedSlots
-    .filter((s) => s.resourceId === resourceId)
-    .reduce((latest, s) => Math.max(latest, new Date(s.end).getTime()), 0);
 }
 
 function addHours(date: Date, hours: number): Date {
@@ -490,7 +476,7 @@ function buildTransportStatuses(
     }
 
     if (!blockingConstraint) {
-      const compatible = getCompatibleResources(leg.mode, resources);
+      const compatible = getCompatibleResources(leg.mode, resources, config);
       if (compatible.length === 0) {
         blockingConstraint = "resource_occupied";
         constraintDetail = `No ${leg.mode} resource configured (${leg.direction}) — add a compatible berth or rail siding (Resources)`;
@@ -698,8 +684,9 @@ export function runScheduler(
         customers,
         legs
       );
-      if (mA !== mB) return mA - mB;
-      return a.customer.name.localeCompare(b.customer.name);
+      const slotsA = countLegSlotsThroughHour(a, assignedSlots, simStartMs, h);
+      const slotsB = countLegSlotsThroughHour(b, assignedSlots, simStartMs, h);
+      return compareSchedulingLegs(a, b, mA, mB, sharedShipping, slotsA, slotsB);
     });
 
     const candidateStartBase = new Date(simStartMs + h * HOUR_MS);
@@ -727,6 +714,8 @@ export function runScheduler(
 
       const dk = `${leg.direction}:${leg.mode}`;
       const effTarget = sharedShipping ? (aggTargetMap.get(dk) ?? leg.targetSlots) : leg.targetSlots;
+      const nCustomerLeg = loadsStartedByHour(h, key, assignedSlots, simStartMs);
+      if (sharedShipping && nCustomerLeg >= leg.targetSlots) continue;
       const nBeforeThisHour = sharedShipping
         ? loadsStartedByHourAgg(h - 1, leg.direction, leg.mode, assignedSlots, simStartMs)
         : loadsStartedByHour(h - 1, key, assignedSlots, simStartMs);
@@ -777,9 +766,8 @@ export function runScheduler(
         } else if (inv + leg.meps > customerMax) continue;
       }
 
-      const compatible = getCompatibleResources(leg.mode, resources);
-      type Cand = { resource: Resource; start: Date; end: Date };
-      const feasible: Cand[] = [];
+      const compatible = getCompatibleResources(leg.mode, resources, config);
+      const feasible: { resource: Resource; start: Date; end: Date }[] = [];
 
       for (const resource of compatible) {
         if (resource.flowRate <= 0) continue;
@@ -795,16 +783,7 @@ export function runScheduler(
 
       if (feasible.length === 0) continue;
 
-      const minStart = Math.min(...feasible.map((f) => f.start.getTime()));
-      const tied = feasible.filter((f) => f.start.getTime() === minStart);
-      const best =
-        tied.length === 1
-          ? tied[0]!
-          : tied.reduce((b, cur) => {
-              const curEnd = lastAssignedSlotEndMs(cur.resource.id, assignedSlots);
-              const bestEnd = lastAssignedSlotEndMs(b.resource.id, assignedSlots);
-              return curEnd < bestEnd ? cur : b;
-            });
+      const best = pickBerthCandidate(feasible, assignedSlots, config, leg.mode);
 
       const slot: ScheduledSlot = {
         id: randomUUID(),

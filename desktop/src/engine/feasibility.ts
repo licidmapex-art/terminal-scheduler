@@ -11,6 +11,7 @@ import {
   outboundThroughputTonnes
 } from "./customerLegTargets";
 import { resolveCustomerPipelineRates } from "./pipelineFlows";
+import { getCompatibleResources } from "./resourceAllocation";
 
 /** Derived transport leg for feasibility + scheduler (no persisted requests). */
 export interface SchedulingLeg {
@@ -25,13 +26,12 @@ export interface SchedulingLeg {
   roundtripHours: number;
 }
 
-function getCompatibleLegs(resource: Resource, legs: SchedulingLeg[]): SchedulingLeg[] {
-  return legs.filter((leg) => {
-    if (resource.type === "berth_large") return leg.mode === "ship" || leg.mode === "barge";
-    if (resource.type === "berth_small") return leg.mode === "barge";
-    if (resource.type === "rail_siding") return leg.mode === "train";
-    return false;
-  });
+function getCompatibleLegs(
+  resource: Resource,
+  legs: SchedulingLeg[],
+  config: SimulationConfig
+): SchedulingLeg[] {
+  return legs.filter((leg) => getCompatibleResources(leg.mode, [resource], config).length > 0);
 }
 
 function totalBlackoutHours(resource: Resource, config: SimulationConfig): number {
@@ -82,7 +82,7 @@ export function runFeasibilityChecks(
   const layPerVisit = preOps + postOps;
 
   for (const r of resources) {
-    const compatible = getCompatibleLegs(r, legs);
+    const compatible = getCompatibleLegs(r, legs, config);
     const totalVolumeForResource = compatible.reduce((s, leg) => s + leg.targetSlots * leg.meps, 0);
     const loadingHours = r.flowRate > 0 ? totalVolumeForResource / r.flowRate : 0;
     const minHoursNeeded =

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import ResourceForm from "../components/ResourceForm";
 import TankFarmPanel from "../components/TankFarmPanel";
+import BerthAllocationPanel from "../components/BerthAllocationPanel";
 interface Resource {
   id: string;
   name: string;
@@ -49,6 +50,11 @@ export default function Resources() {
       </div>
 
       <TankFarmPanel />
+
+      <BerthAllocationPanel
+        hasLargeBerth={resources.some((r) => r.type === "berth_large")}
+        hasSmallBerth={resources.some((r) => r.type === "berth_small")}
+      />
 
       <div className="card">
         <table className="data-table">

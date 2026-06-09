@@ -380,6 +380,128 @@ export function theoreticalInventoryDeltaWithoutTankClamp(
   return out;
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+
+/** Storage-share fraction used for shared_shipping reported inventory (matches scheduler / Gantt). */
+export function customerStorageShareFrac(customer: Customer, customers: Customer[]): number {
+  const totalStorageShare = customers.reduce((s, c) => s + c.storageShare, 0) || 100;
+  return totalStorageShare > 0 ? customer.storageShare / totalStorageShare : 1 / customers.length;
+}
+
+export interface SharedShippingTerminalFlowTotals {
+  pipelineInbound: number;
+  pipelineOutbound: number;
+  berthInbound: number;
+  berthOutbound: number;
+}
+
+/**
+ * Replay shared_shipping terminal flows (pipeline + berth) — same hour loop as `buildTimeline`.
+ * Berth tonnes are terminal-wide; per-customer analytics apply {@link customerStorageShareFrac}.
+ */
+export function replaySharedShippingTerminalFlowTotals(
+  customers: Customer[],
+  config: SimulationConfig,
+  assignedSlots: ScheduledSlot[]
+): SharedShippingTerminalFlowTotals {
+  const simStart = new Date(config.startDate);
+  const simEnd = new Date(config.endDate);
+  const periodHours = Math.floor((simEnd.getTime() - simStart.getTime()) / HOUR_MS);
+  const capacity = config.totalStorageCapacity ?? 100000;
+  const inboundTotal = totalInboundPipelineTph(customers, config);
+  const outboundTotal = totalOutboundPipelineTph(customers, config);
+  const simStartMs = simStart.getTime();
+  const { preOps, postOps } = laytimeFromConfig(config);
+
+  let terminal = customers.reduce((s, c) => s + c.currentInventory, 0);
+  let pipelineInbound = 0;
+  let pipelineOutbound = 0;
+  let berthInbound = 0;
+  let berthOutbound = 0;
+
+  for (let h = 0; h <= periodHours; h++) {
+    if (h > 0) {
+      const before = terminal;
+      terminal += inboundTotal - outboundTotal;
+      terminal = Math.max(0, Math.min(capacity, terminal));
+      const net = terminal - before;
+      if (net > 0) pipelineInbound += net;
+      else if (net < 0) pipelineOutbound += -net;
+    }
+
+    for (const slot of assignedSlots) {
+      const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
+      if (loadingHours <= 0) continue;
+      if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
+      const flowPerHour = slot.volume / loadingHours;
+      const sign = slot.direction === "inbound" ? 1 : -1;
+      terminal += sign * flowPerHour;
+      if (sign > 0) berthInbound += flowPerHour;
+      else berthOutbound += flowPerHour;
+    }
+
+    terminal = Math.max(0, Math.min(capacity, terminal));
+  }
+
+  return { pipelineInbound, pipelineOutbound, berthInbound, berthOutbound };
+}
+
+export interface SharedShippingAttributedFlows {
+  berthInbound: number;
+  berthOutbound: number;
+  pipelineInbound: number;
+  pipelineOutbound: number;
+}
+
+/** Split terminal-wide shared_shipping flows across customers by storage share. */
+export function attributeSharedShippingFlowsToCustomers(
+  customers: Customer[],
+  totals: SharedShippingTerminalFlowTotals
+): Map<string, SharedShippingAttributedFlows> {
+  const m = new Map<string, SharedShippingAttributedFlows>();
+  for (const c of customers) {
+    const f = customerStorageShareFrac(c, customers);
+    m.set(c.id, {
+      berthInbound: f * totals.berthInbound,
+      berthOutbound: f * totals.berthOutbound,
+      pipelineInbound: f * totals.pipelineInbound,
+      pipelineOutbound: f * totals.pipelineOutbound
+    });
+  }
+  return m;
+}
+
+/**
+ * Scale shared_shipping berth/pipeline attribution so gross in − gross out matches the
+ * proportional inventory change on the timeline (same basis as the schedule graph).
+ */
+export function attributeSharedShippingFlowsForAnalytics(
+  customers: Customer[],
+  timelines: Map<string, number[]>,
+  totals: SharedShippingTerminalFlowTotals
+): Map<string, SharedShippingAttributedFlows> {
+  const base = attributeSharedShippingFlowsToCustomers(customers, totals);
+  const out = new Map<string, SharedShippingAttributedFlows>();
+  for (const c of customers) {
+    const attr = base.get(c.id)!;
+    const arr = timelines.get(c.id) ?? [];
+    const invDelta = (arr[arr.length - 1] ?? 0) - (arr[0] ?? 0);
+    const netAttr =
+      attr.berthInbound +
+      attr.pipelineInbound -
+      attr.berthOutbound -
+      attr.pipelineOutbound;
+    const scale = Math.abs(netAttr) > 1e-9 ? invDelta / netAttr : 0;
+    out.set(c.id, {
+      berthInbound: attr.berthInbound * scale,
+      berthOutbound: attr.berthOutbound * scale,
+      pipelineInbound: attr.pipelineInbound * scale,
+      pipelineOutbound: attr.pipelineOutbound * scale
+    });
+  }
+  return out;
+}
+
 export function getProjectedInventory(
   customerId: string,
   datetime: Date | string,

@@ -1,22 +1,22 @@
-import { HashRouter, Routes, Route, NavLink } from "react-router-dom";
+import { HashRouter, Routes, Route, NavLink, Navigate } from "react-router-dom";
 import { useRef } from "react";
 import {
   Anchor,
+  ArrowLeftRight,
   BarChart2,
   BookOpen,
   Bug,
   CalendarDays,
   ClipboardList,
   Download,
-  LayoutDashboard,
   Play,
   Settings,
   Upload,
   Users,
   Warehouse
 } from "lucide-react";
-import Dashboard from "./pages/Dashboard";
 import Schedule from "./pages/Schedule";
+import Movements from "./pages/Movements";
 import Customers from "./pages/Customers";
 import Resources from "./pages/Resources";
 import Analytics from "./pages/Analytics";
@@ -26,6 +26,9 @@ import Simulation from "./pages/Simulation";
 import Config from "./pages/Config";
 import Introduction from "./pages/Introduction";
 import Debugging from "./pages/Debugging";
+
+/** Set true to restore Debugging + Visualization in the sidebar. */
+const DEBUG_AND_VISUALIZATION_ENABLED = false;
 
 const NAV_ICON_SIZE = 16;
 
@@ -108,17 +111,17 @@ export default function App() {
             <div className="sidebar-section-label" style={{ marginTop: "16px" }}>
               Operations
             </div>
-            <NavLink to="/" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <NavIcon>
-                <LayoutDashboard size={NAV_ICON_SIZE} strokeWidth={2} />
-              </NavIcon>
-              Dashboard
-            </NavLink>
             <NavLink to="/schedule" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
               <NavIcon>
                 <CalendarDays size={NAV_ICON_SIZE} strokeWidth={2} />
               </NavIcon>
               Schedule
+            </NavLink>
+            <NavLink to="/movements" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+              <NavIcon>
+                <ArrowLeftRight size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Movements
             </NavLink>
             <NavLink to="/analytics" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
               <NavIcon>
@@ -132,18 +135,22 @@ export default function App() {
               </NavIcon>
               Simulation Log
             </NavLink>
-            <NavLink to="/debugging" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <NavIcon>
-                <Bug size={NAV_ICON_SIZE} strokeWidth={2} />
-              </NavIcon>
-              Debugging
-            </NavLink>
-            <NavLink to="/simulation" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
-              <NavIcon>
-                <Play size={NAV_ICON_SIZE} strokeWidth={2} />
-              </NavIcon>
-              Visualization
-            </NavLink>
+            {DEBUG_AND_VISUALIZATION_ENABLED && (
+              <>
+                <NavLink to="/debugging" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+                  <NavIcon>
+                    <Bug size={NAV_ICON_SIZE} strokeWidth={2} />
+                  </NavIcon>
+                  Debugging
+                </NavLink>
+                <NavLink to="/simulation" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+                  <NavIcon>
+                    <Play size={NAV_ICON_SIZE} strokeWidth={2} />
+                  </NavIcon>
+                  Visualization
+                </NavLink>
+              </>
+            )}
             <div className="sidebar-section-label" style={{ marginTop: "16px" }}>Configuration</div>
             <NavLink to="/customers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
               <NavIcon>
@@ -200,8 +207,9 @@ export default function App() {
         </div>
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<Navigate to="/schedule" replace />} />
             <Route path="/schedule" element={<Schedule />} />
+            <Route path="/movements" element={<Movements />} />
             <Route path="/customers" element={<Customers />} />
             <Route path="/resources" element={<Resources />} />
             <Route path="/analytics" element={<Analytics />} />
@@ -213,8 +221,12 @@ export default function App() {
                 </ErrorBoundary>
               }
             />
-            <Route path="/simulation" element={<Simulation />} />
-            <Route path="/debugging" element={<Debugging />} />
+            {DEBUG_AND_VISUALIZATION_ENABLED && (
+              <>
+                <Route path="/simulation" element={<Simulation />} />
+                <Route path="/debugging" element={<Debugging />} />
+              </>
+            )}
             <Route path="/introduction" element={<Introduction />} />
             <Route path="/config" element={<Config />} />
           </Routes>

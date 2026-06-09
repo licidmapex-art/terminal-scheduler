@@ -18,7 +18,9 @@ import {
   simulationPeriodHoursFloored,
   tallyPipelineTonnesFromSimulationLog,
   tallyRefusedTonnesAtTankExtremes,
-  theoreticalInventoryDeltaWithoutTankClamp
+  theoreticalInventoryDeltaWithoutTankClamp,
+  replaySharedShippingTerminalFlowTotals,
+  attributeSharedShippingFlowsForAnalytics
 } from "../../engine/inventory";
 import { tallyBerthTonnesByCustomerFromSlots } from "../../engine/simulationExcelExport";
 import { slotBerthOccupationHours } from "../../engine/slotLaytime";
@@ -364,6 +366,26 @@ export default function Analytics() {
     [simulationLog]
   );
 
+  const isSharedShipping = (config?.storageMode ?? "fixed_band") === "shared_shipping";
+
+  const sharedShippingAttributedFlows = useMemo(() => {
+    if (!isSharedShipping || !config || customers.length === 0 || !timelineData?.timeline) {
+      return null;
+    }
+    const engineCustomers = customers as unknown as EngineCustomer[];
+    const engineCfg = config as unknown as EngineSimulationConfig;
+    const totals = replaySharedShippingTerminalFlowTotals(
+      engineCustomers,
+      engineCfg,
+      slots as unknown as ScheduledSlot[]
+    );
+    const timelines = new Map<string, number[]>();
+    for (const [id, series] of Object.entries(timelineData.timeline)) {
+      if (Array.isArray(series)) timelines.set(id, series as number[]);
+    }
+    return attributeSharedShippingFlowsForAnalytics(engineCustomers, timelines, totals);
+  }, [isSharedShipping, config, customers, slots, timelineData]);
+
   /** Uncapped stock motion (fixed_band only); matches pipeline + slot tonnes when flows reconcile. */
   const theoreticalDeltaNoClamp = useMemo(() => {
     if (!config || customers.length === 0) return null;
@@ -400,16 +422,22 @@ export default function Analytics() {
       simulationLog.length > 0
         ? Math.max(...simulationLog.map((r) => r.hour))
         : periodFloored;
-    const berthByCustomer = tallyBerthTonnesByCustomerFromSlots(
-      slots as unknown as ScheduledSlot[],
-      cfgEngine,
-      maxHourInclusive
-    );
+    const berthByCustomer = isSharedShipping
+      ? null
+      : tallyBerthTonnesByCustomerFromSlots(
+          slots as unknown as ScheduledSlot[],
+          cfgEngine,
+          maxHourInclusive
+        );
     for (const [customerId, values] of Object.entries(timelineData.timeline)) {
       if (!values || values.length === 0) continue;
       const arr = values as number[];
       const customer = customerById.get(customerId);
-      const openingStock = Math.round(customer?.currentInventory ?? arr[0] ?? 0);
+      const openingStock = Math.round(
+        isSharedShipping
+          ? (arr[0] ?? customer?.currentInventory ?? 0)
+          : (customer?.currentInventory ?? arr[0] ?? 0)
+      );
       const starting = openingStock;
       const finalRaw = arr[arr.length - 1] ?? 0;
       const final = Math.round(finalRaw);
@@ -427,18 +455,28 @@ export default function Analytics() {
       }
       let pipelineInboundVol = 0;
       let pipelineOutboundVol = 0;
-      if (useLogPipeline) {
-        const p = pipelineTonnesFromSchedulerLog.get(customerId) ?? { inbound: 0, outbound: 0 };
-        pipelineInboundVol = p.inbound;
-        pipelineOutboundVol = p.outbound;
-      } else if (customer) {
-        const rates = resolveCustomerPipelineRates(customer as EngineCustomer, cfgEngine);
-        pipelineInboundVol = rates.inboundTph * periodFloored;
-        pipelineOutboundVol = rates.outboundTph * periodFloored;
+      let cargoIn = 0;
+      let cargoOut = 0;
+      if (isSharedShipping && sharedShippingAttributedFlows) {
+        const attr = sharedShippingAttributedFlows.get(customerId);
+        pipelineInboundVol = attr?.pipelineInbound ?? 0;
+        pipelineOutboundVol = attr?.pipelineOutbound ?? 0;
+        cargoIn = attr?.berthInbound ?? 0;
+        cargoOut = attr?.berthOutbound ?? 0;
+      } else {
+        if (useLogPipeline) {
+          const p = pipelineTonnesFromSchedulerLog.get(customerId) ?? { inbound: 0, outbound: 0 };
+          pipelineInboundVol = p.inbound;
+          pipelineOutboundVol = p.outbound;
+        } else if (customer) {
+          const rates = resolveCustomerPipelineRates(customer as EngineCustomer, cfgEngine);
+          pipelineInboundVol = rates.inboundTph * periodFloored;
+          pipelineOutboundVol = rates.outboundTph * periodFloored;
+        }
+        const berth = berthByCustomer?.get(customerId) ?? { inbound: 0, outbound: 0 };
+        cargoIn = berth.inbound;
+        cargoOut = berth.outbound;
       }
-      const berth = berthByCustomer.get(customerId) ?? { inbound: 0, outbound: 0 };
-      const cargoIn = berth.inbound;
-      const cargoOut = berth.outbound;
       const massInbound = Math.round(pipelineInboundVol + cargoIn);
       const massOutbound = Math.round(pipelineOutboundVol + cargoOut);
       const inventoryDelta = final - openingStock;
@@ -454,7 +492,9 @@ export default function Analytics() {
       const massBalanceHint = !massBalanceOk
         ? "Residual exceeds tolerance — shared shipping / time-shared modes use strict stock check only."
         : Math.abs(residualVsStock) < BAL_STOCK_EPS
-          ? "Reported Δ inventory matches pipeline + berth tonnes."
+          ? sm === "shared_shipping"
+            ? "Reported Δ inventory matches berth + pipeline tonnes (attributed by storage share)."
+            : "Reported Δ inventory matches pipeline + berth tonnes."
           : sm === "shared_inventory"
             ? "Pipeline + berth tonnes tie out; chart reflects pool scaling to terminal cap."
             : "Pipeline + berth tonnes tie out; chart reflects per-customer tank min/max.";
@@ -481,7 +521,9 @@ export default function Analytics() {
     slots,
     pipelineTonnesFromSchedulerLog,
     simulationLog,
-    theoreticalDeltaNoClamp
+    theoreticalDeltaNoClamp,
+    isSharedShipping,
+    sharedShippingAttributedFlows
   ]);
 
   const docTrendByCustomer = useMemo(() => {
@@ -539,9 +581,13 @@ export default function Analytics() {
       const custSlots = slots.filter((s) => s.customerId === c.id);
       const outboundSlots = custSlots.filter((s) => s.direction === "outbound");
       const inboundSlots = custSlots.filter((s) => s.direction === "inbound");
-      const berthInboundTonnes = inboundSlots.reduce((sum, s) => sum + s.volume, 0);
+      let berthInboundTonnes = inboundSlots.reduce((sum, s) => sum + s.volume, 0);
       let pipelineInboundTonnes = 0;
-      if (useLogPipeline) {
+      if (isSharedShipping && sharedShippingAttributedFlows) {
+        const attr = sharedShippingAttributedFlows.get(c.id);
+        berthInboundTonnes = attr?.berthInbound ?? 0;
+        pipelineInboundTonnes = attr?.pipelineInbound ?? 0;
+      } else if (useLogPipeline) {
         pipelineInboundTonnes = pipelineTonnesFromSchedulerLog.get(c.id)?.inbound ?? 0;
       } else {
         pipelineInboundTonnes =
@@ -564,7 +610,9 @@ export default function Analytics() {
       const parcelInMeps = c.inboundMEPS ?? 0;
       const parcelOutMeps = c.outboundMEPS ?? 0;
       const volIn = berthInboundTonnes;
-      const volOut = outboundSlots.reduce((s, x) => s + x.volume, 0);
+      const volOut = isSharedShipping
+        ? (sharedShippingAttributedFlows?.get(c.id)?.berthOutbound ?? 0)
+        : outboundSlots.reduce((s, x) => s + x.volume, 0);
       const parcelAvgInVol =
         inboundSlots.length > 0 ? Math.round((volIn / inboundSlots.length) * 10) / 10 : 0;
       const parcelAvgOutVol =
@@ -595,7 +643,16 @@ export default function Analytics() {
       });
     }
     return rows;
-  }, [customers, config, periodHours, slots, simulationLog, pipelineTonnesFromSchedulerLog]);
+  }, [
+    customers,
+    config,
+    periodHours,
+    slots,
+    simulationLog,
+    pipelineTonnesFromSchedulerLog,
+    isSharedShipping,
+    sharedShippingAttributedFlows
+  ]);
 
   const tankExtremes = useMemo((): TankExtremeRow[] => {
     if (!timelineData?.timeline) return [];
@@ -737,7 +794,10 @@ export default function Analytics() {
           <h3 style={{ fontSize: 14, margin: "0 0 8px" }}>Throughput coverage</h3>
           <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
             Target inbound = declared inbound throughput + pipeline inbound (t/h × period). Scheduled inbound =
-            berth cargo on inbound slots + pipeline inbound from the simulation log (or nominal rate when no log).
+            berth cargo + pipeline inbound
+            {isSharedShipping
+              ? " (shared shipping: terminal flows split by storage share, matching the schedule graph inventory)."
+              : " from berth slots + simulation log pipeline (or nominal rate when no log)."}
             <span style={{ marginLeft: 8 }}>
               Overall:{" "}
               <span className={`badge ${allThroughputPass ? "badge-blue" : "badge-amber"}`}>
@@ -819,6 +879,9 @@ export default function Analytics() {
           <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
             Slot coverage vs engine targets, average scheduled parcel size (t), and partial loads (volume &lt; MEPS when
             MEPS &gt; 0). Inbound on the left, outbound on the right.
+            {isSharedShipping
+              ? " Slot counts are per transport leg owner; tonne totals above use storage-share attribution."
+              : ""}
           </p>
           <table className="data-table analytics-slot-details-table">
             <thead>
