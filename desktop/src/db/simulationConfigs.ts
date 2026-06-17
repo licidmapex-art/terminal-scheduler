@@ -1,6 +1,10 @@
 import { getDatabase } from "./database";
 import type { SimulationConfig, StorageMode, SustainabilityGrade, StochasticConfig } from "../types";
 import { normalizeBargeBerthAllocation } from "../engine/resourceAllocation";
+export {
+  simulationConfigFromRow,
+  type SimulationConfigRow
+} from "../lib/simulationConfigRow";
 
 const randomUUID = () => globalThis.crypto.randomUUID();
 
@@ -16,16 +20,6 @@ export function normalizeStorageMode(raw: string | undefined): StorageMode {
   if (!raw) return "fixed_band";
   if (STORAGE_MODES.includes(raw as StorageMode)) return raw as StorageMode;
   return "fixed_band";
-}
-
-export interface SimulationConfigRow extends SimulationConfig {
-  id: string;
-}
-
-/** Strip DB id — use for scheduler / replay (always includes stochasticConfig when stored). */
-export function simulationConfigFromRow(row: SimulationConfigRow): SimulationConfig {
-  const { id: _id, ...config } = row;
-  return config;
 }
 
 function normalizePacerDecile(raw: number | undefined, fallback = 1): number {

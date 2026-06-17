@@ -3,11 +3,19 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 
 const isWebBuild = process.env.WEB_BUILD === "1";
+const webStub = path.resolve(__dirname, "src/browser-api/stubs/empty.ts");
 
 export default defineConfig({
   plugins: [react()],
   base: isWebBuild ? "/" : "./",
   root: path.resolve(__dirname, "src/renderer"),
+  resolve: isWebBuild
+    ? {
+        alias: {
+          "better-sqlite3": webStub
+        }
+      }
+    : undefined,
   build: {
     outDir: isWebBuild
       ? path.join(__dirname, "dist", "web")

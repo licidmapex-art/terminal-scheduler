@@ -8,7 +8,7 @@ import { replaySimulation } from "../engine/replaySimulation";
 import { validateScheduledSlots } from "../engine/validateScheduledSlots";
 import { finalizeManualSlot } from "../engine/manualSlot";
 import type { SimulationConfig, ScheduledSlot } from "../types";
-import { simulationConfigFromRow } from "../db/simulationConfigs";
+import { simulationConfigFromRow } from "../lib/simulationConfigRow";
 import type { SimulationLogRow } from "../engine/simulationLog";
 import { buildSimulationWorkbook } from "../engine/simulationExcelExport";
 import * as XLSX from "xlsx";
