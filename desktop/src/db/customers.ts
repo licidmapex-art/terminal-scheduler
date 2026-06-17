@@ -22,8 +22,8 @@ export function createCustomer(customer: Customer): Customer {
   const legacyIn = legacyDirectionTransport(customer, "inbound");
   const legacyOut = legacyDirectionTransport(customer, "outbound");
   const stmt = db.prepare(`
-    INSERT INTO customers (id, name, declared_inbound_throughput, current_inventory, pipeline_flow_per_hour, pipeline_inbound_per_hour, pipeline_outbound_per_hour, storage_share, inbound_meps, inbound_mode, outbound_meps, outbound_mode, inbound_roundtrip_hours, outbound_roundtrip_hours, inbound_transports_json, outbound_transports_json, time_shared_min_band, time_shared_duration, chart_color)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO customers (id, name, declared_inbound_throughput, current_inventory, pipeline_flow_per_hour, pipeline_inbound_per_hour, pipeline_outbound_per_hour, storage_share, inbound_meps, inbound_mode, outbound_meps, outbound_mode, inbound_roundtrip_hours, outbound_roundtrip_hours, inbound_transports_json, outbound_transports_json, time_shared_min_band, time_shared_duration, chart_color, grade_green_pct, grade_blue_pct, grade_grey_pct)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   stmt.run(
     customer.id,
@@ -44,7 +44,10 @@ export function createCustomer(customer: Customer): Customer {
     JSON.stringify(outRows),
     customer.timeSharedMinBand ?? 0,
     customer.timeSharedDuration ?? 24,
-    customer.chartColor ?? null
+    customer.chartColor ?? null,
+    customer.gradeGreenPct ?? 0,
+    customer.gradeBluePct ?? 0,
+    customer.gradeGreyPct ?? 0
   );
   return customer;
 }
@@ -71,6 +74,9 @@ export function getAllCustomers(): Customer[] {
     time_shared_min_band?: number;
     time_shared_duration?: number;
     chart_color?: string | null;
+    grade_green_pct?: number;
+    grade_blue_pct?: number;
+    grade_grey_pct?: number;
   }>;
   return rows.map((r) => {
     const inboundTransports = parseTransportJson(r.inbound_transports_json);
@@ -94,7 +100,10 @@ export function getAllCustomers(): Customer[] {
       outboundRoundtripHours: r.outbound_roundtrip_hours ?? 0,
       timeSharedMinBand: r.time_shared_min_band ?? 0,
       timeSharedDuration: r.time_shared_duration ?? 24,
-      chartColor: r.chart_color ?? null
+      chartColor: r.chart_color ?? null,
+      gradeGreenPct: r.grade_green_pct ?? 0,
+      gradeBluePct: r.grade_blue_pct ?? 0,
+      gradeGreyPct: r.grade_grey_pct ?? 0
     };
   });
 }
@@ -121,6 +130,9 @@ export function getCustomerById(id: string): Customer | null {
     time_shared_min_band?: number;
     time_shared_duration?: number;
     chart_color?: string | null;
+    grade_green_pct?: number;
+    grade_blue_pct?: number;
+    grade_grey_pct?: number;
   } | undefined;
   if (!row) return null;
   const inboundTransports = parseTransportJson(row.inbound_transports_json);
@@ -144,7 +156,10 @@ export function getCustomerById(id: string): Customer | null {
     outboundRoundtripHours: row.outbound_roundtrip_hours ?? 0,
     timeSharedMinBand: row.time_shared_min_band ?? 0,
     timeSharedDuration: row.time_shared_duration ?? 24,
-    chartColor: row.chart_color ?? null
+    chartColor: row.chart_color ?? null,
+    gradeGreenPct: row.grade_green_pct ?? 0,
+    gradeBluePct: row.grade_blue_pct ?? 0,
+    gradeGreyPct: row.grade_grey_pct ?? 0
   };
 }
 
@@ -173,7 +188,10 @@ export function updateCustomer(customer: Customer): Customer {
       outbound_transports_json = ?,
       time_shared_min_band = ?,
       time_shared_duration = ?,
-      chart_color = ?
+      chart_color = ?,
+      grade_green_pct = ?,
+      grade_blue_pct = ?,
+      grade_grey_pct = ?
     WHERE id = ?
   `);
   stmt.run(
@@ -195,6 +213,9 @@ export function updateCustomer(customer: Customer): Customer {
     customer.timeSharedMinBand ?? 0,
     customer.timeSharedDuration ?? 24,
     customer.chartColor ?? null,
+    customer.gradeGreenPct ?? 0,
+    customer.gradeBluePct ?? 0,
+    customer.gradeGreyPct ?? 0,
     customer.id
   );
   return customer;

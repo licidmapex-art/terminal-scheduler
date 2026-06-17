@@ -7,12 +7,16 @@ import { getDatabase } from "./database";
 import { getAllCustomers, createCustomer } from "./customers";
 import { getAllResources, createResource } from "./resources";
 import {
+  getAllTransportPools,
+  createTransportPool
+} from "./transportPools";
+import {
   getAllSimulationConfigs,
   createSimulationConfig,
   updateSimulationConfig,
   normalizeStorageMode
 } from "./simulationConfigs";
-import type { Customer, Resource, SimulationConfig } from "../types";
+import type { Customer, Resource, SimulationConfig, TransportPool } from "../types";
 
 const DATA_VERSION = 1;
 
@@ -41,6 +45,14 @@ interface ScenarioPayload {
   v: number;
   customers: Customer[];
   resources: SerializedResource[];
+  transportPools?: Array<{
+    id: string;
+    name: string;
+    mode?: string;
+    roundtripHours?: number;
+    meps?: number;
+    inventoryAllocation?: string;
+  }>;
   config: {
     startDate: string;
     endDate: string;
@@ -59,9 +71,17 @@ interface ScenarioPayload {
     tankCount?: number;
     tankCapacity?: number;
     sharedInventoryCustomerDeficitLimitTonnes?: number;
+    borrowingGradeScope?: "all" | "same_grade" | "selected_grades";
+    selectedBorrowingGrades?: Array<"green" | "blue" | "grey">;
+    perGradeDeficitLimitTonnes?: Partial<Record<"green" | "blue" | "grey", number>>;
     optimizerRelativeDocMultiplier?: number;
     optimizerRelativeFulfillmentMultiplier?: number;
+    gradeMassBalancingEnabled?: boolean;
+    gradeMassBalanceDeficitMode?: "tonnes" | "percent";
+    gradeMassBalanceDeficitLimitTonnes?: number;
+    gradeMassBalanceDeficitLimitPct?: number;
     bargeBerthAllocation?: "alternate" | "small_only" | "prefer_small";
+    berthReservationMode?: "none" | "window_of_arrival" | "laycan";
   } | null;
 }
 
@@ -76,6 +96,7 @@ export function listScenarios(): ScenarioListRow[] {
 function buildScenarioPayload(): ScenarioPayload {
   const customers = getAllCustomers();
   const resources = getAllResources();
+  const transportPools = getAllTransportPools();
   const configs = getAllSimulationConfigs();
   const cfg = configs[0] ?? null;
 
@@ -93,6 +114,10 @@ function buildScenarioPayload(): ScenarioPayload {
         start: b.start.toISOString(),
         end: b.end.toISOString()
       }))
+    })),
+    transportPools: transportPools.map((p) => ({
+      id: p.id,
+      name: p.name
     })),
     config: cfg
       ? {
@@ -113,9 +138,17 @@ function buildScenarioPayload(): ScenarioPayload {
           tankCapacity: cfg.tankCapacity ?? 7000,
           sharedInventoryCustomerDeficitLimitTonnes:
             cfg.sharedInventoryCustomerDeficitLimitTonnes ?? 0,
+          borrowingGradeScope: cfg.borrowingGradeScope ?? "all",
+          selectedBorrowingGrades: cfg.selectedBorrowingGrades,
+          perGradeDeficitLimitTonnes: cfg.perGradeDeficitLimitTonnes,
           optimizerRelativeDocMultiplier: cfg.optimizerRelativeDocMultiplier ?? 0,
           optimizerRelativeFulfillmentMultiplier: cfg.optimizerRelativeFulfillmentMultiplier ?? 0,
-          bargeBerthAllocation: cfg.bargeBerthAllocation ?? "alternate"
+          gradeMassBalancingEnabled: !!cfg.gradeMassBalancingEnabled,
+          gradeMassBalanceDeficitMode: cfg.gradeMassBalanceDeficitMode ?? "tonnes",
+          gradeMassBalanceDeficitLimitTonnes: cfg.gradeMassBalanceDeficitLimitTonnes ?? 0,
+          gradeMassBalanceDeficitLimitPct: cfg.gradeMassBalanceDeficitLimitPct ?? 0,
+          bargeBerthAllocation: cfg.bargeBerthAllocation ?? "alternate",
+          berthReservationMode: cfg.berthReservationMode ?? "none"
         }
       : null
   };
@@ -150,6 +183,7 @@ function clearOperationalData(db: ReturnType<typeof getDatabase>): void {
   db.exec("DELETE FROM inventory_snapshots");
   db.exec("DELETE FROM blackouts");
   db.exec("DELETE FROM resources");
+  db.exec("DELETE FROM transport_pools");
   db.exec("DELETE FROM customers");
   db.exec("DELETE FROM simulation_configs");
 }
@@ -214,6 +248,13 @@ export function loadScenario(id: string): void {
       createResource(resource);
     }
 
+    for (const p of payload.transportPools ?? []) {
+      createTransportPool({
+        id: p.id,
+        name: p.name
+      });
+    }
+
     if (payload.config) {
       const cfg: SimulationConfig = {
         startDate: new Date(payload.config.startDate),
@@ -265,6 +306,13 @@ export function loadScenario(id: string): void {
             (payload.config as { sharedInventoryMinStockTonnes?: number }).sharedInventoryMinStockTonnes ??
             0
         ),
+        borrowingGradeScope:
+          payload.config.borrowingGradeScope === "same_grade" ||
+          payload.config.borrowingGradeScope === "selected_grades"
+            ? payload.config.borrowingGradeScope
+            : "all",
+        selectedBorrowingGrades: payload.config.selectedBorrowingGrades,
+        perGradeDeficitLimitTonnes: payload.config.perGradeDeficitLimitTonnes,
         optimizerRelativeDocMultiplier: Math.max(
           0,
           Number(payload.config.optimizerRelativeDocMultiplier ?? 0)
@@ -273,11 +321,27 @@ export function loadScenario(id: string): void {
           0,
           Number(payload.config.optimizerRelativeFulfillmentMultiplier ?? 0)
         ),
+        gradeMassBalancingEnabled: !!payload.config.gradeMassBalancingEnabled,
+        gradeMassBalanceDeficitMode:
+          payload.config.gradeMassBalanceDeficitMode === "percent" ? "percent" : "tonnes",
+        gradeMassBalanceDeficitLimitTonnes: Math.max(
+          0,
+          Number(payload.config.gradeMassBalanceDeficitLimitTonnes ?? 0)
+        ),
+        gradeMassBalanceDeficitLimitPct: Math.max(
+          0,
+          Number(payload.config.gradeMassBalanceDeficitLimitPct ?? 0)
+        ),
         bargeBerthAllocation:
           payload.config.bargeBerthAllocation === "small_only" ||
           payload.config.bargeBerthAllocation === "prefer_small"
             ? payload.config.bargeBerthAllocation
-            : "alternate"
+            : "alternate",
+        berthReservationMode:
+          payload.config.berthReservationMode === "window_of_arrival" ||
+          payload.config.berthReservationMode === "laycan"
+            ? payload.config.berthReservationMode
+            : "none"
       };
       const created = createSimulationConfig(cfg);
       updateSimulationConfig(created.id, cfg);

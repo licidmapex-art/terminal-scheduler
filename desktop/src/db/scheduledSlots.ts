@@ -11,6 +11,8 @@ function rowToSlot(r: {
   volume: number;
   start: string;
   end: string;
+  reservation_start?: string | null;
+  reservation_end?: string | null;
   status: string;
   conflict_reason: string | null;
 }): ScheduledSlot {
@@ -24,6 +26,8 @@ function rowToSlot(r: {
     volume: r.volume,
     start: new Date(r.start),
     end: new Date(r.end),
+    reservationStart: r.reservation_start ? new Date(r.reservation_start) : null,
+    reservationEnd: r.reservation_end ? new Date(r.reservation_end) : null,
     status: r.status as ScheduledSlot["status"],
     conflictReason: r.conflict_reason
   };
@@ -32,8 +36,8 @@ function rowToSlot(r: {
 export function createScheduledSlot(slot: ScheduledSlot): ScheduledSlot {
   const db = getDatabase();
   db.prepare(`
-    INSERT INTO scheduled_slots (id, customer_id, resource_id, direction, mode, leg_key, volume, start, end, status, conflict_reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_slots (id, customer_id, resource_id, direction, mode, leg_key, volume, start, end, reservation_start, reservation_end, status, conflict_reason)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     slot.id,
     slot.customerId,
@@ -44,6 +48,8 @@ export function createScheduledSlot(slot: ScheduledSlot): ScheduledSlot {
     slot.volume,
     slot.start.toISOString(),
     slot.end.toISOString(),
+    slot.reservationStart?.toISOString() ?? null,
+    slot.reservationEnd?.toISOString() ?? null,
     slot.status,
     slot.conflictReason
   );
@@ -62,6 +68,8 @@ export function getAllScheduledSlots(): ScheduledSlot[] {
     volume: number;
     start: string;
     end: string;
+    reservation_start?: string | null;
+    reservation_end?: string | null;
     status: string;
     conflict_reason: string | null;
   }>;
@@ -77,10 +85,12 @@ export function getScheduledSlotById(id: string): ScheduledSlot | null {
         resource_id: string;
         direction: string;
         mode: string;
-    leg_key?: string | null;
+        leg_key?: string | null;
         volume: number;
         start: string;
         end: string;
+        reservation_start?: string | null;
+        reservation_end?: string | null;
         status: string;
         conflict_reason: string | null;
       }
@@ -101,6 +111,8 @@ export function updateScheduledSlot(slot: ScheduledSlot): ScheduledSlot {
       volume = ?,
       start = ?,
       end = ?,
+      reservation_start = ?,
+      reservation_end = ?,
       status = ?,
       conflict_reason = ?
     WHERE id = ?
@@ -113,6 +125,8 @@ export function updateScheduledSlot(slot: ScheduledSlot): ScheduledSlot {
     slot.volume,
     slot.start.toISOString(),
     slot.end.toISOString(),
+    slot.reservationStart?.toISOString() ?? null,
+    slot.reservationEnd?.toISOString() ?? null,
     slot.status,
     slot.conflictReason,
     slot.id

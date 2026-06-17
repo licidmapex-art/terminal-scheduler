@@ -2,6 +2,9 @@
  * Types for the simulation diagnostic log (built by the hour-by-hour scheduler).
  */
 
+import type { StochasticEvent } from "../types";
+import type { GradeLedgerSnapshot } from "./gradeInventoryLedger";
+
 export type TransportModeStatus = {
   customerName: string;
   customerId: string;
@@ -31,11 +34,11 @@ export type TransportModeStatus = {
   daysOfCover?: number | null;
   /** Optimizer metric at hour start using relevant inventory context (terminal for shared modes, customer otherwise). `null` when infinite. */
   optimizerDaysOfCover?: number | null;
-  /** Annual target fulfilment ratio (slots ÷ target) at hour start; lower = tried earlier in pooled legs. */
+  /** Mass fulfilment ratio (tonnes delivered ÷ leg target tonnes) at hour start; lower = tried earlier in pooled legs. */
   fulfillmentRatio?: number | null;
   /** Hours since this leg's last slot start (sim start if none yet); higher = tried earlier when other metrics tie. */
   hoursSinceLastSlot?: number | null;
-  /** Direction+mode pool average fulfilment at hour start (shared pools only). */
+  /** Direction+mode pool average mass fulfilment at hour start (shared pools only). */
   poolFulfillmentAvg?: number | null;
 
   slotId?: string;
@@ -47,6 +50,8 @@ export interface SimulationLogRow {
   hour: number;
   datetime: string;
   customerInventories: Record<string, number>;
+  /** Per-customer attributed green/blue/grey stock (shared mode grade ledger). */
+  customerGradeInventories?: GradeLedgerSnapshot;
   terminalTotal: number;
   pipelineFlow: Record<string, number>;
   /** Mean of each customer's tightest leg DoC at this hour (relative optimizer). */
@@ -54,4 +59,6 @@ export interface SimulationLogRow {
   /** Terminal inventory ÷ summed outbound pressure and headroom ÷ summed inbound pressure (min when both). */
   combinedTerminalDaysOfCover?: number | null;
   transportStatus: TransportModeStatus[];
+  /** Stochastic events active during this hour (when replay uses overrides). */
+  stochasticEvents?: StochasticEvent[];
 }

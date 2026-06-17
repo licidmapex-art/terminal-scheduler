@@ -5,7 +5,7 @@
 import * as XLSX from "xlsx";
 import type { Customer, ScheduledSlot, SimulationConfig } from "../types";
 import type { SimulationLogRow } from "./simulationLog";
-import { laytimeFromConfig, getCargoWindowMs, hourOverlapsIntervalMs } from "./slotLaytime";
+import { laytimeFromConfig, getCargoWindowMs, cargoTonnesInSimulationHour } from "./slotLaytime";
 import { totalInboundPipelineTph, totalOutboundPipelineTph } from "./pipelineFlows";
 
 const MODES = ["ship", "barge", "train"] as const;
@@ -29,12 +29,12 @@ export function computeHourlyBerthTonnesByBucket(
   for (const slot of slots) {
     const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
     if (loadingHours <= 0) continue;
-    const flowPerHour = slot.volume / loadingHours;
     const key = berthBucketKey(slot.customerId, slot.direction, slot.mode);
     for (let h = 0; h <= maxHourInclusive; h++) {
-      if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
+      const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+      if (tonnes <= 0) continue;
       const rec = out.get(h)!;
-      rec[key] = (rec[key] ?? 0) + flowPerHour;
+      rec[key] = (rec[key] ?? 0) + tonnes;
     }
   }
   return out;

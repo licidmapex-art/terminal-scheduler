@@ -90,4 +90,36 @@ describe("tallyBerthTonnesByCustomerFromSlots", () => {
     const m = tallyBerthTonnesByCustomerFromSlots([outbound, inbound], config, 24);
     expect(m.get("c1")).toEqual({ inbound: 3000, outbound: 5000 });
   });
+
+  it("berth tally matches sum of slot volumes when cargo windows are misaligned to hours", () => {
+    const start = new Date("2025-01-01T00:00:00.000Z");
+    const config: SimulationConfig = {
+      startDate: start,
+      endDate: new Date("2025-01-05T00:00:00.000Z"),
+      pipelineFlowRate: 0,
+      pipelineDirection: "inbound",
+      totalStorageCapacity: 100000,
+      storageMode: "fixed_band",
+      sharedInventoryCustomerDeficitLimitTonnes: 0,
+      minSlotIntervalHours: 0,
+      preOpsHours: 0,
+      postOpsHours: 0,
+      tankCount: 4,
+      tankCapacity: 7000
+    };
+    const inbound: ScheduledSlot = {
+      id: "s1",
+      customerId: "c1",
+      resourceId: "r1",
+      direction: "inbound",
+      mode: "ship",
+      volume: 1000,
+      start: new Date(start.getTime() + 0.5 * 3600 * 1000),
+      end: new Date(start.getTime() + 4.5 * 3600 * 1000),
+      status: "scheduled",
+      conflictReason: null
+    };
+    const m = tallyBerthTonnesByCustomerFromSlots([inbound], config, 24);
+    expect(m.get("c1")?.inbound).toBeCloseTo(1000, 5);
+  });
 });

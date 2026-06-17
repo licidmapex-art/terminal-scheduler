@@ -4,7 +4,7 @@
  * The save/load buttons in App.tsx persist this state to a JSON file.
  */
 
-import type { Customer, Resource, SimulationConfig, StorageMode } from "../types";
+import type { Customer, Resource, SimulationConfig, StorageMode, TransportPool } from "../types";
 
 const STORAGE_MODES: readonly StorageMode[] = [
   "fixed_band",
@@ -33,6 +33,7 @@ export interface AppSnapshot {
     flowRate: number;
     blackouts: Array<{ id: string; resourceId: string; start: string; end: string }>;
   }>;
+  transportPools?: TransportPool[];
   simulationConfigs: Array<SimulationConfigRow & { startDate: string; endDate: string }>;
 }
 
@@ -43,6 +44,7 @@ const uuid = () => globalThis.crypto.randomUUID();
 export const _store = {
   customers: [] as Customer[],
   resources: [] as Resource[],
+  transportPools: [] as TransportPool[],
   simulationConfigs: [] as SimulationConfigRow[]
 };
 
@@ -92,6 +94,7 @@ function applySnapshotToStore(snapshot: AppSnapshot): void {
       end: new Date(b.end)
     }))
   }));
+  _store.transportPools = snapshot.transportPools ?? [];
   _store.simulationConfigs = (snapshot.simulationConfigs ?? []).map((c) => ({
     ...c,
     storageMode: normalizeStorageMode(c.storageMode),
@@ -161,6 +164,30 @@ export const browserDbApi = {
     return Promise.resolve();
   },
 
+  getTransportPools: (): Promise<TransportPool[]> =>
+    Promise.resolve([..._store.transportPools]),
+
+  createTransportPool: (p: unknown): Promise<TransportPool> => {
+    const pool = p as TransportPool;
+    _store.transportPools.push(pool);
+    persistStoreToLocalStorage();
+    return Promise.resolve(pool);
+  },
+
+  updateTransportPool: (p: unknown): Promise<TransportPool> => {
+    const pool = p as TransportPool;
+    const idx = _store.transportPools.findIndex((x) => x.id === pool.id);
+    if (idx >= 0) _store.transportPools[idx] = pool;
+    persistStoreToLocalStorage();
+    return Promise.resolve(pool);
+  },
+
+  deleteTransportPool: (id: string): Promise<void> => {
+    _store.transportPools = _store.transportPools.filter((p) => p.id !== id);
+    persistStoreToLocalStorage();
+    return Promise.resolve();
+  },
+
   // ── Simulation configs ─────────────────────────────────────────────────────
 
   getSimulationConfigs: (): Promise<SimulationConfigRow[]> => {
@@ -221,6 +248,7 @@ export function serializeStore(): AppSnapshot {
         end: b.end instanceof Date ? b.end.toISOString() : String(b.end)
       }))
     })),
+    transportPools: _store.transportPools,
     simulationConfigs: _store.simulationConfigs.map((c) => ({
       ...c,
       startDate: c.startDate instanceof Date ? c.startDate.toISOString() : String(c.startDate),

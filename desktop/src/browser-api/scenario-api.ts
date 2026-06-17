@@ -58,6 +58,7 @@ function buildCurrentPayload() {
         end: b.end instanceof Date ? b.end.toISOString() : String(b.end)
       }))
     })),
+    transportPools: _store.transportPools,
     config: _store.simulationConfigs[0]
       ? {
           ...(_store.simulationConfigs[0] as SimulationConfig & { id: string }),
@@ -83,6 +84,7 @@ function applyPayloadToStore(payload: {
     flowRate: number;
     blackouts: Array<{ id: string; resourceId: string; start: string; end: string }>;
   }>;
+  transportPools?: import("../types").TransportPool[];
   config: (SimulationConfig & { startDate: string; endDate: string; id?: string }) | null;
 }): void {
   _store.customers = payload.customers ?? [];
@@ -98,6 +100,8 @@ function applyPayloadToStore(payload: {
       end: new Date(b.end)
     }))
   }));
+
+  _store.transportPools = payload.transportPools ?? [];
 
   if (payload.config) {
     const cfg = payload.config;

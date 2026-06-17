@@ -10,9 +10,11 @@ interface ScenarioRow {
 
 interface ScenarioManagerProps {
   onScenarioLoaded?: () => void;
+  /** Omit card header when the page already has a title. */
+  hideHeader?: boolean;
 }
 
-export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerProps) {
+export default function ScenarioManager({ onScenarioLoaded, hideHeader }: ScenarioManagerProps) {
   const [rows, setRows] = useState<ScenarioRow[]>([]);
   const [saveName, setSaveName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -130,23 +132,25 @@ export default function ScenarioManager({ onScenarioLoaded }: ScenarioManagerPro
 
   return (
     <div className="card config-section" style={{ marginBottom: 24 }}>
-      <div className="config-section-header">
-        <span className="config-section-num">0</span>
-        <div>
-          <div className="config-section-title-row">
-            <div className="config-section-title">Scenarios</div>
-            <HelpPopover
-              label="Scenarios help"
-              content={
-                <>
-                  Save a snapshot of customers, resources, and terminal configuration. Loading replaces all of those
-                  in the database (scheduled slots and run results are cleared); run the scheduler again after loading.
-                </>
-              }
-            />
+      {!hideHeader && (
+        <div className="config-section-header">
+          <span className="config-section-num">0</span>
+          <div>
+            <div className="config-section-title-row">
+              <div className="config-section-title">Scenarios</div>
+              <HelpPopover
+                label="Scenarios help"
+                content={
+                  <>
+                    Save a snapshot of customers, resources, and terminal configuration. Loading replaces all of those
+                    in the database (scheduled slots and run results are cleared); run the scheduler again after loading.
+                  </>
+                }
+              />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {error && <div className="alert alert-error" style={{ marginBottom: 16 }}>{error}</div>}
 

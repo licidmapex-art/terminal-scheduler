@@ -17,5 +17,5 @@ export function computeStorageShareFromThroughput(
 }
 
 export function storageShareAppliesToCapacityBand(storageMode: string | undefined): boolean {
-  return storageMode === "fixed_band" || storageMode === "time_shared_storage";
+  return storageMode === "fixed_band";
 }

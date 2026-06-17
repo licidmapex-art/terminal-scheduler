@@ -42,6 +42,7 @@ export function runMigrations(database: Database.Database): void {
       resource_id TEXT NOT NULL,
       direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
       mode TEXT NOT NULL CHECK (mode IN ('ship', 'barge', 'train')),
+      grade TEXT CHECK (grade IN ('green', 'blue')),
       leg_key TEXT,
       volume REAL NOT NULL,
       start TEXT NOT NULL,
@@ -63,7 +64,9 @@ export function runMigrations(database: Database.Database): void {
       pacer_rounding_direction TEXT NOT NULL DEFAULT 'up' CHECK (pacer_rounding_direction IN ('up', 'down')),
       pacer_round_at_decile INTEGER NOT NULL DEFAULT 1,
       optimizer_min_days_of_cover REAL NOT NULL DEFAULT 0,
-      optimizer_relative_doc_multiplier REAL NOT NULL DEFAULT 0
+      optimizer_relative_doc_multiplier REAL NOT NULL DEFAULT 0,
+      grade_mass_balancing_enabled INTEGER NOT NULL DEFAULT 0,
+      grade_mass_balance_deficit_limit_tonnes REAL NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS inventory_snapshots (
@@ -84,6 +87,16 @@ export function runMigrations(database: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_blackouts_resource_id ON blackouts(resource_id);
     CREATE INDEX IF NOT EXISTS idx_scheduled_slots_resource_id ON scheduled_slots(resource_id);
+
+    CREATE TABLE IF NOT EXISTS transport_pools (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK (mode IN ('ship', 'barge', 'train')),
+      roundtrip_hours REAL NOT NULL DEFAULT 0,
+      meps REAL NOT NULL DEFAULT 0,
+      inventory_allocation TEXT NOT NULL DEFAULT 'attributed'
+        CHECK (inventory_allocation IN ('attributed', 'proportional'))
+    );
     CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_customer_timestamp ON inventory_snapshots(customer_id, timestamp);
   `);
 
@@ -220,6 +233,31 @@ export function runMigrations(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Feasibility warning settings (JSON)
+  try {
+    database.exec("ALTER TABLE simulation_configs ADD COLUMN feasibility_warnings_json TEXT");
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN borrowing_grade_scope TEXT NOT NULL DEFAULT 'all'"
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec("ALTER TABLE simulation_configs ADD COLUMN selected_borrowing_grades_json TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec("ALTER TABLE simulation_configs ADD COLUMN per_grade_deficit_limit_json TEXT");
+  } catch {
+    /* column already exists */
+  }
+
   try {
     database.exec("UPDATE simulation_configs SET storage_mode = 'shared_shipping' WHERE storage_mode = 'commingled'");
   } catch {
@@ -325,8 +363,85 @@ export function runMigrations(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+  try {
+    database.exec("ALTER TABLE scheduled_slots ADD COLUMN grade TEXT CHECK (grade IN ('green', 'blue'))");
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN grade_mass_balancing_enabled INTEGER NOT NULL DEFAULT 0"
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN grade_mass_balance_deficit_limit_tonnes REAL NOT NULL DEFAULT 0"
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN grade_mass_balance_deficit_mode TEXT NOT NULL DEFAULT 'tonnes'"
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN grade_mass_balance_deficit_limit_pct REAL NOT NULL DEFAULT 0"
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec("ALTER TABLE customers ADD COLUMN grade_green_pct REAL NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec("ALTER TABLE customers ADD COLUMN grade_blue_pct REAL NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec("ALTER TABLE customers ADD COLUMN grade_grey_pct REAL NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec("ALTER TABLE simulation_configs ADD COLUMN stochastic_config_json TEXT");
+  } catch {
+    /* column already exists */
+  }
 
   migratePacerInboundOutboundSettings(database);
+  migrateBerthReservation(database);
+}
+
+function migrateBerthReservation(database: Database.Database): void {
+  try {
+    database.exec(
+      "ALTER TABLE simulation_configs ADD COLUMN berth_reservation_mode TEXT NOT NULL DEFAULT 'none'"
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec("ALTER TABLE scheduled_slots ADD COLUMN reservation_start TEXT");
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec("ALTER TABLE scheduled_slots ADD COLUMN reservation_end TEXT");
+  } catch {
+    /* column already exists */
+  }
 }
 
 function migratePacerInboundOutboundSettings(database: Database.Database): void {
@@ -513,6 +628,7 @@ function migrateScheduledSlotsDropRequests(database: Database.Database): void {
         resource_id TEXT NOT NULL,
         direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
         mode TEXT NOT NULL CHECK (mode IN ('ship', 'barge', 'train')),
+        grade TEXT CHECK (grade IN ('green', 'blue')),
         leg_key TEXT,
         volume REAL NOT NULL,
         start TEXT NOT NULL,
@@ -524,10 +640,11 @@ function migrateScheduledSlotsDropRequests(database: Database.Database): void {
       );
     `);
     database.exec(`
-      INSERT INTO scheduled_slots_v3 (id, customer_id, resource_id, direction, mode, leg_key, volume, start, end, status, conflict_reason)
+      INSERT INTO scheduled_slots_v3 (id, customer_id, resource_id, direction, mode, grade, leg_key, volume, start, end, status, conflict_reason)
       SELECT s.id, s.customer_id, s.resource_id,
         COALESCE(tr.direction, 'inbound'),
         COALESCE(tr.mode, 'ship'),
+        NULL,
         NULL,
         COALESCE(tr.volume, 0),
         s.start, s.end,

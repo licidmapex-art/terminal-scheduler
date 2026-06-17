@@ -14,19 +14,20 @@ function makeLeg(
   customer: Customer,
   direction: "inbound" | "outbound",
   targetSlots: number,
-  slotsScheduled = 0
-): { leg: SchedulingLeg; slotsScheduled: number } {
+  scheduledMassTonnes = 0,
+  meps = 150
+): { leg: SchedulingLeg; scheduledMassTonnes: number } {
   return {
     leg: {
       customer,
       direction,
       mode: "ship",
       laneKey: `${direction}-ship-1`,
-      meps: 150,
+      meps,
       targetSlots,
       roundtripHours: 0
     },
-    slotsScheduled
+    scheduledMassTonnes
   };
 }
 
@@ -54,32 +55,48 @@ describe("compareSchedulingLegs", () => {
   };
 
   it("prefers the customer further behind their target in shared shipping", () => {
-    const { leg: legA, slotsScheduled: slotsA } = makeLeg(alpha, "inbound", 4, 2);
-    const { leg: legB, slotsScheduled: slotsB } = makeLeg(beta, "inbound", 4, 0);
+    const { leg: legA, scheduledMassTonnes: massA } = makeLeg(alpha, "inbound", 4, 300);
+    const { leg: legB, scheduledMassTonnes: massB } = makeLeg(beta, "inbound", 4, 0);
     const cmp = compareSchedulingLegs(
       legB,
       legA,
       Number.POSITIVE_INFINITY,
       Number.POSITIVE_INFINITY,
       true,
-      slotsB,
-      slotsA
+      massB,
+      massA
     );
     expect(cmp).toBeLessThan(0);
   });
 
   it("prefers the customer further behind their target in shared inventory inbound pool", () => {
-    const { leg: legA, slotsScheduled: slotsA } = makeLeg(alpha, "inbound", 4, 2);
-    const { leg: legB, slotsScheduled: slotsB } = makeLeg(beta, "inbound", 4, 0);
+    const { leg: legA, scheduledMassTonnes: massA } = makeLeg(alpha, "inbound", 4, 300);
+    const { leg: legB, scheduledMassTonnes: massB } = makeLeg(beta, "inbound", 4, 0);
     const cmp = compareSchedulingLegs(
       legB,
       legA,
       Number.POSITIVE_INFINITY,
       Number.POSITIVE_INFINITY,
       false,
-      slotsB,
-      slotsA,
+      massB,
+      massA,
       true
+    );
+    expect(cmp).toBeLessThan(0);
+  });
+
+  it("uses delivered tonnes not slot count when parcel sizes differ", () => {
+    const { leg: legA } = makeLeg(alpha, "inbound", 2, 0, 1000);
+    const { leg: legB } = makeLeg(beta, "inbound", 4, 500, 500);
+    // A: 0 / 2000t = 0%; B: 500 / 2000t = 25% — A is more under-delivered despite B having a slot.
+    const cmp = compareSchedulingLegs(
+      legA,
+      legB,
+      Number.POSITIVE_INFINITY,
+      Number.POSITIVE_INFINITY,
+      true,
+      0,
+      500
     );
     expect(cmp).toBeLessThan(0);
   });
@@ -100,10 +117,10 @@ describe("compareSchedulingLegs", () => {
   });
 
   it("negative sort metric overrides fulfilment in shared inventory inbound pool", () => {
-    const { leg: legA, slotsScheduled: slotsA } = makeLeg(alpha, "inbound", 9, 7);
-    const { leg: legB, slotsScheduled: slotsB } = makeLeg(beta, "inbound", 9, 0);
+    const { leg: legA, scheduledMassTonnes: massA } = makeLeg(alpha, "inbound", 9, 1050);
+    const { leg: legB, scheduledMassTonnes: massB } = makeLeg(beta, "inbound", 9, 0);
     // Beta far behind on fulfilment would normally win; Alpha's negative DoC should win instead.
-    const cmp = compareSchedulingLegs(legA, legB, -20, 20, false, slotsA, slotsB, true);
+    const cmp = compareSchedulingLegs(legA, legB, -20, 20, false, massA, massB, true);
     expect(cmp).toBeLessThan(0);
   });
 
@@ -228,7 +245,7 @@ describe("relativeFulfillmentOptimizerShouldYield", () => {
 });
 
 describe("averagePoolFulfillmentRatioAtHour", () => {
-  it("averages fulfilment ratios for legs in the same direction+mode pool", () => {
+  it("averages mass fulfilment ratios for legs in the same direction+mode pool", () => {
     const simStart = new Date("2026-01-01T00:00:00.000Z").getTime();
     const customerA: Customer = {
       id: "c-a",

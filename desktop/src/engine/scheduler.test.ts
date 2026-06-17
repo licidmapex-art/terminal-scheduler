@@ -4,6 +4,8 @@
 
 import { describe, it, expect } from "vitest";
 import { runScheduler } from "./scheduler";
+import { replaySimulation } from "./replaySimulation";
+import { cargoTonnesInSimulationHour, getCargoWindowMs, laytimeFromConfig } from "./slotLaytime";
 import type { Customer, Resource, SimulationConfig } from "../types";
 
 function makeConfig(overrides?: Partial<SimulationConfig>): SimulationConfig {
@@ -1106,6 +1108,72 @@ describe("runScheduler", () => {
     expect(last.terminalTotal).toBe(cap);
   });
 
+  it("shared_inventory: pooled outbound load splits by inventory share across members", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 10000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, inv: number) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 0,
+        currentInventory: inv,
+        storageShare: 50,
+        outboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 10000,
+            roundtripHours: 48,
+            poolId: "pool-ship"
+          }
+        ]
+      });
+    const customers = [mk("a", 60_000), mk("b", 40_000)];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 2000,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig({
+      storageMode: "shared_inventory",
+      totalStorageCapacity: 200_000,
+      sharedInventoryCustomerDeficitLimitTonnes: 0
+    });
+    const result = runScheduler(customers, resources, config, [shipPool]);
+    const simStartMs = new Date(config.startDate).getTime();
+    const { preOps, postOps } = laytimeFromConfig(config);
+
+    for (const slot of result.scheduledSlots.filter(
+      (s) => s.customerId === "a" && s.direction === "outbound"
+    )) {
+      const { cargoStartMs, cargoEndMs } = getCargoWindowMs(slot, preOps, postOps);
+      for (let h = 0; h < result.simulationLog.length; h++) {
+        const tonnes = cargoTonnesInSimulationHour(
+          h,
+          simStartMs,
+          cargoStartMs,
+          cargoEndMs,
+          slot.volume
+        );
+        if (tonnes <= 0) continue;
+        const prevB =
+          result.simulationLog[h > 0 ? h - 1 : 0]?.customerInventories?.b ?? 40_000;
+        const curB = result.simulationLog[h]?.customerInventories?.b ?? 40_000;
+        expect(curB).toBeLessThan(prevB);
+      }
+    }
+  });
+
   it("shared_inventory: booking customer floor −x blocks outbound when attributed stock would breach", () => {
     const baseCustomers: Customer[] = [
       makeCustomer({
@@ -1296,5 +1364,545 @@ describe("runScheduler", () => {
       result.simulationLog.flatMap((r) => r.transportStatus.map((s) => s.legKey).filter(Boolean))
     );
     expect(laneStatusKeys.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("schedules all customers on a shared transport pool (fixed_band)", () => {
+    const trainPool = {
+      id: "pool-train",
+      name: "Train pool",
+      mode: "train" as const,
+      roundtripHours: 12,
+      meps: 1000,
+      inventoryAllocation: "attributed" as const
+    };
+    const customers: Customer[] = ["a", "b", "c", "d"].map((id) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 5000,
+        currentInventory: 2000,
+        storageShare: 25,
+        inboundTransports: [
+          { mode: "train", sharePct: 100, meps: 1000, roundtripHours: 12, poolId: "pool-train" }
+        ]
+      })
+    );
+    const resources: Resource[] = [
+      {
+        id: "rail-1",
+        name: "Rail 1",
+        type: "rail_siding",
+        flowRate: 200,
+        blackouts: []
+      }
+    ];
+    const result = runScheduler(customers, resources, makeConfig(), [trainPool]);
+    const inboundByCustomer = new Map<string, number>();
+    for (const s of result.scheduledSlots) {
+      if (s.direction === "inbound" && s.mode === "train") {
+        inboundByCustomer.set(s.customerId, (inboundByCustomer.get(s.customerId) ?? 0) + 1);
+      }
+    }
+    for (const c of customers) {
+      expect(inboundByCustomer.get(c.id) ?? 0).toBeGreaterThan(0);
+    }
+  });
+
+  it("proportional ship pool: independent roundtrip per customer", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ship fleet",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const customers: Customer[] = ["a", "b", "c", "d"].map((id) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 8000,
+        currentInventory: 2000,
+        storageShare: 25,
+        inboundTransports: [
+          { mode: "ship", sharePct: 100, meps: 2000, roundtripHours: 48, poolId: "pool-ship" }
+        ]
+      })
+    );
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth 1",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const result = runScheduler(customers, resources, makeConfig(), [shipPool]);
+    const firstStartByCustomer = new Map<string, number>();
+    for (const s of result.scheduledSlots) {
+      if (s.direction !== "inbound") continue;
+      const t = new Date(s.start).getTime();
+      const prev = firstStartByCustomer.get(s.customerId);
+      if (prev === undefined || t < prev) firstStartByCustomer.set(s.customerId, t);
+    }
+    expect(firstStartByCustomer.size).toBe(4);
+    const firstStarts = [...firstStartByCustomer.values()].sort((a, b) => a - b);
+    const gapHours = (firstStarts[3]! - firstStarts[0]!) / (60 * 60 * 1000);
+    expect(gapHours).toBeLessThan(48 * 3);
+  });
+
+  it("schedules each inbound transport mode for one customer (fixed_band)", () => {
+    const customers: Customer[] = [
+      makeCustomer({
+        id: "c1",
+        name: "Multi-mode",
+        declaredInboundThroughput: 8000,
+        currentInventory: 1000,
+        storageShare: 100,
+        inboundTransports: [
+          { mode: "ship", sharePct: 25, meps: 1500, roundtripHours: 48 },
+          { mode: "barge", sharePct: 25, meps: 800, roundtripHours: 24 },
+          { mode: "train", sharePct: 25, meps: 900, roundtripHours: 12 },
+          { mode: "barge", sharePct: 25, meps: 700, roundtripHours: 18 }
+        ]
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Large berth",
+        type: "berth_large",
+        flowRate: 200,
+        blackouts: []
+      },
+      {
+        id: "berth-2",
+        name: "Small berth",
+        type: "berth_small",
+        flowRate: 150,
+        blackouts: []
+      },
+      {
+        id: "rail-1",
+        name: "Rail siding",
+        type: "rail_siding",
+        flowRate: 180,
+        blackouts: []
+      }
+    ];
+    const result = runScheduler(customers, resources, makeConfig());
+    const byLegKey = new Map<string, number>();
+    for (const s of result.scheduledSlots) {
+      if (s.direction === "inbound" && s.legKey) {
+        byLegKey.set(s.legKey, (byLegKey.get(s.legKey) ?? 0) + 1);
+      }
+    }
+    const inboundModes = new Set(
+      result.scheduledSlots.filter((s) => s.direction === "inbound").map((s) => s.mode)
+    );
+    expect(inboundModes.has("ship")).toBe(true);
+    expect(inboundModes.has("train")).toBe(true);
+    expect(inboundModes.has("barge")).toBe(true);
+    expect((byLegKey.get("inbound-barge-1") ?? 0) + (byLegKey.get("inbound-barge-2") ?? 0)).toBeGreaterThan(0);
+  });
+
+  it("pool members with equal inventory split berth flows equally", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, inv: number) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 6000,
+        currentInventory: inv,
+        storageShare: 25,
+        outboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 2000,
+            roundtripHours: 48,
+            poolId: "pool-ship"
+          }
+        ]
+      });
+    const customers = [mk("a", 10000), mk("b", 10000)];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig();
+    const result = runScheduler(customers, resources, config, [shipPool]);
+    const simStartMs = new Date(config.startDate).getTime();
+    const { preOps, postOps } = laytimeFromConfig(config);
+
+    for (const slot of result.scheduledSlots.filter(
+      (s) => s.customerId === "a" && s.direction === "outbound"
+    )) {
+      const { cargoStartMs, cargoEndMs } = getCargoWindowMs(slot, preOps, postOps);
+      for (let h = 0; h < result.simulationLog.length; h++) {
+        const tonnes = cargoTonnesInSimulationHour(
+          h,
+          simStartMs,
+          cargoStartMs,
+          cargoEndMs,
+          slot.volume
+        );
+        if (tonnes <= 0) continue;
+        const prevA =
+          result.simulationLog[h > 0 ? h - 1 : 0]?.customerInventories?.a ?? 10000;
+        const prevB =
+          result.simulationLog[h > 0 ? h - 1 : 0]?.customerInventories?.b ?? 10000;
+        const curA = result.simulationLog[h]?.customerInventories?.a ?? 10000;
+        const curB = result.simulationLog[h]?.customerInventories?.b ?? 10000;
+        expect(Math.abs(prevA - curA)).toBeCloseTo(Math.abs(prevB - curB), 0);
+      }
+    }
+  });
+
+  it("proportional pool outbound load draws from all pool members", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, share: number) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 0,
+        currentInventory: 10000,
+        storageShare: share,
+        outboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 2000,
+            roundtripHours: 48,
+            poolId: "pool-ship"
+          }
+        ]
+      });
+    const customers = [mk("a", 50), mk("b", 50)];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig();
+    const result = runScheduler(customers, resources, config, [shipPool]);
+    const simStartMs = new Date(config.startDate).getTime();
+    const { preOps, postOps } = laytimeFromConfig(config);
+
+    for (const slot of result.scheduledSlots.filter(
+      (s) => s.customerId === "a" && s.direction === "outbound"
+    )) {
+      const { cargoStartMs, cargoEndMs } = getCargoWindowMs(slot, preOps, postOps);
+      for (let h = 0; h < result.simulationLog.length; h++) {
+        const tonnes = cargoTonnesInSimulationHour(
+          h,
+          simStartMs,
+          cargoStartMs,
+          cargoEndMs,
+          slot.volume
+        );
+        if (tonnes <= 0) continue;
+        const prevB =
+          result.simulationLog[h > 0 ? h - 1 : 0]?.customerInventories?.b ?? 10000;
+        const curB = result.simulationLog[h]?.customerInventories?.b ?? 10000;
+        expect(curB).toBeLessThan(prevB);
+      }
+    }
+  });
+
+  it("opt-out customer unchanged when another customer's pool slot loads", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, inPool: boolean, share: number) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 8000,
+        currentInventory: 2000,
+        storageShare: share,
+        inboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 2000,
+            roundtripHours: 48,
+            ...(inPool ? { poolId: "pool-ship" } : {})
+          }
+        ]
+      });
+    const poolMembers = [mk("a", true, 40), mk("b", true, 30), mk("c", true, 20)];
+    const basfOut = [...poolMembers, mk("d", false, 10)];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig();
+    const result = runScheduler(basfOut, resources, config, [shipPool]);
+    const simStartMs = new Date(config.startDate).getTime();
+    const { preOps, postOps } = laytimeFromConfig(config);
+    const openingD = 2000;
+
+    for (const slot of result.scheduledSlots.filter(
+      (s) => s.customerId === "a" && s.direction === "inbound"
+    )) {
+      const { cargoStartMs, cargoEndMs } = getCargoWindowMs(slot, preOps, postOps);
+      for (let h = 0; h < result.simulationLog.length; h++) {
+        const tonnes = cargoTonnesInSimulationHour(
+          h,
+          simStartMs,
+          cargoStartMs,
+          cargoEndMs,
+          slot.volume
+        );
+        if (tonnes <= 0) continue;
+        const prevD =
+          result.simulationLog[h > 0 ? h - 1 : 0]?.customerInventories?.d ?? openingD;
+        const curD = result.simulationLog[h]?.customerInventories?.d ?? openingD;
+        expect(curD).toBe(prevD);
+      }
+    }
+  });
+
+  it("opt-out customer gets 100% private attribution; pool members split pro-rata", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, inPool: boolean, share: number) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 8000,
+        currentInventory: 2000,
+        storageShare: share,
+        inboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 2000,
+            roundtripHours: 48,
+            ...(inPool ? { poolId: "pool-ship" } : {})
+          }
+        ]
+      });
+    const allIn = [mk("a", true, 40), mk("b", true, 30), mk("c", true, 20), mk("d", true, 10)];
+    const dOut = [mk("a", true, 40), mk("b", true, 30), mk("c", true, 20), mk("d", false, 10)];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig();
+    const fullPool = runScheduler(allIn, resources, config, [shipPool]);
+    const dOptOut = runScheduler(dOut, resources, config, [shipPool]);
+
+    const dFull = fullPool.inventoryTimeline.get("d") ?? [];
+    const dOutSeries = dOptOut.inventoryTimeline.get("d") ?? [];
+    expect(dFull.some((v, h) => v !== (dOutSeries[h] ?? 0))).toBe(true);
+  });
+
+  it("replay after opt-out updates inventory attribution without re-booking slots", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, inPool: boolean) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 6000,
+        currentInventory: 2500,
+        storageShare: 25,
+        inboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 2000,
+            roundtripHours: 48,
+            ...(inPool ? { poolId: "pool-ship" } : {})
+          }
+        ]
+      });
+    const allIn = ["a", "b", "c", "d"].map((id) => mk(id, true));
+    const dOut = ["a", "b", "c", "d"].map((id) => mk(id, id !== "d"));
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig();
+    const baseline = runScheduler(allIn, resources, config, [shipPool]);
+    const replayed = replaySimulation(dOut, resources, config, baseline.scheduledSlots, [shipPool]);
+
+    expect(replayed.scheduledSlots.map((s) => s.id).sort().join(",")).toBe(
+      baseline.scheduledSlots.map((s) => s.id).sort().join(",")
+    );
+
+    const hour = 60;
+    expect(replayed.inventoryTimeline.get("d")?.[hour] ?? 0).toBeLessThan(
+      baseline.inventoryTimeline.get("d")?.[hour] ?? 0
+    );
+  });
+
+  it("shared_shipping with proportional transport pool: opted-out customer gets no pool share", () => {
+    const shipPool = {
+      id: "pool-ship",
+      name: "Ships",
+      mode: "ship" as const,
+      roundtripHours: 48,
+      meps: 2000,
+      inventoryAllocation: "proportional" as const
+    };
+    const mk = (id: string, inPool: boolean) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 6000,
+        currentInventory: 2000,
+        storageShare: 25,
+        inboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps: 2000,
+            roundtripHours: 48,
+            ...(inPool ? { poolId: "pool-ship" } : {})
+          }
+        ]
+      });
+    const allIn = ["a", "b", "c", "d"].map((id) => mk(id, true));
+    const basfOut = ["a", "b", "c", "d"].map((id) => mk(id, id !== "d"));
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 500,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig({ storageMode: "shared_shipping" });
+    const fullPool = runScheduler(allIn, resources, config, [shipPool]);
+    const basfOptOut = runScheduler(basfOut, resources, config, [shipPool]);
+
+    const hour = 60;
+    expect(basfOptOut.inventoryTimeline.get("d")?.[hour] ?? 0).toBeLessThan(
+      fullPool.inventoryTimeline.get("d")?.[hour] ?? 0
+    );
+  });
+
+  it("pool-only member shares inventory without booking outbound slots", () => {
+    const shipClub = { id: "club-ship", name: "Ship club" };
+    const mkShip = (id: string, inv: number, meps: number, poolId: string | null) =>
+      makeCustomer({
+        id,
+        name: id.toUpperCase(),
+        declaredInboundThroughput: 500_000,
+        currentInventory: inv,
+        storageShare: 50,
+        outboundMEPS: meps,
+        outboundMode: "ship",
+        outboundTransports: [
+          {
+            mode: "ship",
+            sharePct: 100,
+            meps,
+            roundtripHours: 48,
+            poolId
+          }
+        ]
+      });
+    const withPoolOnly = [
+      mkShip("a", 60_000, 10_000, "club-ship"),
+      makeCustomer({
+        id: "b",
+        name: "B",
+        declaredInboundThroughput: 0,
+        currentInventory: 40_000,
+        storageShare: 50,
+        outboundMEPS: 0,
+        outboundTransports: [
+          { mode: "pool", sharePct: 0, meps: 0, roundtripHours: 0, poolId: "club-ship" }
+        ]
+      })
+    ];
+    const resources: Resource[] = [
+      {
+        id: "berth-1",
+        name: "Berth",
+        type: "berth_large",
+        flowRate: 2000,
+        blackouts: []
+      }
+    ];
+    const config = makeConfig({ storageMode: "shared_inventory", totalStorageCapacity: 200_000 });
+    const result = runScheduler(withPoolOnly, resources, config, [shipClub]);
+    expect(result.scheduledSlots.some((s) => s.direction === "outbound")).toBe(true);
+    expect(result.scheduledSlots.every((s) => s.customerId === "a")).toBe(true);
+    const simStartMs = new Date(config.startDate).getTime();
+    const { preOps, postOps } = laytimeFromConfig(config);
+    let bMoved = false;
+    for (const slot of result.scheduledSlots.filter((s) => s.direction === "outbound")) {
+      const { cargoStartMs, cargoEndMs } = getCargoWindowMs(slot, preOps, postOps);
+      for (let h = 0; h < result.simulationLog.length; h++) {
+        const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+        if (tonnes <= 0) continue;
+        const prevB = result.simulationLog[h > 0 ? h - 1 : 0]?.customerInventories?.b ?? 40_000;
+        const curB = result.simulationLog[h]?.customerInventories?.b ?? 40_000;
+        if (curB < prevB) bMoved = true;
+      }
+    }
+    expect(bMoved).toBe(true);
   });
 });

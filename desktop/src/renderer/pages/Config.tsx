@@ -1,12 +1,8 @@
-import { useState } from "react";
 import SimulationConfigForm from "../components/SimulationConfigForm";
-import ScenarioManager from "../components/ScenarioManager";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { PageTitleWithHelp } from "../components/HelpPopover";
 
 export default function Config() {
-  const [configFormKey, setConfigFormKey] = useState(0);
-
   return (
     <ErrorBoundary>
       <div>
@@ -19,8 +15,7 @@ export default function Config() {
           </div>
         </div>
 
-        <ScenarioManager onScenarioLoaded={() => setConfigFormKey((k) => k + 1)} />
-        <SimulationConfigForm key={configFormKey} />
+        <SimulationConfigForm />
       </div>
     </ErrorBoundary>
   );

@@ -5,7 +5,6 @@ import { HelpPopover } from "./HelpPopover";
 export default function TankFarmPanel() {
   const location = useLocation();
   const [totalStorageCapacity, setTotalStorageCapacity] = useState("100000");
-  const [tankCapacity, setTankCapacity] = useState("7000");
   const [configId, setConfigId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -23,8 +22,6 @@ export default function TankFarmPanel() {
     }
     setConfigId(typeof c.id === "string" ? c.id : null);
     setTotalStorageCapacity(String(Number(c.totalStorageCapacity ?? 100000)));
-    const cap = c.tankCapacity;
-    setTankCapacity(String(typeof cap === "number" && cap > 0 ? cap : 7000));
   }, []);
 
   useEffect(() => {
@@ -39,13 +36,8 @@ export default function TankFarmPanel() {
       return;
     }
     const totalCap = parseFloat(totalStorageCapacity);
-    const capacity = parseFloat(tankCapacity);
     if (isNaN(totalCap) || totalCap <= 0) {
       setError("Total storage capacity must be a positive number");
-      return;
-    }
-    if (isNaN(capacity) || capacity <= 0) {
-      setError("Tank capacity must be a positive number");
       return;
     }
     setBusy(true);
@@ -80,7 +72,8 @@ export default function TankFarmPanel() {
         preOpsHours: Number(c.preOpsHours ?? 0),
         postOpsHours: Number(c.postOpsHours ?? 0),
         tankCount: typeof c.tankCount === "number" && c.tankCount >= 1 ? c.tankCount : 4,
-        tankCapacity: capacity,
+        tankCapacity:
+          typeof c.tankCapacity === "number" && c.tankCapacity > 0 ? c.tankCapacity : 7000,
         bargeBerthAllocation: c.bargeBerthAllocation ?? "alternate"
       });
       setSaved(true);
@@ -93,17 +86,17 @@ export default function TankFarmPanel() {
   };
 
   return (
-    <div className="card" style={{ marginBottom: 24 }}>
+    <div className="card mb-24">
       <div className="card-title-row">
         <div className="card-title" style={{ margin: 0 }}>Storage</div>
         <HelpPopover
           label="Storage help"
-          content="Terminal-wide capacity for scheduling and inventory gates. Per-tank capacity sets the red reference lines on the Simulation schematic."
+          content="Terminal-wide capacity used for scheduling, inventory gates, and feasibility checks."
         />
       </div>
       {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
       <form onSubmit={handleSave} style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" }}>
-        <div className="form-group" style={{ marginBottom: 0, maxWidth: 220 }}>
+        <div className="form-group" style={{ marginBottom: 0, maxWidth: 280 }}>
           <label className="form-label">Total storage capacity (tonnes)</label>
           <input
             type="number"
@@ -116,29 +109,14 @@ export default function TankFarmPanel() {
             required
           />
         </div>
-        <div className="form-group" style={{ marginBottom: 0, maxWidth: 220 }}>
-          <label className="form-label">Tank capacity (tonnes)</label>
-          <input
-            type="number"
-            min={1}
-            step={1}
-            className="form-input"
-            value={tankCapacity}
-            onChange={(e) => setTankCapacity(e.target.value)}
-            disabled={busy || !configId}
-            required
-          />
-        </div>
         <button type="submit" className="btn btn-primary" disabled={busy || !configId}>
           Save
         </button>
-        {saved && (
-          <span style={{ color: "#15803d", fontSize: 14, fontWeight: 500 }}>✓ Saved</span>
-        )}
+        {saved && <span className="form-saved-hint">✓ Saved</span>}
       </form>
       {!configId && (
-        <p className="form-helper" style={{ marginTop: 10, marginBottom: 0 }}>
-          Open Terminal configuration and save once to enable storage settings.
+        <p className="text-muted-sm" style={{ marginTop: 12, marginBottom: 0 }}>
+          Configure the planning horizon under Terminal before setting storage capacity.
         </p>
       )}
     </div>

@@ -159,50 +159,53 @@ export default function Movements() {
 
       <div className="card">
         {slots.length > 0 && (
-          <>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>CUSTOMERS</span>
-              {filterCustomers.map((cust) => (
-                <button
-                  key={cust.id}
-                  type="button"
-                  className={`btn ${activeCustomers.has(cust.id) ? "btn-primary" : "btn-secondary"}`}
-                  style={{ padding: "4px 12px", fontSize: 12 }}
-                  onClick={() => toggleCustomer(cust.id)}
-                >
-                  {cust.name}
-                </button>
-              ))}
+          <div className="filter-toolbar">
+            <div className="filter-toolbar-group">
+              <span className="filter-toolbar-label">Customers</span>
+              <div className="filter-toolbar-toggles">
+                {filterCustomers.map((cust) => (
+                  <button
+                    key={cust.id}
+                    type="button"
+                    className={`metric-toggle${activeCustomers.has(cust.id) ? " metric-toggle--on" : ""}`}
+                    onClick={() => toggleCustomer(cust.id)}
+                  >
+                    {cust.name}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>MOVES</span>
-              {availableMoves.map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`btn ${activeMoves.has(key) ? "btn-primary" : "btn-secondary"}`}
-                  style={{ padding: "4px 12px", fontSize: 12 }}
-                  onClick={() => toggleMove(key)}
-                >
-                  {formatDirectionModeLabel(key)}
-                </button>
-              ))}
+            <div className="filter-toolbar-group">
+              <span className="filter-toolbar-label">Moves</span>
+              <div className="filter-toolbar-toggles">
+                {availableMoves.map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`metric-toggle${activeMoves.has(key) ? " metric-toggle--on" : ""}`}
+                    onClick={() => toggleMove(key)}
+                  >
+                    {formatDirectionModeLabel(key)}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>RESOURCES</span>
-              {availableResources.map((res) => (
-                <button
-                  key={res.id}
-                  type="button"
-                  className={`btn ${activeResources.has(res.id) ? "btn-primary" : "btn-secondary"}`}
-                  style={{ padding: "4px 12px", fontSize: 12 }}
-                  onClick={() => toggleResource(res.id)}
-                >
-                  {res.name}
-                </button>
-              ))}
+            <div className="filter-toolbar-group">
+              <span className="filter-toolbar-label">Resources</span>
+              <div className="filter-toolbar-toggles">
+                {availableResources.map((res) => (
+                  <button
+                    key={res.id}
+                    type="button"
+                    className={`metric-toggle${activeResources.has(res.id) ? " metric-toggle--on" : ""}`}
+                    onClick={() => toggleResource(res.id)}
+                  >
+                    {res.name}
+                  </button>
+                ))}
+              </div>
             </div>
-          </>
+          </div>
         )}
         <MovementsTable
           slots={filteredSlots}

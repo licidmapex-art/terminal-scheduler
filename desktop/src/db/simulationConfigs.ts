@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { getDatabase } from "./database";
-import type { SimulationConfig, StorageMode } from "../types";
+import type { SimulationConfig, StorageMode, SustainabilityGrade, StochasticConfig } from "../types";
 import { normalizeBargeBerthAllocation } from "../engine/resourceAllocation";
 
 const STORAGE_MODES: readonly StorageMode[] = [
@@ -19,6 +19,12 @@ export function normalizeStorageMode(raw: string | undefined): StorageMode {
 
 export interface SimulationConfigRow extends SimulationConfig {
   id: string;
+}
+
+/** Strip DB id — use for scheduler / replay (always includes stochasticConfig when stored). */
+export function simulationConfigFromRow(row: SimulationConfigRow): SimulationConfig {
+  const { id: _id, ...config } = row;
+  return config;
 }
 
 function normalizePacerDecile(raw: number | undefined, fallback = 1): number {
@@ -53,6 +59,68 @@ function pacerFieldsFromRow(r: {
   };
 }
 
+function normalizeDeficitMode(raw: string | undefined): "tonnes" | "percent" {
+  return raw === "percent" ? "percent" : "tonnes";
+}
+
+function normalizeBerthReservationMode(
+  raw: string | undefined
+): SimulationConfig["berthReservationMode"] {
+  if (raw === "window_of_arrival" || raw === "laycan") return raw;
+  return "none";
+}
+
+function normalizeBorrowingGradeScope(
+  raw: string | undefined
+): SimulationConfig["borrowingGradeScope"] {
+  if (raw === "same_grade" || raw === "selected_grades") return raw;
+  return "all";
+}
+
+function parseSelectedBorrowingGrades(
+  json: string | null | undefined
+): SustainabilityGrade[] | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.filter(
+      (g): g is SustainabilityGrade => g === "green" || g === "blue" || g === "grey"
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function parsePerGradeDeficitLimits(
+  json: string | null | undefined
+): Partial<Record<SustainabilityGrade, number>> | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const out: Partial<Record<SustainabilityGrade, number>> = {};
+    for (const g of ["green", "blue", "grey"] as const) {
+      const v = parsed[g];
+      if (typeof v === "number" && Number.isFinite(v)) out[g] = Math.max(0, v);
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseStochasticConfig(json: string | null | undefined): StochasticConfig | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return parsed as StochasticConfig;
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToConfig(r: {
   id: string;
   start_date: string;
@@ -74,7 +142,17 @@ function rowToConfig(r: {
   pacer_round_at_decile?: number;
   optimizer_relative_doc_multiplier?: number;
   optimizer_relative_fulfillment_multiplier?: number;
+  grade_mass_balancing_enabled?: number;
+  grade_mass_balance_deficit_limit_tonnes?: number;
+  grade_mass_balance_deficit_mode?: string;
+  grade_mass_balance_deficit_limit_pct?: number;
   barge_berth_allocation?: string;
+  berth_reservation_mode?: string;
+  feasibility_warnings_json?: string | null;
+  borrowing_grade_scope?: string;
+  selected_borrowing_grades_json?: string | null;
+  per_grade_deficit_limit_json?: string | null;
+  stochastic_config_json?: string | null;
 }): SimulationConfigRow {
   const optimizerRelativeDocMultiplier = Math.max(
     0,
@@ -100,11 +178,32 @@ function rowToConfig(r: {
     ...pacerFieldsFromRow(r),
     optimizerRelativeDocMultiplier,
     optimizerRelativeFulfillmentMultiplier,
+    gradeMassBalancingEnabled: !!r.grade_mass_balancing_enabled,
+    gradeMassBalanceDeficitMode: normalizeDeficitMode(r.grade_mass_balance_deficit_mode),
+    gradeMassBalanceDeficitLimitTonnes: Math.max(
+      0,
+      Number(r.grade_mass_balance_deficit_limit_tonnes ?? 0)
+    ),
+    gradeMassBalanceDeficitLimitPct: Math.max(0, Number(r.grade_mass_balance_deficit_limit_pct ?? 0)),
     preOpsHours: r.pre_ops_hours ?? 0,
     postOpsHours: r.post_ops_hours ?? 0,
     tankCount: r.tank_count ?? 4,
     tankCapacity: r.tank_capacity ?? 7000,
-    bargeBerthAllocation: normalizeBargeBerthAllocation(r.barge_berth_allocation)
+    bargeBerthAllocation: normalizeBargeBerthAllocation(r.barge_berth_allocation),
+    berthReservationMode: normalizeBerthReservationMode(r.berth_reservation_mode),
+    feasibilityWarnings: (() => {
+      if (!r.feasibility_warnings_json) return undefined;
+      try {
+        const parsed = JSON.parse(r.feasibility_warnings_json) as unknown;
+        return (parsed && typeof parsed === "object") ? (parsed as SimulationConfig["feasibilityWarnings"]) : undefined;
+      } catch {
+        return undefined;
+      }
+    })(),
+    borrowingGradeScope: normalizeBorrowingGradeScope(r.borrowing_grade_scope),
+    selectedBorrowingGrades: parseSelectedBorrowingGrades(r.selected_borrowing_grades_json),
+    perGradeDeficitLimitTonnes: parsePerGradeDeficitLimits(r.per_grade_deficit_limit_json),
+    stochasticConfig: parseStochasticConfig(r.stochastic_config_json)
   };
 }
 
@@ -138,9 +237,14 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
       pacer_inbound_round_at_decile, pacer_inbound_allowance,
       pacer_outbound_round_at_decile, pacer_outbound_allowance,
       optimizer_relative_doc_multiplier, optimizer_relative_fulfillment_multiplier,
-      min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation
+      grade_mass_balancing_enabled, grade_mass_balance_deficit_limit_tonnes,
+      grade_mass_balance_deficit_mode, grade_mass_balance_deficit_limit_pct,
+      min_slot_interval_hours, pre_ops_hours, post_ops_hours, tank_count, tank_capacity, barge_berth_allocation,
+      berth_reservation_mode, feasibility_warnings_json,
+      borrowing_grade_scope, selected_borrowing_grades_json, per_grade_deficit_limit_json,
+      stochastic_config_json
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     config.startDate.toISOString(),
@@ -158,12 +262,26 @@ export function createSimulationConfig(config: SimulationConfig): SimulationConf
     pacer.outboundAllowance,
     optimizerRelativeDocMultiplier,
     optimizerRelativeFulfillmentMultiplier,
+    config.gradeMassBalancingEnabled ? 1 : 0,
+    Math.max(0, config.gradeMassBalanceDeficitLimitTonnes ?? 0),
+    normalizeDeficitMode(config.gradeMassBalanceDeficitMode),
+    Math.max(0, config.gradeMassBalanceDeficitLimitPct ?? 0),
     config.minSlotIntervalHours ?? 0,
     config.preOpsHours ?? 0,
     config.postOpsHours ?? 0,
     config.tankCount ?? 4,
     config.tankCapacity ?? 7000,
-    normalizeBargeBerthAllocation(config.bargeBerthAllocation)
+    normalizeBargeBerthAllocation(config.bargeBerthAllocation),
+    normalizeBerthReservationMode(config.berthReservationMode),
+    config.feasibilityWarnings ? JSON.stringify(config.feasibilityWarnings) : null,
+    normalizeBorrowingGradeScope(config.borrowingGradeScope),
+    config.selectedBorrowingGrades?.length
+      ? JSON.stringify(config.selectedBorrowingGrades)
+      : null,
+    config.perGradeDeficitLimitTonnes
+      ? JSON.stringify(config.perGradeDeficitLimitTonnes)
+      : null,
+    config.stochasticConfig ? JSON.stringify(config.stochasticConfig) : null
   );
   return { ...config, id };
 }
@@ -191,6 +309,8 @@ export function getAllSimulationConfigs(): SimulationConfigRow[] {
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
     optimizer_relative_fulfillment_multiplier?: number;
+    grade_mass_balancing_enabled?: number;
+    grade_mass_balance_deficit_limit_tonnes?: number;
     barge_berth_allocation?: string;
   }>;
   return rows.map(rowToConfig);
@@ -219,6 +339,8 @@ export function getSimulationConfigById(id: string): SimulationConfigRow | null 
     pacer_round_at_decile?: number;
     optimizer_relative_doc_multiplier?: number;
     optimizer_relative_fulfillment_multiplier?: number;
+    grade_mass_balancing_enabled?: number;
+    grade_mass_balance_deficit_limit_tonnes?: number;
     barge_berth_allocation?: string;
   } | undefined;
   if (!row) return null;
@@ -253,12 +375,22 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
       pacer_outbound_allowance = ?,
       optimizer_relative_doc_multiplier = ?,
       optimizer_relative_fulfillment_multiplier = ?,
+      grade_mass_balancing_enabled = ?,
+      grade_mass_balance_deficit_limit_tonnes = ?,
+      grade_mass_balance_deficit_mode = ?,
+      grade_mass_balance_deficit_limit_pct = ?,
       min_slot_interval_hours = ?,
       pre_ops_hours = ?,
       post_ops_hours = ?,
       tank_count = ?,
       tank_capacity = ?,
-      barge_berth_allocation = ?
+      barge_berth_allocation = ?,
+      berth_reservation_mode = ?,
+      feasibility_warnings_json = ?,
+      borrowing_grade_scope = ?,
+      selected_borrowing_grades_json = ?,
+      per_grade_deficit_limit_json = ?,
+      stochastic_config_json = ?
     WHERE id = ?
   `).run(
     config.startDate.toISOString(),
@@ -276,12 +408,26 @@ export function updateSimulationConfig(id: string, config: SimulationConfig): Si
     pacer.outboundAllowance,
     optimizerRelativeDocMultiplier,
     optimizerRelativeFulfillmentMultiplier,
+    config.gradeMassBalancingEnabled ? 1 : 0,
+    Math.max(0, config.gradeMassBalanceDeficitLimitTonnes ?? 0),
+    normalizeDeficitMode(config.gradeMassBalanceDeficitMode),
+    Math.max(0, config.gradeMassBalanceDeficitLimitPct ?? 0),
     config.minSlotIntervalHours ?? 0,
     config.preOpsHours ?? 0,
     config.postOpsHours ?? 0,
     config.tankCount ?? 4,
     config.tankCapacity ?? 7000,
     normalizeBargeBerthAllocation(config.bargeBerthAllocation),
+    normalizeBerthReservationMode(config.berthReservationMode),
+    config.feasibilityWarnings ? JSON.stringify(config.feasibilityWarnings) : null,
+    normalizeBorrowingGradeScope(config.borrowingGradeScope),
+    config.selectedBorrowingGrades?.length
+      ? JSON.stringify(config.selectedBorrowingGrades)
+      : null,
+    config.perGradeDeficitLimitTonnes
+      ? JSON.stringify(config.perGradeDeficitLimitTonnes)
+      : null,
+    config.stochasticConfig ? JSON.stringify(config.stochasticConfig) : null,
     id
   );
   return { ...config, id };

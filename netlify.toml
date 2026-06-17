@@ -7,6 +7,10 @@
   ELECTRON_SKIP_BINARY_DOWNLOAD = "1"
   NPM_FLAGS = "--ignore-scripts"
 
+[[edge_functions]]
+  function = "geo-restrict"
+  path = "/*"
+
 [[redirects]]
   from   = "/*"
   to     = "/index-web.html"

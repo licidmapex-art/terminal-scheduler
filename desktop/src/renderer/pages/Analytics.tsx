@@ -19,12 +19,27 @@ import {
   simulationPeriodHoursFloored,
   tallyPipelineTonnesFromSimulationLog,
   tallyRefusedTonnesAtTankExtremes,
-  theoreticalInventoryDeltaWithoutTankClamp,
-  replaySharedShippingTerminalFlowTotals,
-  attributeSharedShippingFlowsForAnalytics
+  theoreticalInventoryDeltaWithoutTankClamp
 } from "../../engine/inventory";
+import {
+  computeQuarterlyGradeMassBalance,
+  type QuarterlyGradeMassBalanceRow
+} from "../../engine/gradeMassBalance";
+import {
+  computeQuarterlyAttributedGradeStock,
+  summarizeGradeLedgerTimeline,
+  type GradeLedgerTimeline
+} from "../../engine/gradeInventoryLedger";
+import GradeMassBalancePanel from "../components/GradeMassBalancePanel";
+import GradeAttributedStockPanel from "../components/GradeAttributedStockPanel";
 import { tallyBerthTonnesByCustomerFromSlots } from "../../engine/simulationExcelExport";
 import { slotBerthOccupationHours } from "../../engine/slotLaytime";
+import { mepsForScheduledSlot } from "../../engine/customerTransports";
+import {
+  reservationMode,
+  slotOperationOccupationHours,
+  slotReservationOccupationHours
+} from "../../engine/berthReservation";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
 import {
@@ -32,6 +47,7 @@ import {
   COMBINED_TERMINAL_ID,
   buildDocTrendByCustomer
 } from "../lib/timelineChartData";
+import { isIndividualStorageMode, isSharedStorageMode, parseStorageMode } from "../../lib/storageMode";
 
 interface Customer {
   id: string;
@@ -82,10 +98,18 @@ interface SimulationConfig {
   pacerInboundAllowance?: number;
   pacerOutboundRoundAtDecile?: number;
   pacerOutboundAllowance?: number;
+  gradeMassBalancingEnabled?: boolean;
+  gradeMassBalanceDeficitMode?: "tonnes" | "percent";
+  gradeMassBalanceDeficitLimitTonnes?: number;
+  gradeMassBalanceDeficitLimitPct?: number;
+  sharedInventoryCustomerDeficitLimitTonnes?: number;
+  borrowingGradeScope?: "all" | "same_grade" | "selected_grades";
+  berthReservationMode?: "none" | "window_of_arrival" | "laycan";
 }
 
 interface InventoryTimelineResponse {
   timeline: Record<string, number[]>;
+  gradeTimeline?: GradeLedgerTimeline | null;
   startDate: string | null;
   totalStorageCapacity?: number | null;
 }
@@ -116,10 +140,12 @@ interface ResourceUtilRow {
   resourceType: string;
   totalSlots: number;
   totalHoursOccupied: number;
+  totalHoursReservation: number;
   /** Mean laytime per visit (pre-ops + loading + post-ops); empty resources use 0. */
   avgHoursPerSlot: number;
   availableHours: number;
   utilizationPct: number;
+  utilizationReservationPct: number;
 }
 
 interface ThroughputCoverageRow {
@@ -271,12 +297,24 @@ function DocSparkline({
   );
 }
 
-function UtilBarCell({ pct }: { pct: number }) {
-  const p = Math.max(0, Math.min(100, pct));
-  const tier = p >= 80 ? "high" : p >= 50 ? "mid" : "low";
+function UtilBarCell({
+  operationPct,
+  reservationPct
+}: {
+  operationPct: number;
+  reservationPct: number;
+}) {
+  const op = Math.max(0, Math.min(100, operationPct));
+  const res = Math.max(op, Math.min(100, reservationPct));
   return (
-    <div className="util-bar-track" style={{ width: 140 }}>
-      <div className={`util-bar-fill util-bar-fill--${tier}`} style={{ width: `${p}%` }} />
+    <div
+      className="util-bar-track"
+      style={{ width: 140 }}
+      title={`Operation ${op}% · Reservation ${res}%`}
+      aria-label={`Operation load ${op} percent, reservation load ${res} percent`}
+    >
+      <div className="util-bar-reservation" style={{ width: `${res}%` }} />
+      <div className="util-bar-operation" style={{ width: `${op}%` }} />
     </div>
   );
 }
@@ -336,7 +374,9 @@ export default function Analytics() {
   const [slots, setSlots] = useState<Slot[]>([]);
   const [resources, setResources] = useState<Resource[]>([]);
   const [config, setConfig] = useState<SimulationConfig | null>(null);
-  const [feasibilityWarnings, setFeasibilityWarnings] = useState<string[]>([]);
+  const [feasibilityWarnings, setFeasibilityWarnings] = useState<
+    Array<{ key: string; severity: "amber" | "red"; message: string }>
+  >([]);
   const [simulationLog, setSimulationLog] = useState<SimulationLogRow[]>([]);
   const lastSchedulerRun = useStore((s) => s.lastSchedulerRun);
 
@@ -358,7 +398,7 @@ export default function Analytics() {
       setResources(Array.isArray(res) ? res : []);
       const configs = Array.isArray(cfg) ? cfg : [];
       setConfig(configs[0] ?? null);
-      setFeasibilityWarnings(Array.isArray(warnings) ? warnings : []);
+      setFeasibilityWarnings(Array.isArray(warnings) ? (warnings as Array<{ key: string; severity: "amber" | "red"; message: string }>) : []);
       setSimulationLog(Array.isArray(log) ? log : []);
     }
     load();
@@ -374,31 +414,10 @@ export default function Analytics() {
     [simulationLog]
   );
 
-  const isSharedShipping = (config?.storageMode ?? "fixed_band") === "shared_shipping";
-
-  const sharedShippingAttributedFlows = useMemo(() => {
-    if (!isSharedShipping || !config || customers.length === 0 || !timelineData?.timeline) {
-      return null;
-    }
-    const engineCustomers = customers as unknown as EngineCustomer[];
-    const engineCfg = config as unknown as EngineSimulationConfig;
-    const totals = replaySharedShippingTerminalFlowTotals(
-      engineCustomers,
-      engineCfg,
-      slots as unknown as ScheduledSlot[]
-    );
-    const timelines = new Map<string, number[]>();
-    for (const [id, series] of Object.entries(timelineData.timeline)) {
-      if (Array.isArray(series)) timelines.set(id, series as number[]);
-    }
-    return attributeSharedShippingFlowsForAnalytics(engineCustomers, timelines, totals);
-  }, [isSharedShipping, config, customers, slots, timelineData]);
-
-  /** Uncapped stock motion (fixed_band only); matches pipeline + slot tonnes when flows reconcile. */
+  /** Uncapped stock motion (Individual mode only); matches pipeline + slot tonnes when flows reconcile. */
   const theoreticalDeltaNoClamp = useMemo(() => {
     if (!config || customers.length === 0) return null;
-    const mode = config.storageMode ?? "fixed_band";
-    if (mode === "shared_shipping" || mode === "time_shared_storage") return null;
+    if (!isIndividualStorageMode(config.storageMode)) return null;
     return theoreticalInventoryDeltaWithoutTankClamp(
       customers as unknown as EngineCustomer[],
       config as unknown as EngineSimulationConfig,
@@ -430,22 +449,16 @@ export default function Analytics() {
       simulationLog.length > 0
         ? Math.max(...simulationLog.map((r) => r.hour))
         : periodFloored;
-    const berthByCustomer = isSharedShipping
-      ? null
-      : tallyBerthTonnesByCustomerFromSlots(
-          slots as unknown as ScheduledSlot[],
-          cfgEngine,
-          maxHourInclusive
-        );
+    const berthByCustomer = tallyBerthTonnesByCustomerFromSlots(
+      slots as unknown as ScheduledSlot[],
+      cfgEngine,
+      maxHourInclusive
+    );
     for (const [customerId, values] of Object.entries(timelineData.timeline)) {
       if (!values || values.length === 0) continue;
       const arr = values as number[];
       const customer = customerById.get(customerId);
-      const openingStock = Math.round(
-        isSharedShipping
-          ? (arr[0] ?? customer?.currentInventory ?? 0)
-          : (customer?.currentInventory ?? arr[0] ?? 0)
-      );
+      const openingStock = Math.round(customer?.currentInventory ?? arr[0] ?? 0);
       const starting = openingStock;
       const finalRaw = arr[arr.length - 1] ?? 0;
       const final = Math.round(finalRaw);
@@ -465,26 +478,18 @@ export default function Analytics() {
       let pipelineOutboundVol = 0;
       let cargoIn = 0;
       let cargoOut = 0;
-      if (isSharedShipping && sharedShippingAttributedFlows) {
-        const attr = sharedShippingAttributedFlows.get(customerId);
-        pipelineInboundVol = attr?.pipelineInbound ?? 0;
-        pipelineOutboundVol = attr?.pipelineOutbound ?? 0;
-        cargoIn = attr?.berthInbound ?? 0;
-        cargoOut = attr?.berthOutbound ?? 0;
-      } else {
-        if (useLogPipeline) {
-          const p = pipelineTonnesFromSchedulerLog.get(customerId) ?? { inbound: 0, outbound: 0 };
-          pipelineInboundVol = p.inbound;
-          pipelineOutboundVol = p.outbound;
-        } else if (customer) {
-          const rates = resolveCustomerPipelineRates(customer as EngineCustomer, cfgEngine);
-          pipelineInboundVol = rates.inboundTph * periodFloored;
-          pipelineOutboundVol = rates.outboundTph * periodFloored;
-        }
-        const berth = berthByCustomer?.get(customerId) ?? { inbound: 0, outbound: 0 };
-        cargoIn = berth.inbound;
-        cargoOut = berth.outbound;
+      if (useLogPipeline) {
+        const p = pipelineTonnesFromSchedulerLog.get(customerId) ?? { inbound: 0, outbound: 0 };
+        pipelineInboundVol = p.inbound;
+        pipelineOutboundVol = p.outbound;
+      } else if (customer) {
+        const rates = resolveCustomerPipelineRates(customer as EngineCustomer, cfgEngine);
+        pipelineInboundVol = rates.inboundTph * periodFloored;
+        pipelineOutboundVol = rates.outboundTph * periodFloored;
       }
+      const berth = berthByCustomer.get(customerId) ?? { inbound: 0, outbound: 0 };
+      cargoIn = berth.inbound;
+      cargoOut = berth.outbound;
       const massInbound = Math.round(pipelineInboundVol + cargoIn);
       const massOutbound = Math.round(pipelineOutboundVol + cargoOut);
       const inventoryDelta = final - openingStock;
@@ -496,14 +501,12 @@ export default function Analytics() {
       const massBalanceOk =
         Math.abs(residualVsStock) < BAL_STOCK_EPS ||
         (theoryDelta !== undefined && Math.abs(residualVsTheory) < BAL_FLOW_EPS);
-      const sm = config.storageMode ?? "fixed_band";
+      const sm = parseStorageMode(config.storageMode);
       const massBalanceHint = !massBalanceOk
-        ? "Residual exceeds tolerance — shared shipping / time-shared modes use strict stock check only."
+        ? "Residual exceeds tolerance — check pool scaling or tank clamps for this mode."
         : Math.abs(residualVsStock) < BAL_STOCK_EPS
-          ? sm === "shared_shipping"
-            ? "Reported Δ inventory matches berth + pipeline tonnes (attributed by storage share)."
-            : "Reported Δ inventory matches pipeline + berth tonnes."
-          : sm === "shared_inventory"
+          ? "Reported Δ inventory matches pipeline + berth tonnes."
+          : isSharedStorageMode(sm)
             ? "Pipeline + berth tonnes tie out; chart reflects pool scaling to terminal cap."
             : "Pipeline + berth tonnes tie out; chart reflects per-customer tank min/max.";
       rows.push({
@@ -529,9 +532,7 @@ export default function Analytics() {
     slots,
     pipelineTonnesFromSchedulerLog,
     simulationLog,
-    theoreticalDeltaNoClamp,
-    isSharedShipping,
-    sharedShippingAttributedFlows
+    theoreticalDeltaNoClamp
   ]);
 
   const docTrendByCustomer = useMemo(
@@ -575,11 +576,7 @@ export default function Analytics() {
       const inboundSlots = custSlots.filter((s) => s.direction === "inbound");
       let berthInboundTonnes = inboundSlots.reduce((sum, s) => sum + s.volume, 0);
       let pipelineInboundTonnes = 0;
-      if (isSharedShipping && sharedShippingAttributedFlows) {
-        const attr = sharedShippingAttributedFlows.get(c.id);
-        berthInboundTonnes = attr?.berthInbound ?? 0;
-        pipelineInboundTonnes = attr?.pipelineInbound ?? 0;
-      } else if (useLogPipeline) {
+      if (useLogPipeline) {
         pipelineInboundTonnes = pipelineTonnesFromSchedulerLog.get(c.id)?.inbound ?? 0;
       } else {
         pipelineInboundTonnes =
@@ -602,9 +599,7 @@ export default function Analytics() {
       const parcelInMeps = c.inboundMEPS ?? 0;
       const parcelOutMeps = c.outboundMEPS ?? 0;
       const volIn = berthInboundTonnes;
-      const volOut = isSharedShipping
-        ? (sharedShippingAttributedFlows?.get(c.id)?.berthOutbound ?? 0)
-        : outboundSlots.reduce((s, x) => s + x.volume, 0);
+      const volOut = outboundSlots.reduce((s, x) => s + x.volume, 0);
       const parcelAvgInVol =
         inboundSlots.length > 0 ? Math.round((volIn / inboundSlots.length) * 10) / 10 : 0;
       const parcelAvgOutVol =
@@ -641,9 +636,7 @@ export default function Analytics() {
     periodHours,
     slots,
     simulationLog,
-    pipelineTonnesFromSchedulerLog,
-    isSharedShipping,
-    sharedShippingAttributedFlows
+    pipelineTonnesFromSchedulerLog
   ]);
 
   const tankExtremes = useMemo((): TankExtremeRow[] => {
@@ -697,14 +690,13 @@ export default function Analytics() {
   const partialLoads = useMemo((): PartialLoadsRow[] => {
     const rows: PartialLoadsRow[] = [];
     for (const c of customers) {
-      const inboundM = c.inboundMEPS ?? 0;
-      const outboundM = c.outboundMEPS ?? 0;
       const custSlots = slots.filter((s) => s.customerId === c.id);
       let partialIn = 0;
       let partialOut = 0;
       for (const s of custSlots) {
-        if (s.direction === "inbound" && inboundM > 0 && s.volume < inboundM) partialIn++;
-        if (s.direction === "outbound" && outboundM > 0 && s.volume < outboundM) partialOut++;
+        const legMeps = mepsForScheduledSlot(c as EngineCustomer, s);
+        if (s.direction === "inbound" && legMeps > 0 && s.volume + 0.5 < legMeps) partialIn++;
+        if (s.direction === "outbound" && legMeps > 0 && s.volume + 0.5 < legMeps) partialOut++;
       }
       rows.push({
         customerId: c.id,
@@ -723,12 +715,27 @@ export default function Analytics() {
 
   const resourceUtilization = useMemo((): ResourceUtilRow[] => {
     const laytimeCfg = config ?? undefined;
+    const engineCfg = config as unknown as EngineSimulationConfig | undefined;
+    const resMode = engineCfg ? reservationMode(engineCfg) : "none";
     return resources.map((res) => {
       const resSlots = slots.filter((s) => s.resourceId === res.id);
       const totalHoursRaw = resSlots.reduce(
-        (acc, s) => acc + slotBerthOccupationHours(s, laytimeCfg ?? {}),
+        (acc, s) =>
+          acc +
+          (engineCfg
+            ? slotOperationOccupationHours(s as unknown as ScheduledSlot, engineCfg)
+            : slotBerthOccupationHours(s, laytimeCfg ?? {})),
         0
       );
+      const reservationHoursRaw =
+        resMode === "none"
+          ? totalHoursRaw
+          : resSlots.reduce(
+              (acc, s) =>
+                acc +
+                slotReservationOccupationHours(s as unknown as ScheduledSlot),
+              0
+            );
       const n = resSlots.length;
       const avgHoursPerSlot = n > 0 ? Math.round((totalHoursRaw / n) * 10) / 10 : 0;
       return {
@@ -737,9 +744,12 @@ export default function Analytics() {
         resourceType: res.type ?? "—",
         totalSlots: n,
         totalHoursOccupied: Math.round(totalHoursRaw * 10) / 10,
+        totalHoursReservation: Math.round(reservationHoursRaw * 10) / 10,
         avgHoursPerSlot,
         availableHours: Math.round(periodHours * 10) / 10,
-        utilizationPct: periodHours > 0 ? Math.round((totalHoursRaw / periodHours) * 1000) / 10 : 0
+        utilizationPct: periodHours > 0 ? Math.round((totalHoursRaw / periodHours) * 1000) / 10 : 0,
+        utilizationReservationPct:
+          periodHours > 0 ? Math.round((reservationHoursRaw / periodHours) * 1000) / 10 : 0
       };
     });
   }, [resources, slots, periodHours, config]);
@@ -748,6 +758,41 @@ export default function Analytics() {
   const hasRunData = hasData || simulationLog.length > 0;
   const allThroughputPass =
     throughputCoverage.length > 0 && throughputCoverage.every((r) => r.passes);
+  const quarterlyGradeMassBalance = useMemo((): QuarterlyGradeMassBalanceRow[] => {
+    if (!config?.gradeMassBalancingEnabled) return [];
+    return computeQuarterlyGradeMassBalance(
+      customers as unknown as EngineCustomer[],
+      config as unknown as EngineSimulationConfig,
+      slots as unknown as ScheduledSlot[],
+      simulationLog
+    );
+  }, [config, customers, slots, simulationLog]);
+  const gradeDeficitMode = config?.gradeMassBalanceDeficitMode ?? "tonnes";
+  const gradeDeficitLimitTonnes = Math.max(0, config?.gradeMassBalanceDeficitLimitTonnes ?? 0);
+  const gradeDeficitLimitPct = Math.max(0, config?.gradeMassBalanceDeficitLimitPct ?? 0);
+  const sharedDeficitX = Math.max(0, config?.sharedInventoryCustomerDeficitLimitTonnes ?? 0);
+
+  const gradeStockSummary = useMemo(() => {
+    if (!config || !isSharedStorageMode(config.storageMode) || !timelineData?.gradeTimeline) return [];
+    return summarizeGradeLedgerTimeline(
+      customers as unknown as EngineCustomer[],
+      config as unknown as EngineSimulationConfig,
+      timelineData.gradeTimeline
+    );
+  }, [config, customers, timelineData]);
+
+  const quarterlyGradeStock = useMemo(() => {
+    if (!config || !isSharedStorageMode(config.storageMode) || simulationLog.length === 0) return [];
+    return computeQuarterlyAttributedGradeStock(
+      customers as unknown as EngineCustomer[],
+      config as unknown as EngineSimulationConfig,
+      simulationLog
+    );
+  }, [config, customers, simulationLog]);
+
+  const showGradeLedgerPanel =
+    isSharedStorageMode(config?.storageMode) &&
+    (gradeStockSummary.length > 0 || quarterlyGradeStock.length > 0);
 
   return (
     <div>
@@ -761,13 +806,13 @@ export default function Analytics() {
       </div>
 
       {feasibilityWarnings.length > 0 && (
-        <div className="card" style={{ marginBottom: 24 }}>
+        <div className="card mb-24">
           <div className="alert alert-warning" style={{ margin: 0 }}>
             <strong>Feasibility warnings</strong>
             <ul style={{ margin: "8px 0 0", paddingLeft: 20 }}>
-              {feasibilityWarnings.map((w, i) => (
+      {feasibilityWarnings.map((w, i) => (
                 <li key={i} style={{ marginBottom: 4 }}>
-                  {w}
+                  {w.message}
                 </li>
               ))}
             </ul>
@@ -775,7 +820,7 @@ export default function Analytics() {
         </div>
       )}
 
-      <div className="card" style={{ marginBottom: 24 }}>
+      <div className="card mb-24">
         <div className="card-title-row">
           <div className="card-title" style={{ margin: 0 }}>Model checks (KPIs)</div>
           <HelpPopover
@@ -786,16 +831,14 @@ export default function Analytics() {
 
         <div style={{ marginBottom: 20 }}>
           <div className="section-heading-row" style={{ marginBottom: 8 }}>
-            <h3 style={{ fontSize: 14, margin: 0 }}>Throughput coverage</h3>
+            <h3 className="section-title">Throughput coverage</h3>
             <HelpPopover
               label="Throughput coverage help"
               content={
                 <>
                   Target inbound = declared inbound throughput + pipeline inbound (t/h × period). Scheduled inbound =
-                  berth cargo + pipeline inbound
-                  {isSharedShipping
-                    ? " (shared shipping: terminal flows split by storage share, matching the schedule graph inventory)."
-                    : " from berth slots + simulation log pipeline (or nominal rate when no log)."}
+                  berth cargo + pipeline inbound from berth slots + simulation log pipeline (or nominal rate when no
+                  log).
                 </>
               }
             />
@@ -877,16 +920,14 @@ export default function Analytics() {
 
         <div style={{ marginBottom: 20 }}>
           <div className="section-heading-row" style={{ marginBottom: 8 }}>
-            <h3 style={{ fontSize: 14, margin: 0 }}>Slot details</h3>
+            <h3 className="section-title">Slot details</h3>
             <HelpPopover
               label="Slot details help"
               content={
                 <>
-                  Slot coverage vs engine targets, average scheduled parcel size (t), and partial loads (volume &lt;
-                  MEPS when MEPS &gt; 0). Inbound on the left, outbound on the right.
-                  {isSharedShipping
-                    ? " Slot counts are per transport leg owner; tonne totals above use storage-share attribution."
-                    : ""}
+                  Slot coverage vs engine targets, average scheduled parcel size (t), and below-leg-MEPS slots
+                  (volume &lt; that slot&apos;s transport-leg MEPS — not early berth departure). Inbound on the left,
+                  outbound on the right.
                 </>
               }
             />
@@ -1006,7 +1047,7 @@ export default function Analytics() {
 
         <div style={{ marginBottom: 20 }}>
           <div className="section-heading-row" style={{ marginBottom: 8 }}>
-            <h3 style={{ fontSize: 14, margin: 0 }}>Tank bottoms and tank tops</h3>
+            <h3 className="section-title">Tank bottoms and tank tops</h3>
             <HelpPopover
               label="Tank bottoms and tops help"
               content={
@@ -1085,7 +1126,7 @@ export default function Analytics() {
         </div>
       </div>
 
-      <div className="card" style={{ marginBottom: 24 }}>
+      <div className="card mb-24">
         <div className="card-title-row">
           <div className="card-title" style={{ margin: 0 }}>Inventory Summary</div>
           <HelpPopover
@@ -1216,13 +1257,74 @@ export default function Analytics() {
         </table>
       </div>
 
+      {showGradeLedgerPanel && (
+        <div className="card mb-24">
+          <div className="card-title-row">
+            <div className="card-title" style={{ margin: 0 }}>Attributed grade stock (shared ledger)</div>
+            <HelpPopover
+              label="Shared grade ledger help"
+              content={
+                <>
+                  Real-time per-grade attributed balances from the scheduler ledger — used for borrowing
+                  rules and floor checks. Distinct from quarterly mass-balance flows below (certified
+                  inbound/outbound tonnes).
+                </>
+              }
+            />
+          </div>
+          <GradeAttributedStockPanel
+            summaryRows={gradeStockSummary}
+            quarterlyStock={quarterlyGradeStock}
+            customers={customers}
+            customerOrderIndex={customerChartOrderIndex}
+            globalDeficitLimitTonnes={sharedDeficitX}
+          />
+        </div>
+      )}
+
+      {config?.gradeMassBalancingEnabled && (
+        <div className="card mb-24">
+          <div className="card-title-row">
+            <div className="card-title" style={{ margin: 0 }}>Grade mass-balance by quarter</div>
+            <HelpPopover
+              label="Grade mass-balance help"
+              content={
+                <>
+                  One certified ledger per <strong>grade</strong> (green, blue, grey) — all customers
+                  combined. Rows are grades top to bottom; quarters run left to right. Customer chart
+                  colours show each customer&apos;s share inside the inbound/outbound bars.
+                </>
+              }
+            />
+          </div>
+          <GradeMassBalancePanel
+            rows={quarterlyGradeMassBalance}
+            customers={customers}
+            customerOrderIndex={customerChartOrderIndex}
+            deficitMode={gradeDeficitMode}
+            deficitLimitTonnes={gradeDeficitLimitTonnes}
+            deficitLimitPct={gradeDeficitLimitPct}
+          />
+        </div>
+      )}
+
       <div className="card">
         <div className="card-title-row">
           <div className="card-title" style={{ margin: 0 }}>Resource Utilization</div>
           <HelpPopover
             label="Resource utilization help"
-            content="Hours on berth sums each slot's laytime: pre-ops + cargo transfer + post-ops (from simulation config). Avg h / slot is the mean of those laytimes for visits on that resource."
+            content="Hours on berth sums each slot's operation laytime (pre-ops + cargo + post-ops). When WoA/laycan is enabled, reservation hours include the full light-bar window per leg. The load bar uses darker grey for operation load and lighter grey for the extra reservation window."
           />
+          <div className="util-bar-legend" aria-hidden>
+            <span className="util-bar-legend-item">
+              <span className="util-bar-legend-swatch util-bar-legend-swatch--operation" />
+              Operation
+            </span>
+            <span className="util-bar-legend-item">
+              <span className="util-bar-legend-swatch util-bar-legend-swatch--reservation" />
+              Reservation
+            </span>
+          </div>
         </div>
         <table className="data-table">
           <thead>
@@ -1230,17 +1332,19 @@ export default function Analytics() {
               <th>Resource</th>
               <th>Type</th>
               <th style={{ textAlign: "right" }}>Slots</th>
-              <th style={{ textAlign: "right" }}>Hours on berth</th>
+              <th style={{ textAlign: "right" }}>Hours (operation)</th>
+              <th style={{ textAlign: "right" }}>Hours (reservation)</th>
               <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>Avg h / slot</th>
               <th style={{ textAlign: "right" }}>Hours available</th>
               <th style={{ minWidth: 160 }}>Load</th>
-              <th style={{ textAlign: "right" }}>%</th>
+              <th style={{ textAlign: "right" }}>% op</th>
+              <th style={{ textAlign: "right" }}>% res</th>
             </tr>
           </thead>
           <tbody>
             {resourceUtilization.length === 0 ? (
               <tr>
-                <td colSpan={8} style={{ textAlign: "center", color: "#94a3b8", padding: 24 }}>
+                <td colSpan={10} style={{ textAlign: "center", color: "#94a3b8", padding: 24 }}>
                   No resources — add resources in Configuration
                 </td>
               </tr>
@@ -1251,12 +1355,16 @@ export default function Analytics() {
                   <td>{row.resourceType}</td>
                   <td style={{ textAlign: "right" }}>{row.totalSlots}</td>
                   <td style={{ textAlign: "right" }}>{row.totalHoursOccupied.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{row.totalHoursReservation.toLocaleString()}</td>
                   <td style={{ textAlign: "right" }}>
                     {row.totalSlots > 0 ? row.avgHoursPerSlot.toLocaleString() : "—"}
                   </td>
                   <td style={{ textAlign: "right" }}>{row.availableHours.toLocaleString()}</td>
                   <td>
-                    <UtilBarCell pct={row.utilizationPct} />
+                    <UtilBarCell
+                      operationPct={row.utilizationPct}
+                      reservationPct={row.utilizationReservationPct}
+                    />
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <span
@@ -1265,6 +1373,19 @@ export default function Analytics() {
                       }`}
                     >
                       {row.utilizationPct}%
+                    </span>
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <span
+                      className={`badge ${
+                        row.utilizationReservationPct >= 80
+                          ? "badge-amber"
+                          : row.utilizationReservationPct >= 50
+                            ? "badge-blue"
+                            : "badge-gray"
+                      }`}
+                    >
+                      {row.utilizationReservationPct}%
                     </span>
                   </td>
                 </tr>

@@ -5,6 +5,8 @@
 
 import type { Customer, ScheduledSlot, SimulationConfig } from "../types";
 import type { SchedulingLeg } from "./feasibility";
+import { lastLegSlotStartHourForLeg, poolUsesSharedRoundtrip } from "./transportPools";
+import type { TransportPool } from "../types";
 import { customerRepresentativeDaysOfCover } from "./customerLegTargets";
 import { getCustomerMaxCapacity } from "./inventory";
 import { resolveCustomerPipelineRates } from "./pipelineFlows";
@@ -12,9 +14,16 @@ import { resolveCustomerPipelineRates } from "./pipelineFlows";
 const SORT_METRIC_EPS = 1e-6;
 const HOUR_MS = 60 * 60 * 1000;
 
-export function customerLegFulfillmentRatio(leg: SchedulingLeg, slotsScheduled: number): number {
-  if (leg.targetSlots <= 0) return Number.POSITIVE_INFINITY;
-  return slotsScheduled / leg.targetSlots;
+export function legTargetMassTonnes(leg: SchedulingLeg): number {
+  if (leg.targetSlots <= 0 || leg.meps <= 0) return 0;
+  return leg.targetSlots * leg.meps;
+}
+
+/** Delivered ÷ contracted tonnes for the leg (lower = more under-delivered). */
+export function customerLegFulfillmentRatio(leg: SchedulingLeg, scheduledMassTonnes: number): number {
+  const target = legTargetMassTonnes(leg);
+  if (target <= 0) return Number.POSITIVE_INFINITY;
+  return scheduledMassTonnes / target;
 }
 
 export function countLegSlotsThroughHour(
@@ -34,8 +43,28 @@ export function countLegSlotsThroughHour(
   }).length;
 }
 
-/** Latest slot start hour for this leg among slots already started through `throughHour`. */
-export function lastLegSlotStartHour(
+/** Sum of scheduled parcel tonnes for this leg through `throughHour` (inclusive). */
+export function countLegMassThroughHour(
+  leg: SchedulingLeg,
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  throughHour: number
+): number {
+  const laneKey = leg.laneKey ?? "lane0";
+  return assignedSlots
+    .filter((s) => {
+      if (s.customerId !== leg.customer.id || s.direction !== leg.direction || s.mode !== leg.mode) {
+        return false;
+      }
+      if ((s.legKey ?? "lane0") !== laneKey) return false;
+      const startHour = Math.round((new Date(s.start).getTime() - simStartMs) / HOUR_MS);
+      return startHour <= throughHour;
+    })
+    .reduce((sum, s) => sum + s.volume, 0);
+}
+
+/** Latest slot start hour for this leg lane only (merit wait tie-breaker). */
+export function lastLegSlotOwnStartHour(
   leg: SchedulingLeg,
   assignedSlots: ScheduledSlot[],
   simStartMs: number,
@@ -56,21 +85,57 @@ export function lastLegSlotStartHour(
   return best;
 }
 
-/** Hours since this leg's last slot start (or since sim start if none yet). */
+/** Latest pool-wide start for round-trip blocking (single shared asset across pool members). */
+export function lastLegSlotStartHourForRoundtrip(
+  leg: SchedulingLeg,
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  throughHour: number,
+  customers: Customer[] = [],
+  pools: TransportPool[] = []
+): number | null {
+  if (leg.poolId && customers.length > 0 && poolUsesSharedRoundtrip(leg, pools)) {
+    return lastLegSlotStartHourForLeg(leg, assignedSlots, simStartMs, throughHour, customers, pools);
+  }
+  return lastLegSlotOwnStartHour(leg, assignedSlots, simStartMs, throughHour);
+}
+
+/** @deprecated Use {@link lastLegSlotStartHourForRoundtrip} or {@link lastLegSlotOwnStartHour}. */
+export function lastLegSlotStartHour(
+  leg: SchedulingLeg,
+  assignedSlots: ScheduledSlot[],
+  simStartMs: number,
+  throughHour: number,
+  customers: Customer[] = [],
+  pools: TransportPool[] = []
+): number | null {
+  return lastLegSlotStartHourForRoundtrip(
+    leg,
+    assignedSlots,
+    simStartMs,
+    throughHour,
+    customers,
+    pools
+  );
+}
+
+/** Hours since this leg lane's last slot start (or since sim start if none yet). */
 export function hoursSinceLastLegSlot(
   leg: SchedulingLeg,
   assignedSlots: ScheduledSlot[],
   simStartMs: number,
-  h: number
+  h: number,
+  _customers: Customer[] = [],
+  _pools: TransportPool[] = []
 ): number {
-  const last = lastLegSlotStartHour(leg, assignedSlots, simStartMs, h - 1);
+  const last = lastLegSlotOwnStartHour(leg, assignedSlots, simStartMs, h - 1);
   return last === null ? h : h - last;
 }
 
 /**
  * Sort legs for scheduling. In shared shipping (all legs) and shared inventory (inbound only),
- * legs in the same direction/mode pool rotate by fulfillment ratio so one customer cannot
- * monopolize early slots — unless either leg has negative sort metric (borrowed stock), in
+ * legs in the same direction/mode pool rotate by mass fulfilment (tonnes delivered ÷ target tonnes)
+ * so the most under-delivered customer is tried first — unless either leg has negative sort metric
  * which case DoC urgency overrides fulfilment fairness.
  */
 export function compareSchedulingLegs(
@@ -79,16 +144,22 @@ export function compareSchedulingLegs(
   metricA: number,
   metricB: number,
   sharedShipping: boolean,
-  slotsA: number,
-  slotsB: number,
+  scheduledMassA: number,
+  scheduledMassB: number,
   sharedInventoryInboundPool = false,
   waitA = 0,
   waitB = 0
 ): number {
+  const transportPoolMerit =
+    !!a.poolId &&
+    a.poolId === b.poolId &&
+    a.direction === b.direction &&
+    a.mode === b.mode;
+
   const sharedPool =
     a.direction === b.direction &&
     a.mode === b.mode &&
-    (sharedShipping || (sharedInventoryInboundPool && a.direction === "inbound"));
+    (sharedShipping || (sharedInventoryInboundPool && a.direction === "inbound") || transportPoolMerit);
 
   const compareDoc = (): number | null => {
     if (Number.isFinite(metricA) && Number.isFinite(metricB)) {
@@ -101,8 +172,8 @@ export function compareSchedulingLegs(
   };
 
   const compareFulfillment = (): number | null => {
-    const ratioA = customerLegFulfillmentRatio(a, slotsA);
-    const ratioB = customerLegFulfillmentRatio(b, slotsB);
+    const ratioA = customerLegFulfillmentRatio(a, scheduledMassA);
+    const ratioB = customerLegFulfillmentRatio(b, scheduledMassB);
     if (Math.abs(ratioA - ratioB) > SORT_METRIC_EPS) return ratioA - ratioB;
     return null;
   };
@@ -144,12 +215,13 @@ export function normalizedOptimizerRelativeFulfillmentMultiplier(config: Simulat
 
 /** Same pool scope as fulfilment-ratio merit order in compareSchedulingLegs. */
 export function legUsesFulfillmentPool(
-  leg: Pick<SchedulingLeg, "direction">,
+  leg: Pick<SchedulingLeg, "direction" | "poolId">,
   sharedShipping: boolean,
   sharedInventory: boolean
 ): boolean {
   if (sharedShipping) return true;
-  return sharedInventory && leg.direction === "inbound";
+  if (sharedInventory && leg.direction === "inbound") return true;
+  return !!leg.poolId;
 }
 
 export function averagePoolFulfillmentRatioAtHour(
@@ -162,12 +234,16 @@ export function averagePoolFulfillmentRatioAtHour(
   sharedInventory: boolean
 ): number | null {
   if (!legUsesFulfillmentPool(leg, sharedShipping, sharedInventory)) return null;
-  const poolLegs = legs.filter((l) => l.direction === leg.direction && l.mode === leg.mode);
+  const poolLegs = leg.poolId
+    ? legs.filter(
+        (l) => l.poolId === leg.poolId && l.direction === leg.direction && l.mode === leg.mode
+      )
+    : legs.filter((l) => l.direction === leg.direction && l.mode === leg.mode);
   if (poolLegs.length === 0) return null;
   const ratios = poolLegs
     .map((l) => {
-      const slots = countLegSlotsThroughHour(l, assignedSlots, simStartMs, h - 1);
-      return customerLegFulfillmentRatio(l, slots);
+      const mass = countLegMassThroughHour(l, assignedSlots, simStartMs, h - 1);
+      return customerLegFulfillmentRatio(l, mass);
     })
     .filter((r): r is number => Number.isFinite(r));
   if (ratios.length === 0) return null;
@@ -399,7 +475,7 @@ export function relativeOptimizerShouldYield(
   return legMetric > multiplier * averageDoc;
 }
 
-/** True when this leg is too far ahead on annual fulfilment vs the direction+mode pool average. */
+/** True when this leg is too far ahead on mass fulfilment vs the direction+mode pool average. */
 export function relativeFulfillmentOptimizerShouldYield(
   legRatio: number,
   averageRatio: number | null,

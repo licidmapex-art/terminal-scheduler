@@ -6,7 +6,7 @@ import type { Customer, SimulationConfig, ScheduledSlot } from "../types";
 import {
   laytimeFromConfig,
   getCargoWindowMs,
-  hourOverlapsIntervalMs
+  cargoTonnesInSimulationHour
 } from "./slotLaytime";
 import type { SimulationLogRow } from "./simulationLog";
 import {
@@ -15,8 +15,20 @@ import {
   totalOutboundPipelineTph,
   customerPipelineNetDeltaPerHour
 } from "./pipelineFlows";
+import {
+  applyGradeAttributedFlow,
+  initGradeInventoryLedger,
+  maxOutboundTonnesWithinGradeFloor,
+  scaleCustomerGradeLedger,
+  type GradeInventoryLedger,
+  type GradeLedgerTimeline
+} from "./gradeInventoryLedger";
+import type { TransportPool } from "../types";
+import { attributeSlotTonnesToInventory, poolIdForCustomerSlot } from "./transportPools";
 
 export type InventoryTimeline = Map<string, number[]>;
+
+export type { GradeLedgerTimeline } from "./gradeInventoryLedger";
 
 /** Simulation length in whole hours — must match `buildTimeline` / `runScheduler` (floored). */
 export function simulationPeriodHoursFloored(config: SimulationConfig): number {
@@ -199,18 +211,31 @@ export function sharedInventoryPipelineOutboundTakeCap(
 export function planSharedInventoryPipelineOutboundHour(
   invById: Record<string, number>,
   customers: Customer[],
-  config: SimulationConfig
+  config: SimulationConfig,
+  gradeLedger?: GradeInventoryLedger | null,
+  rateMultiplierByCustomer?: Record<string, number>
 ): { takes: Record<string, number>; terminalBefore: number } {
   const terminalBefore = customers.reduce((s, c) => s + (invById[c.id] ?? 0), 0);
   const takes: Record<string, number> = Object.fromEntries(customers.map((c) => [c.id, 0]));
   let remaining = Math.max(0, terminalBefore);
   if (remaining <= EXTREME_EPS) return { takes, terminalBefore };
+  const mult = (id: string) => rateMultiplierByCustomer?.[id] ?? 1;
 
   for (const c of customers) {
     const { outboundTph } = resolveCustomerPipelineRates(c, config);
-    if (outboundTph <= 0) continue;
+    const scaledTph = outboundTph * mult(c.id);
+    if (scaledTph <= 0) continue;
     const before = invById[c.id] ?? 0;
-    const byCustomer = sharedInventoryPipelineOutboundTakeCap(before, outboundTph, config);
+    let byCustomer = sharedInventoryPipelineOutboundTakeCap(before, scaledTph, config);
+    if (gradeLedger) {
+      byCustomer = maxOutboundTonnesWithinGradeFloor(
+        c,
+        byCustomer,
+        gradeLedger,
+        config,
+        customers
+      );
+    }
     const take = Math.min(byCustomer, remaining);
     if (take <= 0) continue;
     takes[c.id] = take;
@@ -224,7 +249,8 @@ export function applySharedInventoryOutboundFlow(
   invById: Record<string, number>,
   customers: Customer[],
   customerId: string,
-  flowTonnes: number
+  flowTonnes: number,
+  gradeLedger?: GradeInventoryLedger | null
 ): number {
   const requested = Math.max(0, flowTonnes);
   if (requested <= 0) return 0;
@@ -232,7 +258,61 @@ export function applySharedInventoryOutboundFlow(
   const allowed = Math.min(requested, Math.max(0, terminalSum));
   if (allowed <= 0) return 0;
   invById[customerId] = (invById[customerId] ?? 0) - allowed;
+  const customer = customers.find((c) => c.id === customerId);
+  if (customer && gradeLedger) {
+    applyGradeAttributedFlow(gradeLedger, customer, allowed, "outbound");
+  }
   return allowed;
+}
+
+/**
+ * Apply berth cargo to per-customer inventory (pool-aware).
+ * Pool legs always split by live inventory share; non-pool uses mode-specific rules.
+ */
+export function applyBerthCargoToInventory(
+  slot: ScheduledSlot,
+  tonnes: number,
+  customers: Customer[],
+  config: SimulationConfig,
+  transportPools: TransportPool[],
+  invById: Record<string, number>,
+  gradeLedger?: GradeInventoryLedger | null
+): void {
+  if (tonnes <= 0) return;
+  const customer = customers.find((c) => c.id === slot.customerId);
+  const poolId = customer ? poolIdForCustomerSlot(customer, slot, transportPools) : null;
+
+  if (poolId) {
+    let effectiveTonnes = tonnes;
+    if (config.storageMode === "shared_inventory" && slot.direction === "outbound") {
+      const terminalSum = customers.reduce((s, c) => s + (invById[c.id] ?? 0), 0);
+      effectiveTonnes = Math.min(tonnes, Math.max(0, terminalSum));
+    }
+    attributeSlotTonnesToInventory(slot, effectiveTonnes, customers, transportPools, invById);
+    return;
+  }
+
+  if (config.storageMode === "shared_inventory") {
+    if (slot.direction === "outbound") {
+      applySharedInventoryOutboundFlow(invById, customers, slot.customerId, tonnes, gradeLedger);
+    } else {
+      invById[slot.customerId] = (invById[slot.customerId] ?? 0) + tonnes;
+      if (customer && gradeLedger) {
+        applyGradeAttributedFlow(gradeLedger, customer, tonnes, "inbound");
+      }
+    }
+    return;
+  }
+
+  attributeSlotTonnesToInventory(slot, tonnes, customers, transportPools, invById);
+  if (customer && gradeLedger) {
+    applyGradeAttributedFlow(
+      gradeLedger,
+      customer,
+      tonnes,
+      slot.direction === "inbound" ? "inbound" : "outbound"
+    );
+  }
 }
 
 /**
@@ -244,12 +324,20 @@ export function applySharedInventoryOutboundFlow(
 export function applySharedInventoryPipelineHour(
   invById: Record<string, number>,
   customers: Customer[],
-  config: SimulationConfig
+  config: SimulationConfig,
+  gradeLedger?: GradeInventoryLedger | null,
+  rateMultiplierByCustomer?: Record<string, number>
 ): Record<string, number> {
   const cap = config.totalStorageCapacity ?? 100000;
   let S = customers.reduce((s, c) => s + (invById[c.id] ?? 0), 0);
-  const inboundTotal = totalInboundPipelineTph(customers, config);
-  const outboundTotal = totalOutboundPipelineTph(customers, config);
+  const mult = (id: string) => rateMultiplierByCustomer?.[id] ?? 1;
+  let inboundTotal = 0;
+  let outboundTotal = 0;
+  for (const c of customers) {
+    const { inboundTph, outboundTph } = resolveCustomerPipelineRates(c, config);
+    inboundTotal += inboundTph * mult(c.id);
+    outboundTotal += outboundTph * mult(c.id);
+  }
   const effective: Record<string, number> = Object.fromEntries(customers.map((c) => [c.id, 0]));
 
   if (inboundTotal > 0) {
@@ -257,24 +345,103 @@ export function applySharedInventoryPipelineHour(
     const deltaTotal = Math.min(headroom, inboundTotal);
     for (const c of customers) {
       const { inboundTph } = resolveCustomerPipelineRates(c, config);
-      const add = inboundTotal > 0 ? (deltaTotal * inboundTph) / inboundTotal : 0;
+      const weighted = inboundTph * mult(c.id);
+      const add = inboundTotal > 0 ? (deltaTotal * weighted) / inboundTotal : 0;
       invById[c.id] = (invById[c.id] ?? 0) + add;
       effective[c.id] += add;
+      if (gradeLedger && add > 0) {
+        applyGradeAttributedFlow(gradeLedger, c, add, "inbound");
+      }
       S += add;
     }
   }
 
   if (outboundTotal > 0) {
-    const { takes } = planSharedInventoryPipelineOutboundHour(invById, customers, config);
+    const { takes } = planSharedInventoryPipelineOutboundHour(
+      invById,
+      customers,
+      config,
+      gradeLedger,
+      rateMultiplierByCustomer
+    );
     for (const c of customers) {
       const take = takes[c.id] ?? 0;
       if (take <= 0) continue;
       invById[c.id] = (invById[c.id] ?? 0) - take;
       effective[c.id] -= take;
+      if (gradeLedger) {
+        applyGradeAttributedFlow(gradeLedger, c, take, "outbound");
+      }
     }
   }
 
   return effective;
+}
+
+/**
+ * Builds per-customer total inventory and per-grade attributed series (shared mode only).
+ */
+export function buildInventoryTimelines(
+  customers: Customer[],
+  config: SimulationConfig,
+  assignedSlots: ScheduledSlot[],
+  transportPools: TransportPool[] = []
+): { totals: InventoryTimeline; gradeLedger: GradeLedgerTimeline | null } {
+  if (config.storageMode !== "shared_inventory") {
+    return { totals: buildTimeline(customers, config, assignedSlots, transportPools), gradeLedger: null };
+  }
+
+  const simStart = new Date(config.startDate);
+  const simEnd = new Date(config.endDate);
+  const periodHours = Math.floor(
+    (simEnd.getTime() - simStart.getTime()) / (1000 * 60 * 60)
+  );
+  const capacity = config.totalStorageCapacity ?? 100000;
+  const invById: Record<string, number> = {};
+  for (const c of customers) invById[c.id] = c.currentInventory;
+  const timeline = new Map<string, number[]>();
+  for (const c of customers) timeline.set(c.id, []);
+  const gradeLedgerState = initGradeInventoryLedger(customers);
+  const gradeTimeline: GradeLedgerTimeline = {};
+  for (const c of customers) {
+    gradeTimeline[c.id] = { green: [], blue: [], grey: [] };
+  }
+  const simStartMs = simStart.getTime();
+  const { preOps, postOps } = laytimeFromConfig(config);
+
+  for (let h = 0; h <= periodHours; h++) {
+    if (h > 0) {
+      applySharedInventoryPipelineHour(invById, customers, config, gradeLedgerState);
+    }
+    for (const slot of assignedSlots) {
+      const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
+      if (loadingHours <= 0) continue;
+      const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+      if (tonnes <= 0) continue;
+      applyBerthCargoToInventory(
+        slot,
+        tonnes,
+        customers,
+        config,
+        transportPools,
+        invById,
+        gradeLedgerState
+      );
+    }
+    const beforeNorm = Object.fromEntries(customers.map((c) => [c.id, invById[c.id] ?? 0]));
+    normalizeSharedInventoryToCap(invById, customers, capacity);
+    for (const c of customers) {
+      scaleCustomerGradeLedger(gradeLedgerState, c, invById[c.id] ?? 0, beforeNorm[c.id] ?? 0);
+    }
+    for (const c of customers) {
+      timeline.get(c.id)!.push(invById[c.id] ?? 0);
+      const row = gradeLedgerState[c.id];
+      gradeTimeline[c.id].green.push(Math.round(row?.green ?? 0));
+      gradeTimeline[c.id].blue.push(Math.round(row?.blue ?? 0));
+      gradeTimeline[c.id].grey.push(Math.round(row?.grey ?? 0));
+    }
+  }
+  return { totals: timeline, gradeLedger: gradeTimeline };
 }
 
 /**
@@ -283,7 +450,8 @@ export function applySharedInventoryPipelineHour(
 export function buildTimeline(
   customers: Customer[],
   config: SimulationConfig,
-  assignedSlots: ScheduledSlot[]
+  assignedSlots: ScheduledSlot[],
+  transportPools: TransportPool[] = []
 ): InventoryTimeline {
   const simStart = new Date(config.startDate);
   const simEnd = new Date(config.endDate);
@@ -318,10 +486,10 @@ export function buildTimeline(
       for (const slot of assignedSlots) {
         const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
         if (loadingHours <= 0) continue;
-        if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
-        const flowPerHour = slot.volume / loadingHours;
+        const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+        if (tonnes <= 0) continue;
         const sign = slot.direction === "inbound" ? 1 : -1;
-        terminal += sign * flowPerHour;
+        terminal += sign * tonnes;
       }
 
       terminal = Math.max(0, Math.min(capacity, terminal));
@@ -336,68 +504,38 @@ export function buildTimeline(
   }
 
   if (config.storageMode === "shared_inventory") {
-    const invById: Record<string, number> = {};
-    for (const c of customers) invById[c.id] = c.currentInventory;
-    const timeline = new Map<string, number[]>();
-    for (const c of customers) timeline.set(c.id, []);
-    const simStartMs = simStart.getTime();
-    const { preOps, postOps } = laytimeFromConfig(config);
-
-    for (let h = 0; h <= periodHours; h++) {
-      if (h > 0) {
-        applySharedInventoryPipelineHour(invById, customers, config);
-      }
-      for (const slot of assignedSlots) {
-        const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
-        if (loadingHours <= 0) continue;
-        if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
-        const flowPerHour = slot.volume / loadingHours;
-        if (slot.direction === "outbound") {
-          applySharedInventoryOutboundFlow(invById, customers, slot.customerId, flowPerHour);
-        } else {
-          invById[slot.customerId] = (invById[slot.customerId] ?? 0) + flowPerHour;
-        }
-      }
-      normalizeSharedInventoryToCap(invById, customers, capacity);
-      for (const c of customers) {
-        timeline.get(c.id)!.push(invById[c.id] ?? 0);
-      }
-    }
-    return timeline;
+    return buildInventoryTimelines(customers, config, assignedSlots, transportPools).totals;
   }
 
   const timeline = new Map<string, number[]>();
   const simStartMs = simStart.getTime();
   const { preOps, postOps } = laytimeFromConfig(config);
+  const invById: Record<string, number> = {};
+  for (const c of customers) {
+    invById[c.id] = c.currentInventory;
+    timeline.set(c.id, []);
+  }
 
-  for (const customer of customers) {
-    const customerMax = getCustomerMaxCapacity(customer, config);
-    const pipelineDelta = customerPipelineNetDeltaPerHour(customer, config);
-
-    const customerSlots = assignedSlots.filter((s) => s.customerId === customer.id);
-    const arr: number[] = [];
-    let runningInventory = customer.currentInventory;
-
-    for (let h = 0; h <= periodHours; h++) {
-      if (h > 0) {
-        runningInventory += pipelineDelta;
+  for (let h = 0; h <= periodHours; h++) {
+    if (h > 0) {
+      for (const c of customers) {
+        invById[c.id] = (invById[c.id] ?? 0) + customerPipelineNetDeltaPerHour(c, config);
       }
-
-      for (const slot of customerSlots) {
-        const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
-        if (loadingHours <= 0) continue;
-        if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
-        const flowPerHour = slot.volume / loadingHours;
-        const sign = slot.direction === "inbound" ? 1 : -1;
-        runningInventory += sign * flowPerHour;
-      }
-
-      runningInventory = Math.max(0, Math.min(customerMax, runningInventory));
-
-      arr.push(runningInventory);
     }
 
-    timeline.set(customer.id, arr);
+    for (const slot of assignedSlots) {
+      const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
+      if (loadingHours <= 0) continue;
+      const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+      if (tonnes <= 0) continue;
+      applyBerthCargoToInventory(slot, tonnes, customers, config, transportPools, invById);
+    }
+
+    for (const c of customers) {
+      const customerMax = getCustomerMaxCapacity(c, config);
+      invById[c.id] = Math.max(0, Math.min(customerMax, invById[c.id] ?? 0));
+      timeline.get(c.id)!.push(invById[c.id] ?? 0);
+    }
   }
 
   return timeline;
@@ -434,13 +572,9 @@ export function theoreticalInventoryDeltaWithoutTankClamp(
       for (const slot of assignedSlots) {
         const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
         if (loadingHours <= 0) continue;
-        if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
-        const flowPerHour = slot.volume / loadingHours;
-        if (slot.direction === "outbound") {
-          applySharedInventoryOutboundFlow(invById, customers, slot.customerId, flowPerHour);
-        } else {
-          invById[slot.customerId] = (invById[slot.customerId] ?? 0) + flowPerHour;
-        }
+        const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+        if (tonnes <= 0) continue;
+        applyBerthCargoToInventory(slot, tonnes, customers, config, [], invById);
       }
     }
 
@@ -470,10 +604,10 @@ export function theoreticalInventoryDeltaWithoutTankClamp(
       for (const slot of customerSlots) {
         const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
         if (loadingHours <= 0) continue;
-        if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
-        const flowPerHour = slot.volume / loadingHours;
+        const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+        if (tonnes <= 0) continue;
         const sign = slot.direction === "inbound" ? 1 : -1;
-        runningInventory += sign * flowPerHour;
+        runningInventory += sign * tonnes;
       }
 
       // no Math.max(0, Math.min(customerMax, ...)) — uncapped motion
@@ -538,12 +672,12 @@ export function replaySharedShippingTerminalFlowTotals(
     for (const slot of assignedSlots) {
       const { cargoStartMs, cargoEndMs, loadingHours } = getCargoWindowMs(slot, preOps, postOps);
       if (loadingHours <= 0) continue;
-      if (!hourOverlapsIntervalMs(h, simStartMs, cargoStartMs, cargoEndMs)) continue;
-      const flowPerHour = slot.volume / loadingHours;
+      const tonnes = cargoTonnesInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs, slot.volume);
+      if (tonnes <= 0) continue;
       const sign = slot.direction === "inbound" ? 1 : -1;
-      terminal += sign * flowPerHour;
-      if (sign > 0) berthInbound += flowPerHour;
-      else berthOutbound += flowPerHour;
+      terminal += sign * tonnes;
+      if (sign > 0) berthInbound += tonnes;
+      else berthOutbound += tonnes;
     }
 
     terminal = Math.max(0, Math.min(capacity, terminal));

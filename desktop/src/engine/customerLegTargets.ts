@@ -2,13 +2,17 @@
  * Target slot counts per customer leg — same rules as deriveLegs in scheduler.ts.
  */
 
-import type { Customer, SimulationConfig } from "../types";
+import type { BerthTransportMode, Customer, CustomerTransportConfig, SimulationConfig } from "../types";
 import { getCustomerMaxCapacity } from "./inventory";
 import { resolveCustomerPipelineRates } from "./pipelineFlows";
 import {
   customerDirectionTransports,
+  customerSchedulableTransports,
   splitTonnesByShares
 } from "./customerTransports";
+import { roundtripSharingForBerthMode, resolvedCustomerSchedulableTransports } from "./transportPools";
+import type { TransportPool } from "../types";
+import { legLabelsForTransports } from "./transportLegLabels";
 
 export function inboundTargetSlots(customer: Customer, periodHours: number): number {
   return inboundTargetSlotsByLane(customer, periodHours).reduce((s, r) => s + r.targetSlots, 0);
@@ -39,7 +43,7 @@ export function inboundThroughputTonnes(
 
 /** Max outbound volume when roundtrip is the binding limit: Σ floor(period ÷ roundtrip) × MEPS per lane. */
 export function outboundRoundtripCapacityTonnes(customer: Customer, periodHours: number): number {
-  const rows = customerDirectionTransports(customer, "outbound");
+  const rows = customerSchedulableTransports(customer, "outbound");
   let total = 0;
   for (const r of rows) {
     const rt = r.roundtripHours ?? 0;
@@ -55,27 +59,50 @@ export function outboundTargetSlots(customer: Customer, config: SimulationConfig
 
 export interface LaneTarget {
   laneIndex: number;
+  legLabel: string;
   mode: "ship" | "barge" | "train";
   meps: number;
   roundtripHours: number;
   sharePct: number;
   targetSlots: number;
+  poolId?: string | null;
+  inventoryAllocation?: "attributed" | "proportional";
 }
 
-export function inboundTargetSlotsByLane(customer: Customer, periodHours: number): LaneTarget[] {
-  const rows = customerDirectionTransports(customer, "inbound");
+function lanePoolMeta(
+  row: { poolId?: string | null; mode: CustomerTransportConfig["mode"] },
+  _pools: TransportPool[]
+): Pick<LaneTarget, "poolId" | "inventoryAllocation"> {
+  if (!row.poolId || row.mode === "pool") {
+    return { poolId: row.poolId ?? null };
+  }
+  return {
+    poolId: row.poolId,
+    inventoryAllocation: roundtripSharingForBerthMode(row.mode as "ship" | "barge" | "train")
+  };
+}
+
+export function inboundTargetSlotsByLane(
+  customer: Customer,
+  periodHours: number,
+  pools: TransportPool[] = []
+): LaneTarget[] {
+  const rows = resolvedCustomerSchedulableTransports(customer, "inbound", pools);
   if (rows.length === 0 || customer.declaredInboundThroughput <= 0) return [];
+  const labels = legLabelsForTransports(rows);
   const tonnesByLane = splitTonnesByShares(customer.declaredInboundThroughput, rows);
   return rows.map((r, laneIndex) => {
     const laneTonnes = Math.max(0, tonnesByLane[laneIndex] ?? 0);
     if (r.meps <= 0 || laneTonnes <= 0) {
       return {
         laneIndex,
-        mode: r.mode,
+        legLabel: labels[laneIndex] ?? `${r.mode} ${laneIndex + 1}`,
+        mode: r.mode as BerthTransportMode,
         meps: r.meps,
         roundtripHours: r.roundtripHours,
         sharePct: r.sharePct,
-        targetSlots: 0
+        targetSlots: 0,
+        ...lanePoolMeta(r, pools)
       };
     }
     const byThroughput = Math.ceil(laneTonnes / r.meps);
@@ -83,11 +110,13 @@ export function inboundTargetSlotsByLane(customer: Customer, periodHours: number
     const target = rt > 0 ? Math.min(byThroughput, Math.floor(periodHours / rt)) : byThroughput;
     return {
       laneIndex,
-      mode: r.mode,
+      legLabel: labels[laneIndex] ?? `${r.mode} ${laneIndex + 1}`,
+      mode: r.mode as BerthTransportMode,
       meps: r.meps,
       roundtripHours: r.roundtripHours,
       sharePct: r.sharePct,
-      targetSlots: target > 0 ? target : 0
+      targetSlots: target > 0 ? target : 0,
+      ...lanePoolMeta(r, pools)
     };
   });
 }
@@ -95,22 +124,26 @@ export function inboundTargetSlotsByLane(customer: Customer, periodHours: number
 export function outboundTargetSlotsByLane(
   customer: Customer,
   config: SimulationConfig,
-  periodHours: number
+  periodHours: number,
+  pools: TransportPool[] = []
 ): LaneTarget[] {
-  const rows = customerDirectionTransports(customer, "outbound");
+  const rows = resolvedCustomerSchedulableTransports(customer, "outbound", pools);
   const totalOutbound = Math.max(0, outboundThroughputTonnes(customer, config, periodHours));
   if (rows.length === 0 || totalOutbound <= 0) return [];
+  const labels = legLabelsForTransports(rows);
   const tonnesByLane = splitTonnesByShares(totalOutbound, rows);
   return rows.map((r, laneIndex) => {
     const laneTonnes = Math.max(0, tonnesByLane[laneIndex] ?? 0);
     if (r.meps <= 0 || laneTonnes <= 0) {
       return {
         laneIndex,
-        mode: r.mode,
+        legLabel: labels[laneIndex] ?? `${r.mode} ${laneIndex + 1}`,
+        mode: r.mode as BerthTransportMode,
         meps: r.meps,
         roundtripHours: r.roundtripHours,
         sharePct: r.sharePct,
-        targetSlots: 0
+        targetSlots: 0,
+        ...lanePoolMeta(r, pools)
       };
     }
     const byThroughput = Math.ceil(laneTonnes / r.meps);
@@ -118,11 +151,13 @@ export function outboundTargetSlotsByLane(
     const target = rt > 0 ? Math.min(byThroughput, Math.floor(periodHours / rt)) : byThroughput;
     return {
       laneIndex,
-      mode: r.mode,
+      legLabel: labels[laneIndex] ?? `${r.mode} ${laneIndex + 1}`,
+      mode: r.mode as BerthTransportMode,
       meps: r.meps,
       roundtripHours: r.roundtripHours,
       sharePct: r.sharePct,
-      targetSlots: target > 0 ? target : 0
+      targetSlots: target > 0 ? target : 0,
+      ...lanePoolMeta(r, pools)
     };
   });
 }

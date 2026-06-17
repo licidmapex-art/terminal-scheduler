@@ -66,7 +66,7 @@ describe("runPostRunFeasibilityChecks", () => {
       }))
     );
     const warnings = runPostRunFeasibilityChecks([baseCustomer], baseConfig, log);
-    expect(warnings.some((w) => w.includes("Pipeline was interrupted"))).toBe(true);
+    expect(warnings.some((w) => w.message.includes("Pipeline was interrupted"))).toBe(true);
   });
 
   it("does not warn when pipeline interrupted at or below 1%", () => {
@@ -77,7 +77,7 @@ describe("runPostRunFeasibilityChecks", () => {
       }))
     );
     const warnings = runPostRunFeasibilityChecks([baseCustomer], baseConfig, log);
-    expect(warnings.some((w) => w.includes("Pipeline was interrupted"))).toBe(false);
+    expect(warnings.some((w) => w.message.includes("Pipeline was interrupted"))).toBe(false);
   });
 
   it("warns when borrowing limit reached more than 1% of hours", () => {
@@ -102,7 +102,7 @@ describe("runPostRunFeasibilityChecks", () => {
       }))
     );
     const warnings = runPostRunFeasibilityChecks([baseCustomer], baseConfig, log);
-    expect(warnings.some((w) => w.includes("borrowing limit"))).toBe(true);
+    expect(warnings.some((w) => w.message.includes("borrowing limit"))).toBe(true);
   });
 
   it("warns when customer inventory trends over the period", () => {
@@ -113,6 +113,6 @@ describe("runPostRunFeasibilityChecks", () => {
       }))
     );
     const warnings = runPostRunFeasibilityChecks([baseCustomer], baseConfig, log);
-    expect(warnings.some((w) => w.includes("Alpha") && w.includes("inventory"))).toBe(true);
+    expect(warnings.some((w) => w.message.includes("Alpha") && w.message.includes("inventory"))).toBe(true);
   });
 });

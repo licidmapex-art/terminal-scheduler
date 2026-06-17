@@ -16,8 +16,10 @@ import {
   storageShareAppliesToCapacityBand
 } from "../lib/defaultStorageShare";
 import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
-import type { SimulationConfig as EngineSimulationConfig } from "../../types";
+import { validateCustomerGradeShares } from "../../engine/gradeMassBalance";
+import type { CustomerTransportConfig, SimulationConfig as EngineSimulationConfig, TransportPool } from "../../types";
 import { FormLabelWithHelp, HelpPopover } from "./HelpPopover";
+import TransportLegEditor, { type TransportLegRow } from "./TransportLegEditor";
 
 interface Customer {
   id: string;
@@ -28,8 +30,8 @@ interface Customer {
   pipelineFlowPerHour: number;
   pipelineInboundPerHour?: number;
   pipelineOutboundPerHour?: number;
-  inboundTransports?: TransportRow[];
-  outboundTransports?: TransportRow[];
+  inboundTransports?: TransportLegRow[];
+  outboundTransports?: TransportLegRow[];
   inboundMEPS?: number;
   inboundMode?: "ship" | "barge" | "train";
   outboundMEPS?: number;
@@ -39,21 +41,18 @@ interface Customer {
   timeSharedMinBand?: number;
   timeSharedDuration?: number;
   chartColor?: string | null;
+  gradeGreenPct?: number;
+  gradeBluePct?: number;
+  gradeGreyPct?: number;
 }
-type TransportMode = "ship" | "barge" | "train";
-interface TransportRow {
-  mode: TransportMode;
-  sharePct: number;
-  meps: number;
-  roundtripHours: number;
-}
-
 interface SimulationConfig {
   startDate: string;
   endDate: string;
   pipelineDirection: "inbound" | "outbound";
   storageMode?: string;
   totalStorageCapacity?: number;
+  gradeMassBalancingEnabled?: boolean;
+  berthReservationMode?: "none" | "window_of_arrival" | "laycan";
 }
 
 interface CustomerFormProps {
@@ -73,7 +72,7 @@ export type CustomerFormHandle = {
   isDirty: () => boolean;
 };
 
-type SectionKey = "general" | "inbound" | "outbound" | "storage" | "timeShared";
+type SectionKey = "general" | "inbound" | "outbound" | "storage" | "gradeMix" | "timeShared";
 
 type FormSnapshot = {
   name: string;
@@ -82,8 +81,11 @@ type FormSnapshot = {
   storageShare: string;
   inboundPipelineFlow: string;
   outboundPipelineFlow: string;
-  inboundRows: TransportRow[];
-  outboundRows: TransportRow[];
+  inboundRows: TransportLegRow[];
+  outboundRows: TransportLegRow[];
+  gradeGreenPct: string;
+  gradeBluePct: string;
+  gradeGreyPct: string;
   timeSharedMinBand: string;
   timeSharedDuration: string;
   useCustomChartColor: boolean;
@@ -95,23 +97,37 @@ type FormSnapshot = {
  * Returns [] when no transport is configured (MEPS = 0 or no rows).
  * Falls back to a single legacy row when the old flat MEPS fields were used.
  */
-function normalizeRows(rows?: TransportRow[], fallback?: Partial<TransportRow>): TransportRow[] {
+function transportPoolFingerprint(rows: TransportLegRow[]): string {
+  return rows.map((r) => r.poolId ?? "").join("|");
+}
+
+function normalizeRows(
+  rows?: TransportLegRow[],
+  fallback?: Partial<TransportLegRow>
+): TransportLegRow[] {
   if (rows && rows.length > 0) {
-    return rows.slice(0, 3).map((r) => ({
+    return rows.map((r) => ({
       mode: r.mode,
       sharePct: Number.isFinite(r.sharePct) ? r.sharePct : 0,
+      shareFixed: !!r.shareFixed,
       meps: Number.isFinite(r.meps) ? r.meps : 0,
-      roundtripHours: Number.isFinite(r.roundtripHours) ? r.roundtripHours : 0
+      roundtripHours: Number.isFinite(r.roundtripHours) ? r.roundtripHours : 0,
+      reservationWindowHours: Number.isFinite(r.reservationWindowHours)
+        ? Math.max(0, r.reservationWindowHours ?? 0)
+        : 0,
+      poolId: r.poolId ?? null
     }));
   }
   // Legacy: single row from old flat inboundMEPS/outboundMEPS fields
   if (fallback && (fallback.meps ?? 0) > 0) {
     return [
       {
-        mode: (fallback.mode ?? "ship") as TransportMode,
+        mode: (fallback.mode ?? "ship") as TransportLegRow["mode"],
         sharePct: 100,
+        shareFixed: false,
         meps: Math.max(0, fallback.meps ?? 0),
-        roundtripHours: Math.max(0, fallback.roundtripHours ?? 0)
+        roundtripHours: Math.max(0, fallback.roundtripHours ?? 0),
+        poolId: fallback.poolId ?? null
       }
     ];
   }
@@ -165,6 +181,9 @@ function snapshotFromCustomer(
     outboundPipelineFlow: ob,
     inboundRows,
     outboundRows,
+    gradeGreenPct: String(customer?.gradeGreenPct ?? 0),
+    gradeBluePct: String(customer?.gradeBluePct ?? 0),
+    gradeGreyPct: String(customer?.gradeGreyPct ?? 0),
     timeSharedMinBand: String(customer?.timeSharedMinBand ?? 0),
     timeSharedDuration: String(customer?.timeSharedDuration ?? 24),
     useCustomChartColor: custom != null,
@@ -216,6 +235,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   const [outboundPipelineFlow, setOutboundPipelineFlow] = useState(pipelines.outbound);
   const [inboundRows, setInboundRows] = useState<TransportRow[]>(initialInboundRows);
   const [outboundRows, setOutboundRows] = useState<TransportRow[]>(initialOutboundRows);
+  const [gradeGreenPct, setGradeGreenPct] = useState(String(customer?.gradeGreenPct ?? 0));
+  const [gradeBluePct, setGradeBluePct] = useState(String(customer?.gradeBluePct ?? 0));
+  const [gradeGreyPct, setGradeGreyPct] = useState(String(customer?.gradeGreyPct ?? 0));
   const [timeSharedMinBand, setTimeSharedMinBand] = useState(
     String(customer?.timeSharedMinBand ?? 0)
   );
@@ -233,17 +255,15 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [config, setConfig] = useState<SimulationConfig | null>(null);
+  const [transportPools, setTransportPools] = useState<TransportPool[]>([]);
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({
     general: true,
     inbound: true,
     outbound: true,
     storage: true,
+    gradeMix: false,
     timeShared: false
   });
-
-  // Track how many rows were loaded from saved data vs newly added this session
-  const [savedInboundCount] = useState(() => initialInboundRows.length);
-  const [savedOutboundCount] = useState(() => initialOutboundRows.length);
 
   useEffect(() => {
     if (window.dbAPI) {
@@ -254,6 +274,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           pipelineDirection: string;
           storageMode?: string;
           totalStorageCapacity?: number;
+          gradeMassBalancingEnabled?: boolean;
+          berthReservationMode?: string;
         } | undefined;
         if (c) {
           setConfig({
@@ -261,10 +283,16 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
             endDate: c.endDate,
             pipelineDirection: c.pipelineDirection as "inbound" | "outbound",
             storageMode: c.storageMode ?? "fixed_band",
-            totalStorageCapacity: c.totalStorageCapacity ?? 100000
+            totalStorageCapacity: c.totalStorageCapacity ?? 100000,
+            gradeMassBalancingEnabled: !!c.gradeMassBalancingEnabled,
+            berthReservationMode:
+              c.berthReservationMode === "window_of_arrival" || c.berthReservationMode === "laycan"
+                ? c.berthReservationMode
+                : "none"
           });
         }
       });
+      window.dbAPI.getTransportPools().then((pools) => setTransportPools(pools as TransportPool[]));
     }
   }, []);
 
@@ -296,37 +324,14 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   };
 
   const storageMode = config?.storageMode ?? "fixed_band";
+  const gradeMassBalancingEnabled = !!config?.gradeMassBalancingEnabled;
+  const berthReservationMode = config?.berthReservationMode ?? "none";
+  const showReservationWindow = berthReservationMode !== "none";
+  const reservationModeLabel =
+    berthReservationMode === "laycan" ? "Laycan" : "WoA";
   const capacityBandMode = storageShareAppliesToCapacityBand(storageMode);
 
-  const updateRow = (
-    direction: "inbound" | "outbound",
-    idx: number,
-    patch: Partial<TransportRow>
-  ) => {
-    const setter = direction === "inbound" ? setInboundRows : setOutboundRows;
-    setter((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-  };
-
-  const addRow = (direction: "inbound" | "outbound") => {
-    const setter = direction === "inbound" ? setInboundRows : setOutboundRows;
-    setter((prev) => {
-      if (prev.length >= 3) return prev;
-      const isFirst = prev.length === 0;
-      return [...prev, { mode: "ship", sharePct: isFirst ? 100 : 0, meps: 0, roundtripHours: 0 }];
-    });
-  };
-
-  const removeRow = (direction: "inbound" | "outbound", idx: number) => {
-    const setter = direction === "inbound" ? setInboundRows : setOutboundRows;
-    setter((prev) => {
-      const next = prev.filter((_, i) => i !== idx);
-      // Auto-fix share to 100 when only one row remains
-      if (next.length === 1) return [{ ...next[0], sharePct: 100 }];
-      return next;
-    });
-  };
-
-  const validateTransportRows = (label: string, rows: TransportRow[]): string | null => {
+  const validateTransportRows = (label: string, rows: TransportLegRow[]): string | null => {
     if (rows.length === 0) return null; // No transport configured — OK
     const shareSum = rows.reduce((s, r) => s + r.sharePct, 0);
     if (Math.abs(shareSum - 100) > 0.01) {
@@ -361,6 +366,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       outboundPipelineFlow,
       inboundRows,
       outboundRows,
+      gradeGreenPct,
+      gradeBluePct,
+      gradeGreyPct,
       timeSharedMinBand,
       timeSharedDuration,
       useCustomChartColor,
@@ -375,6 +383,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       outboundPipelineFlow,
       inboundRows,
       outboundRows,
+      gradeGreenPct,
+      gradeBluePct,
+      gradeGreyPct,
       timeSharedMinBand,
       timeSharedDuration,
       useCustomChartColor,
@@ -389,6 +400,23 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       configPipelineDirection,
       allCustomers
     );
+    const snap = initialSnapshotRef.current;
+    setName(snap.name);
+    setDeclaredInboundThroughput(snap.declaredInboundThroughput);
+    setCurrentInventory(snap.currentInventory);
+    setStorageShare(snap.storageShare);
+    setInboundPipelineFlow(snap.inboundPipelineFlow);
+    setOutboundPipelineFlow(snap.outboundPipelineFlow);
+    setInboundRows(snap.inboundRows);
+    setOutboundRows(snap.outboundRows);
+    setGradeGreenPct(snap.gradeGreenPct);
+    setGradeBluePct(snap.gradeBluePct);
+    setGradeGreyPct(snap.gradeGreyPct);
+    setTimeSharedMinBand(snap.timeSharedMinBand);
+    setTimeSharedDuration(snap.timeSharedDuration);
+    setUseCustomChartColor(snap.useCustomChartColor);
+    setChartColorPicker(snap.chartColorPicker);
+    setStorageShareTouched(false);
     onDirtyChange?.(false);
   }, [formKey, chartColorPaletteIndex, customer, configPipelineDirection, allCustomers, onDirtyChange]);
 
@@ -438,6 +466,16 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       setError(outboundError);
       return false;
     }
+    const green = parseFloat(gradeGreenPct);
+    const blue = parseFloat(gradeBluePct);
+    const grey = parseFloat(gradeGreyPct);
+    if (gradeMassBalancingEnabled) {
+      const gradeErr = validateCustomerGradeShares(green, blue, grey);
+      if (gradeErr) {
+        setError(gradeErr);
+        return false;
+      }
+    }
     const tsMin = parseFloat(timeSharedMinBand);
     const tsDur = parseFloat(timeSharedDuration);
     if (isNaN(tsMin) || tsMin < 0) {
@@ -454,8 +492,18 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       return false;
     }
     try {
-      const inboundPrimary = inboundRows[0] ?? { mode: "ship" as TransportMode, meps: 0, roundtripHours: 0 };
-      const outboundPrimary = outboundRows[0] ?? { mode: "ship" as TransportMode, meps: 0, roundtripHours: 0 };
+      const inboundPrimary = inboundRows[0] ?? {
+        mode: "ship" as CustomerTransportConfig["mode"],
+        meps: 0,
+        roundtripHours: 0,
+        sharePct: 100
+      };
+      const outboundPrimary = outboundRows[0] ?? {
+        mode: "ship" as CustomerTransportConfig["mode"],
+        meps: 0,
+        roundtripHours: 0,
+        sharePct: 100
+      };
       // Store as signed net flow. Direction "inbound" + signed value is the new canonical form.
       const netPipeline = inboundPipeline - outboundPipeline;
       const c = {
@@ -477,12 +525,35 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         outboundRoundtripHours: outboundPrimary.roundtripHours,
         timeSharedMinBand: tsMin,
         timeSharedDuration: tsDur,
-        chartColor: chartColorSaved
+        chartColor: chartColorSaved,
+        gradeGreenPct: gradeMassBalancingEnabled ? green : 0,
+        gradeBluePct: gradeMassBalancingEnabled ? blue : 0,
+        gradeGreyPct: gradeMassBalancingEnabled ? grey : 0
       };
       if (customer) {
         await window.dbAPI.updateCustomer(c);
       } else {
         await window.dbAPI.createCustomer(c);
+      }
+      const poolMembershipChanged =
+        !!customer &&
+        (transportPoolFingerprint(inboundRows) !==
+          transportPoolFingerprint(normalizeRows(customer.inboundTransports)) ||
+          transportPoolFingerprint(outboundRows) !==
+            transportPoolFingerprint(normalizeRows(customer.outboundTransports)));
+      if (
+        poolMembershipChanged &&
+        window.schedulerAPI?.run &&
+        window.schedulerAPI?.getSlots
+      ) {
+        try {
+          const slots = await window.schedulerAPI.getSlots();
+          if (slots.length > 0) {
+            await window.schedulerAPI.run();
+          }
+        } catch {
+          /* pool re-schedule is best-effort after save */
+        }
       }
       onSaved?.();
       return true;
@@ -500,10 +571,17 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     outboundPipelineFlow,
     inboundRows,
     outboundRows,
+    gradeGreenPct,
+    gradeBluePct,
+    gradeGreyPct,
     timeSharedMinBand,
     timeSharedDuration,
     useCustomChartColor,
     chartColorPicker,
+    gradeMassBalancingEnabled,
+    gradeGreenPct,
+    gradeBluePct,
+    gradeGreyPct,
     onSaved
   ]);
 
@@ -520,79 +598,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     e.preventDefault();
     void saveCustomer();
   };
-
-  const renderTransportRow = (
-    direction: "inbound" | "outbound",
-    idx: number,
-    row: TransportRow,
-    isSaved: boolean
-  ) => (
-    <div
-      key={`${direction}-${idx}`}
-      className={`transport-row ${isSaved ? "transport-row--saved" : "transport-row--new"}`}
-    >
-      {isSaved && (
-        <div className="transport-row-badge">saved</div>
-      )}
-      <div className="form-grid" style={{ alignItems: "end" }}>
-        <div className="form-group">
-          <label className="form-label">Mode</label>
-          <select
-            className="form-select"
-            value={row.mode}
-            onChange={(e) => updateRow(direction, idx, { mode: e.target.value as TransportMode })}
-          >
-            <option value="ship">Ship</option>
-            <option value="barge">Barge</option>
-            <option value="train">Train</option>
-          </select>
-        </div>
-        <div className="form-group">
-          <label className="form-label">
-            {direction === "outbound" ? "Share (%) of outbound" : "Share (%)"}
-          </label>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            step={0.1}
-            className="form-input"
-            value={row.sharePct}
-            onChange={(e) => updateRow(direction, idx, { sharePct: parseFloat(e.target.value || "0") })}
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label">MEPS (t)</label>
-          <input
-            type="number"
-            min={0}
-            step={0.1}
-            className="form-input"
-            value={row.meps}
-            onChange={(e) => updateRow(direction, idx, { meps: parseFloat(e.target.value || "0") })}
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Roundtrip (h)</label>
-          <input
-            type="number"
-            min={0}
-            step={1}
-            className="form-input"
-            value={row.roundtripHours}
-            onChange={(e) =>
-              updateRow(direction, idx, { roundtripHours: parseFloat(e.target.value || "0") })
-            }
-          />
-        </div>
-        <div className="form-group" style={{ alignSelf: "center" }}>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={() => removeRow(direction, idx)}>
-            Remove
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <form onSubmit={handleSubmit} className="customer-form-layout">
@@ -747,26 +752,17 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
             </div>
 
             <div style={{ marginTop: 16 }}>
-              <div className="form-label form-label-with-help" style={{ marginBottom: 8 }}>
-                <span>Inbound transport modes</span>
-                {inboundRows.length > 0 && (
-                  <HelpPopover content="Up to 3 modes; shares must total 100%." label="Inbound transport modes help" />
-                )}
+              <div className="form-label" style={{ marginBottom: 8 }}>
+                Inbound transport legs
               </div>
-              {inboundRows.length === 0 ? (
-                <p className="form-helper" style={{ margin: "0 0 10px" }}>
-                  No inbound transport modes configured. Inventory is filled by pipeline only.
-                </p>
-              ) : (
-                inboundRows.map((row, idx) =>
-                  renderTransportRow("inbound", idx, row, idx < savedInboundCount)
-                )
-              )}
-              {inboundRows.length < 3 && (
-                <button type="button" className="btn btn-secondary btn-sm" onClick={() => addRow("inbound")}>
-                  + Add inbound mode
-                </button>
-              )}
+              <TransportLegEditor
+                direction="inbound"
+                rows={inboundRows}
+                onRowsChange={setInboundRows}
+                showReservationWindow={showReservationWindow}
+                reservationModeLabel={reservationModeLabel}
+                transportPools={transportPools}
+              />
             </div>
           </div>
         )}
@@ -799,26 +795,18 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
             </div>
 
             <div style={{ marginTop: 16, borderTop: "1px solid #e2e8f0", paddingTop: 16 }}>
-              <div className="form-label form-label-with-help" style={{ marginBottom: 8 }}>
-                <span>Outbound transport modes</span>
-                {outboundRows.length > 0 && (
-                  <HelpPopover content="Up to 3 modes; shares must total 100%." label="Outbound transport modes help" />
-                )}
+              <div className="form-label" style={{ marginBottom: 8 }}>
+                Outbound transport legs
               </div>
-              {outboundRows.length === 0 ? (
-                <p className="form-helper" style={{ margin: "0 0 10px" }}>
-                  No outbound transport modes configured. Inventory drains by pipeline only.
-                </p>
-              ) : (
-                outboundRows.map((row, idx) =>
-                  renderTransportRow("outbound", idx, row, idx < savedOutboundCount)
-                )
-              )}
-              {outboundRows.length < 3 && (
-                <button type="button" className="btn btn-secondary btn-sm" onClick={() => addRow("outbound")}>
-                  + Add outbound mode
-                </button>
-              )}
+              <TransportLegEditor
+                direction="outbound"
+                rows={outboundRows}
+                onRowsChange={setOutboundRows}
+                shareColumnLabel="Share (%) of outbound"
+                showReservationWindow={showReservationWindow}
+                reservationModeLabel={reservationModeLabel}
+                transportPools={transportPools}
+              />
             </div>
           </div>
         )}
@@ -840,7 +828,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
                   capacityBandMode ? (
                     <>
                       Used in <strong>Fixed band</strong>
-                      {storageMode === "time_shared_storage" ? " and Time-shared" : ""} mode: this share × terminal
+                      mode: this share × terminal
                       total storage sets this customer&apos;s dedicated capacity band (tank-full and inventory gates).
                     </>
                   ) : (
@@ -901,6 +889,82 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           </div>
         )}
       </section>
+
+      {gradeMassBalancingEnabled && (
+        <section className="customer-form-section card">
+          <button
+            type="button"
+            className="customer-form-section-toggle"
+            onClick={() => toggleSection("gradeMix")}
+          >
+            <span className="section-heading-row">
+              Grade mass balancing
+              <span onClick={(e) => e.stopPropagation()}>
+                <HelpPopover
+                  label="Grade mix help"
+                  content="Shares apply to all inbound and outbound flows for this customer — berth cargo and pipeline alike. Must sum to 100%."
+                />
+              </span>
+            </span>
+            <span>{openSections.gradeMix ? "Hide" : "Show"}</span>
+          </button>
+          {openSections.gradeMix && (
+            <div className="customer-form-section-content">
+              <p className="form-helper" style={{ marginTop: 0 }}>
+                Attribute each customer&apos;s flows to green, blue, and grey. Terminal mass-balance is tracked
+                per grade (all customers combined), not per customer.
+              </p>
+              <div className="form-grid">
+                <div className="form-group">
+                  <label className="form-label">Green (%)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    className="form-input"
+                    value={gradeGreenPct}
+                    onChange={(e) => setGradeGreenPct(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Blue (%)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    className="form-input"
+                    value={gradeBluePct}
+                    onChange={(e) => setGradeBluePct(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Grey (%)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    className="form-input"
+                    value={gradeGreyPct}
+                    onChange={(e) => setGradeGreyPct(e.target.value)}
+                  />
+                </div>
+              </div>
+              <p style={{ fontSize: 12, color: "#64748b", margin: "8px 0 0" }}>
+                Sum:{" "}
+                {(
+                  (parseFloat(gradeGreenPct) || 0) +
+                  (parseFloat(gradeBluePct) || 0) +
+                  (parseFloat(gradeGreyPct) || 0)
+                ).toFixed(1)}
+                %
+              </p>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ── Time-shared storage ─────────────────────────────────────── */}
       <section className="customer-form-section card">

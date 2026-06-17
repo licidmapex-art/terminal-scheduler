@@ -107,7 +107,9 @@ interface ResourceUtilRow {
   resourceType: string;
   totalSlots: number;
   utilizationPct: number;
+  utilizationReservationPct?: number;
   totalHoursOccupied: number;
+  totalHoursReservation?: number;
 }
 
 interface CustomerLike {
@@ -237,7 +239,9 @@ export function buildAnalyticsAiSummary(input: {
       type: r.resourceType,
       slots: r.totalSlots,
       utilizationPct: r.utilizationPct,
-      hoursOnBerth: r.totalHoursOccupied
+      utilizationReservationPct: r.utilizationReservationPct ?? r.utilizationPct,
+      hoursOnBerth: r.totalHoursOccupied,
+      hoursReservation: r.totalHoursReservation ?? r.totalHoursOccupied
     })),
     totals: {
       scheduledSlots: input.totalSlots,

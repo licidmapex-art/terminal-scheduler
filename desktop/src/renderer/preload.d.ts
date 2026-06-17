@@ -25,17 +25,87 @@ declare global {
           status: string;
           conflictReason: string | null;
         }>;
-        feasibilityWarnings: string[];
+        feasibilityWarnings: Array<{ key: string; severity: "amber" | "red"; message: string }>;
         inventoryTimeline: Record<string, number[]>;
       }>;
       getSlots: () => Promise<unknown[]>;
+      getTweakState: () => Promise<{
+        hasBaseline: boolean;
+        canUndo: boolean;
+        needsReplay: boolean;
+        isTweaked: boolean;
+        slotTweaks: Record<string, "added" | "modified">;
+        baselineSlots: unknown[];
+      }>;
+      getStochasticState: () => Promise<{
+        active: boolean;
+        run: {
+          stochasticSeed?: number;
+          slots: unknown[];
+          ghostSlots: unknown[];
+          simulationLog: unknown[];
+          inventoryTimeline: Record<string, number[]>;
+          feasibilityWarnings: Array<{ key: string; severity: "amber" | "red"; message: string }>;
+          slotAdjustments: Array<{ slotId: string; deltaStartMs: number; deltaEndMs: number; reason: string }>;
+          immobilisationWindows: Array<{ resourceId?: string; startMs: number; endMs: number; label: string }>;
+          stochasticEvents: unknown[];
+        } | null;
+      }>;
+      sampleStochastic: (seed?: number) => Promise<
+        | { ok: true; run: NonNullable<Awaited<ReturnType<NonNullable<Window["schedulerAPI"]>["getStochasticState"]>>["run"]> }
+        | { ok: false; error: string }
+      >;
+      clearStochastic: () => Promise<{ ok: true }>;
+      updateSimulation: () => Promise<
+        | {
+            ok: true;
+            scheduledSlots: unknown[];
+            feasibilityWarnings: Array<{ key: string; severity: "amber" | "red"; message: string }>;
+            inventoryTimeline: Record<string, number[]>;
+          }
+        | { ok: false; error: string }
+      >;
+      restoreBaseline: () => Promise<
+        | {
+            ok: true;
+            scheduledSlots: unknown[];
+            feasibilityWarnings: Array<{ key: string; severity: "amber" | "red"; message: string }>;
+            inventoryTimeline: Record<string, number[]>;
+          }
+        | { ok: false; error: string }
+      >;
+      undo: () => Promise<
+        | {
+            ok: true;
+            scheduledSlots: unknown[];
+            feasibilityWarnings: Array<{ key: string; severity: "amber" | "red"; message: string }>;
+            inventoryTimeline: Record<string, number[]>;
+          }
+        | { ok: false; error: string }
+      >;
+      deleteSlot: (slotId: string) => Promise<{ ok: true; slotId: string } | { ok: false; error: string }>;
+      upsertSlot: (payload: {
+        slot: {
+          id?: string;
+          customerId: string;
+          resourceId: string;
+          direction: string;
+          mode: string;
+          volume: number;
+          start: string;
+          end: string;
+          legKey?: string | null;
+        };
+        isNew?: boolean;
+      }) => Promise<{ ok: true; slot: unknown } | { ok: false; error: string }>;
       getSimulationLog: () => Promise<unknown[]>;
-      getFeasibilityWarnings: () => Promise<string[]>;
+      getFeasibilityWarnings: () => Promise<Array<{ key: string; severity: "amber" | "red"; message: string }>>;
       exportSimulationExcel: () => Promise<
         { ok: true; path: string } | { ok: false; error: string }
       >;
       getInventoryTimeline: () => Promise<{
         timeline: Record<string, number[]>;
+        gradeTimeline?: Record<string, Record<"green" | "blue" | "grey", number[]>> | null;
         startDate: string | null;
         totalStorageCapacity?: number | null;
       } | null>;
@@ -49,6 +119,10 @@ declare global {
       createResource: (r: unknown) => Promise<unknown>;
       updateResource: (r: unknown) => Promise<unknown>;
       deleteResource: (id: string) => Promise<unknown>;
+      getTransportPools: () => Promise<unknown[]>;
+      createTransportPool: (p: unknown) => Promise<unknown>;
+      updateTransportPool: (p: unknown) => Promise<unknown>;
+      deleteTransportPool: (id: string) => Promise<unknown>;
       getSimulationConfigs: () => Promise<unknown[]>;
       createSimulationConfig: (c: unknown) => Promise<unknown>;
       updateSimulationConfig: (id: string, c: unknown) => Promise<unknown>;

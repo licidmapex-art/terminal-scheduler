@@ -12,6 +12,7 @@ import {
 } from "./customerLegTargets";
 import { resolveCustomerPipelineRates } from "./pipelineFlows";
 import { getCompatibleResources } from "./resourceAllocation";
+import { reservationMode } from "./berthReservation";
 
 /** Derived transport leg for feasibility + scheduler (no persisted requests). */
 export interface SchedulingLeg {
@@ -24,6 +25,31 @@ export interface SchedulingLeg {
   meps: number;
   targetSlots: number;
   roundtripHours: number;
+  reservationWindowHours?: number;
+  /** Shared transport pool — roundtrip enforced across pool members only for attributed (single-asset) pools. */
+  poolId?: string | null;
+  inventoryAllocation?: "attributed" | "proportional";
+}
+
+export type FeasibilitySeverity = "amber" | "red";
+
+export interface FeasibilityWarning {
+  key: string;
+  severity: FeasibilitySeverity;
+  message: string;
+  meta?: Record<string, number | string | boolean | null | undefined>;
+}
+
+function warningCfg(
+  config: SimulationConfig,
+  key: string
+): { enabled: boolean; severity: FeasibilitySeverity; threshold?: number } {
+  const row = config.feasibilityWarnings?.[key];
+  return {
+    enabled: row?.enabled !== false,
+    severity: row?.severity === "red" ? "red" : "amber",
+    threshold: typeof row?.threshold === "number" && Number.isFinite(row.threshold) ? row.threshold : undefined
+  };
 }
 
 function getCompatibleLegs(
@@ -55,8 +81,8 @@ export function runFeasibilityChecks(
   resources: Resource[],
   legs: SchedulingLeg[],
   config: SimulationConfig
-): string[] {
-  const warnings: string[] = [];
+): FeasibilityWarning[] {
+  const warnings: FeasibilityWarning[] = [];
 
   const periodMs = config.endDate.getTime() - config.startDate.getTime();
   const simulationPeriodHours = periodMs / (60 * 60 * 1000);
@@ -69,12 +95,18 @@ export function runFeasibilityChecks(
       0
     );
     if (inboundMaxMeps > customerMax) {
-      warnings.push(
-        `Customer ${customer.name}: inbound MEPS (${inboundMaxMeps.toLocaleString()}t) ` +
-          `exceeds storage capacity (${customerMax.toLocaleString()}t). ` +
-          `Ships can only be scheduled when tank is near empty. ` +
-          `Consider increasing storage capacity or reducing MEPS.`
-      );
+      const w = warningCfg(config, "inbound_meps_exceeds_capacity");
+      if (w.enabled) {
+        warnings.push({
+          key: "inbound_meps_exceeds_capacity",
+          severity: w.severity,
+          message:
+            `Customer ${customer.name}: inbound MEPS (${inboundMaxMeps.toLocaleString()}t) ` +
+            `exceeds storage capacity (${customerMax.toLocaleString()}t). ` +
+            `Ships can only be scheduled when tank is near empty. ` +
+            `Consider increasing storage capacity or reducing MEPS.`
+        });
+      }
     }
   }
 
@@ -92,9 +124,14 @@ export function runFeasibilityChecks(
     const availableHours = simulationPeriodHours - blackoutHours;
 
     if (minHoursNeeded > availableHours) {
-      warnings.push(
-        `Resource ${r.name} is oversubscribed: needs ${minHoursNeeded.toFixed(1)}h, only ${availableHours.toFixed(1)}h available`
-      );
+      const w = warningCfg(config, "resource_oversubscribed");
+      if (w.enabled) {
+        warnings.push({
+          key: "resource_oversubscribed",
+          severity: w.severity,
+          message: `Resource ${r.name} is oversubscribed: needs ${minHoursNeeded.toFixed(1)}h, only ${availableHours.toFixed(1)}h available`
+        });
+      }
     }
   }
 
@@ -120,15 +157,30 @@ export function runFeasibilityChecks(
       totalInbound > 0 &&
       Math.abs(totalInbound - totalOutbound) / Math.max(totalInbound, 1) > 0.2
     ) {
-      warnings.push(
-        `Customer ${c.name}: inbound (${totalInbound.toFixed(0)}t) and outbound (${totalOutbound.toFixed(0)}t) throughput differ by more than 20%`
-      );
+      const w = warningCfg(config, "mass_balance_throughput_mismatch");
+      if (w.enabled) {
+        warnings.push({
+          key: "mass_balance_throughput_mismatch",
+          severity: w.severity,
+          message: `Customer ${c.name}: inbound (${totalInbound.toFixed(0)}t) and outbound (${totalOutbound.toFixed(0)}t) throughput differ by more than 20%`
+        });
+      }
     }
   }
 
   const totalStorageShare = customers.reduce((s, c) => s + c.storageShare, 0);
-  if (Math.abs(totalStorageShare - 100) > 0.01) {
-    warnings.push(`Storage shares sum to ${totalStorageShare.toFixed(1)}%, expected 100%`);
+  const storageMode = config.storageMode ?? "fixed_band";
+  const isIndividualMode = storageMode === "fixed_band" || storageMode === "time_shared_storage";
+  const storageShareThreshold = warningCfg(config, "storage_shares_sum").threshold ?? 0.2;
+  if (isIndividualMode && Math.abs(totalStorageShare - 100) > storageShareThreshold) {
+    const w = warningCfg(config, "storage_shares_sum");
+    if (w.enabled) {
+      warnings.push({
+        key: "storage_shares_sum",
+        severity: w.severity,
+        message: `Storage shares sum to ${totalStorageShare.toFixed(1)}%, expected 100%`
+      });
+    }
   }
 
   for (const customer of customers) {
@@ -138,12 +190,18 @@ export function runFeasibilityChecks(
 
       if (maxSlots < targetSlots) {
         const achievableVolume = maxSlots * customer.inboundMEPS;
-        warnings.push(
-          `Customer ${customer.name}: inbound roundtrip of ${customer.inboundRoundtripHours}h ` +
-            `limits to ${maxSlots} slots (${achievableVolume.toLocaleString()}t) — ` +
-            `throughput target of ${customer.declaredInboundThroughput.toLocaleString()}t not achievable. ` +
-            `Reduce roundtrip time or MEPS to close the gap.`
-        );
+        const w = warningCfg(config, "inbound_roundtrip_limits_throughput");
+        if (w.enabled) {
+          warnings.push({
+            key: "inbound_roundtrip_limits_throughput",
+            severity: w.severity,
+            message:
+              `Customer ${customer.name}: inbound roundtrip of ${customer.inboundRoundtripHours}h ` +
+              `limits to ${maxSlots} slots (${achievableVolume.toLocaleString()}t) — ` +
+              `throughput target of ${customer.declaredInboundThroughput.toLocaleString()}t not achievable. ` +
+              `Reduce roundtrip time or MEPS to close the gap.`
+          });
+        }
       }
     }
 
@@ -156,10 +214,16 @@ export function runFeasibilityChecks(
 
         if (maxSlots < targetSlots) {
           const achievableVolume = maxSlots * customer.outboundMEPS;
-          warnings.push(
-            `Customer ${customer.name}: outbound roundtrip of ${customer.outboundRoundtripHours}h ` +
-              `limits to ${maxSlots} slots (${achievableVolume.toLocaleString()}t).`
-          );
+          const w = warningCfg(config, "outbound_roundtrip_limits_throughput");
+          if (w.enabled) {
+            warnings.push({
+              key: "outbound_roundtrip_limits_throughput",
+              severity: w.severity,
+              message:
+                `Customer ${customer.name}: outbound roundtrip of ${customer.outboundRoundtripHours}h ` +
+                `limits to ${maxSlots} slots (${achievableVolume.toLocaleString()}t).`
+            });
+          }
         }
       }
     }
@@ -178,11 +242,53 @@ export function runFeasibilityChecks(
     const outboundCap = outboundRoundtripCapacityTonnes(c, periodHours);
     if (outboundCap < OUTBOUND_INBOUND_CAPACITY_RATIO * inbound) {
       const ratioPct = ((outboundCap / inbound) * 100).toFixed(0);
-      warnings.push(
-        `Customer ${c.name}: outbound loading/unloading capacity (${outboundCap.toLocaleString()}t from period ÷ roundtrip × MEPS) ` +
-          `is less than 110% of inbound throughput (${inbound.toLocaleString()}t, ${ratioPct}%). ` +
-          `Increase outbound MEPS, shorten roundtrip, or reduce inbound.`
-      );
+      const w = warningCfg(config, "outbound_capacity_below_inbound");
+      if (w.enabled) {
+        warnings.push({
+          key: "outbound_capacity_below_inbound",
+          severity: w.severity,
+          message:
+            `Customer ${c.name}: outbound loading/unloading capacity (${outboundCap.toLocaleString()}t from period ÷ roundtrip × MEPS) ` +
+            `is less than 110% of inbound throughput (${inbound.toLocaleString()}t, ${ratioPct}%). ` +
+            `Increase outbound MEPS, shorten roundtrip, or reduce inbound.`
+        });
+      }
+    }
+  }
+
+  const berthMode = reservationMode(config);
+  if (berthMode !== "none") {
+    const modeLabel = berthMode === "laycan" ? "Laycan" : "Window of arrival";
+    for (const leg of legs) {
+      const w = leg.reservationWindowHours ?? 0;
+      const label = leg.laneLabel ?? `${leg.mode} ${(leg.laneIndex ?? 0) + 1}`;
+      if (w <= 0) {
+        const ww = warningCfg(config, "reservation_window_missing");
+        if (ww.enabled) {
+          warnings.push({
+            key: "reservation_window_missing",
+            severity: ww.severity,
+            message: `${leg.customer.name} ${leg.direction} ${label}: ${modeLabel} enabled but window (h) is not set on this leg.`
+          });
+        }
+        continue;
+      }
+      if (berthMode === "laycan") {
+        const compatible = getCompatibleResources(leg.mode, resources, config);
+        const maxFlow = compatible.reduce((mx, r) => Math.max(mx, r.flowRate), 0);
+        const minOpHours =
+          maxFlow > 0 ? layPerVisit + leg.meps / maxFlow : layPerVisit;
+        if (w + 0.01 < minOpHours) {
+          const ww = warningCfg(config, "laycan_window_shorter_than_operation");
+          if (ww.enabled) {
+            warnings.push({
+              key: "laycan_window_shorter_than_operation",
+              severity: ww.severity,
+              message: `${leg.customer.name} ${leg.direction} ${label}: laycan window (${w}h) is shorter than minimum operation (${minOpHours.toFixed(1)}h).`
+            });
+          }
+        }
+      }
     }
   }
 

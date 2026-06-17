@@ -7,10 +7,10 @@ import React, {
   useLayoutEffect,
   type CSSProperties
 } from "react";
-import { Loader2, Zap } from "lucide-react";
+import { Loader2, Zap, RefreshCw, RotateCcw, Undo2, Pencil, Dices, X } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { HelpPopover } from "./HelpPopover";
-import { setLastSchedulerRun, useStore } from "../store";
+import { setLastSchedulerRun, setScheduleModifyMode, useStore } from "../store";
 import { formatRelativeTime } from "../lib/formatRelativeTime";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import {
@@ -39,6 +39,20 @@ import {
 import { pacerContinuousTarget } from "../../engine/pacing";
 import { ConstraintIcon } from "./ConstraintIcon";
 import TimelineChartLegend, { type LegendEntry } from "./TimelineChartLegend";
+import SlotEditorModal, { type SlotEditorDraft } from "./SlotEditorModal";
+import {
+  applyDrag,
+  clientXToContentMs,
+  msToContentLeft,
+  msToContentWidth,
+  volumeForDrag,
+  endMsForVolume,
+  type GanttDragKind,
+  type GanttDragState
+} from "../lib/ganttSlotGeometry";
+import { defaultModeForResource, defaultLegKey, volumeFromOccupation } from "../../engine/manualSlot";
+import { mepsForScheduledSlot, assignRoundtripBarLanes, roundtripCooldownStartHour, roundtripHoursForScheduledSlot, roundtripLaneKeyForSlot } from "../../engine/customerTransports";
+import type { Resource as EngineResource } from "../../types";
 
 // Single source of truth for all positioning
 const LABEL_WIDTH = 140;
@@ -72,6 +86,7 @@ const SLOT_MIN_WIDTH_PX = 2;
 const ONE_DAY_MS = 1000 * 60 * 60 * 24;
 /** Delay before hiding slot tooltip so the cursor can reach the fixed panel without clearing hover. */
 const SLOT_TOOLTIP_LEAVE_MS = 400;
+const SLOT_RESIZE_HANDLE_PX = 6;
 
 function formatDDMMYYYY(d: Date): string {
   const day = String(d.getDate()).padStart(2, "0");
@@ -110,9 +125,12 @@ interface Slot {
   resourceId: string;
   direction: string;
   mode: string;
+  legKey?: string | null;
   volume: number;
   start: string;
   end: string;
+  reservationStart?: string | null;
+  reservationEnd?: string | null;
   status: string;
   conflictReason: string | null;
 }
@@ -161,6 +179,34 @@ interface SimLogRow {
   /** Matches Simulation Log / scheduler snapshots; prefer for Gantt when log is hour-aligned. */
   terminalTotal?: number;
   transportStatus?: SimTransportStatus[];
+  stochasticEvents?: Array<{ kind: string; label: string; hourStart: number; hourEnd: number }>;
+}
+
+interface SerializedStochasticRun {
+  stochasticSeed?: number;
+  slots: Slot[];
+  ghostSlots: Slot[];
+  simulationLog: SimLogRow[];
+  inventoryTimeline: Record<string, number[]>;
+  feasibilityWarnings: Array<{ key: string; severity: "amber" | "red"; message: string }>;
+  slotAdjustments: Array<{ slotId: string; deltaStartMs: number; deltaEndMs: number; reason: string }>;
+  immobilisationWindows: Array<{ resourceId?: string; startMs: number; endMs: number; label: string }>;
+  stochasticEvents: unknown[];
+}
+
+type ScheduleViewMode = "working" | "stochastic";
+
+function slotsShareTiming(a: Slot[], b: Slot[]): boolean {
+  if (a.length !== b.length) return false;
+  const byId = new Map(b.map((s) => [s.id, s]));
+  return a.every((s) => {
+    const other = byId.get(s.id);
+    if (!other) return false;
+    return (
+      new Date(s.start).getTime() === new Date(other.start).getTime() &&
+      new Date(s.end).getTime() === new Date(other.end).getTime()
+    );
+  });
 }
 
 /** Log rows indexed 0..n with row.hour === index — same grid as timeline / IPC inventory. */
@@ -171,6 +217,52 @@ function simulationLogIsHourAligned(log: SimLogRow[]): boolean {
     if (!Number.isFinite(hv) || Math.round(hv) !== i) return false;
   }
   return true;
+}
+
+interface GanttInventorySeries {
+  byCustomer: Map<string, number[]>;
+  terminalByHour: number[];
+  maxHours: number;
+}
+
+/** Build per-customer + terminal inventory hour series for Gantt overlays. */
+function buildGanttInventorySeries(
+  timeline: Record<string, number[]> | undefined,
+  simLog: SimLogRow[]
+): GanttInventorySeries {
+  if (!timeline || Object.keys(timeline).length === 0) {
+    return { byCustomer: new Map(), terminalByHour: [], maxHours: 0 };
+  }
+  const ids = Object.keys(timeline);
+  const fromTimelineLen = Math.max(...ids.map((id) => timeline[id]?.length ?? 0));
+  if (
+    simLog.length > 0 &&
+    simulationLogIsHourAligned(simLog) &&
+    fromTimelineLen > 0 &&
+    simLog.length === fromTimelineLen
+  ) {
+    const byCustomer = new Map<string, number[]>();
+    for (const id of ids) {
+      byCustomer.set(id, simLog.map((row) => row.customerInventories?.[id] ?? 0));
+    }
+    const terminalByHour = simLog.map((row) => {
+      if (row.terminalTotal != null && Number.isFinite(row.terminalTotal)) return row.terminalTotal;
+      return ids.reduce((s, id) => s + (row.customerInventories?.[id] ?? 0), 0);
+    });
+    return { byCustomer, terminalByHour, maxHours: simLog.length };
+  }
+  const byCustomer = new Map<string, number[]>();
+  for (const id of ids) {
+    byCustomer.set(id, timeline[id] ? [...timeline[id]!] : []);
+  }
+  const maxHours = fromTimelineLen;
+  const terminalByHour = new Array<number>(maxHours).fill(0);
+  for (const id of ids) {
+    const arr = byCustomer.get(id);
+    if (!arr) continue;
+    for (let h = 0; h < arr.length; h++) terminalByHour[h] += arr[h] ?? 0;
+  }
+  return { byCustomer, terminalByHour, maxHours };
 }
 
 function formatDocTooltip(v: number | null | undefined): string {
@@ -304,6 +396,29 @@ export default function GanttChart() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [timelineData, setTimelineData] = useState<InventoryTimelineResponse | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [tweakState, setTweakState] = useState({
+    hasBaseline: false,
+    canUndo: false,
+    needsReplay: false,
+    isTweaked: false,
+    slotTweaks: {} as Record<string, "added" | "modified">
+  });
+  const [tweakError, setTweakError] = useState<string | null>(null);
+  const [activeDrag, setActiveDrag] = useState<GanttDragState | null>(null);
+  const [dragPreview, setDragPreview] = useState<{
+    startMs: number;
+    endMs: number;
+    resourceId: string;
+  } | null>(null);
+  const [slotEditor, setSlotEditor] = useState<{
+    isNew: boolean;
+    draft: SlotEditorDraft;
+    legKey?: string | null;
+  } | null>(null);
+  const dragRef = useRef<GanttDragState | null>(null);
+  const modifySchedule = useStore((s) => s.scheduleModifyMode);
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [hasRun, setHasRun] = useState(false);
   const [hoverSlot, setHoverSlot] = useState<Slot | null>(null);
   const [invChartTooltip, setInvChartTooltip] = useState<{
@@ -314,17 +429,26 @@ export default function GanttChart() {
   const hoverClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [config, setConfig] = useState<SimulationConfig | null>(null);
   const [simulationLog, setSimulationLog] = useState<SimLogRow[]>([]);
-  const [feasibilityWarnings, setFeasibilityWarnings] = useState<string[]>([]);
+  const [feasibilityWarnings, setFeasibilityWarnings] = useState<
+    Array<{ key: string; severity: "amber" | "red"; message: string }>
+  >([]);
   const [pixelsPerDay, setPixelsPerDay] = useState(DEFAULT_PIXELS_PER_DAY);
   const [showInventory, setShowInventory] = useState(true);
   const [showRoundtrip, setShowRoundtrip] = useState(true);
-  const [showTimeshared, setShowTimeshared] = useState(true);
+  const [showTimeshared, setShowTimeshared] = useState(false);
   const [showStorageCapLine, setShowStorageCapLine] = useState(true);
   const [showDoc, setShowDoc] = useState(false);
   const [showAverageDoc, setShowAverageDoc] = useState(true);
   const [showCombinedDoc, setShowCombinedDoc] = useState(true);
   const [showPacing, setShowPacing] = useState(false);
   const [showConstraints, setShowConstraints] = useState(false);
+  const [showBaselineOverlay, setShowBaselineOverlay] = useState(false);
+  const [scheduleView, setScheduleView] = useState<ScheduleViewMode>("working");
+  const [showStochasticCompare, setShowStochasticCompare] = useState(false);
+  const [stochasticRun, setStochasticRun] = useState<SerializedStochasticRun | null>(null);
+  const [isSampling, setIsSampling] = useState(false);
+  const [stochasticError, setStochasticError] = useState<string | null>(null);
+  const [baselineSlots, setBaselineSlots] = useState<Slot[]>([]);
   const [enabledConstraints, setEnabledConstraints] = useState<Set<BlockingConstraintKey>>(
     () => new Set(SCHEDULING_CONSTRAINTS.map((c) => c.key))
   );
@@ -363,7 +487,7 @@ export default function GanttChart() {
 
     loadData();
     return () => { mounted = false; };
-  }, []);
+  }, [lastSchedulerRun]);
 
   const cancelPendingHoverClear = useCallback(() => {
     if (hoverClearTimeoutRef.current !== null) {
@@ -387,13 +511,14 @@ export default function GanttChart() {
     let mounted = true;
 
     const hydrateFromScheduler = async () => {
-      if (!window.schedulerAPI) return;
+      if (!window.schedulerAPI || !window.dbAPI) return;
       try {
-        const [slotsRes, inv, sim, warn] = await Promise.all([
+        const [slotsRes, inv, sim, warn, cfgRes] = await Promise.all([
           window.schedulerAPI.getSlots(),
           window.schedulerAPI.getInventoryTimeline(),
           window.schedulerAPI.getSimulationLog(),
-          window.schedulerAPI.getFeasibilityWarnings()
+          window.schedulerAPI.getFeasibilityWarnings(),
+          window.dbAPI.getSimulationConfigs()
         ]);
         if (!mounted) return;
         const slotList = (slotsRes as Slot[]) ?? [];
@@ -401,8 +526,34 @@ export default function GanttChart() {
         setTimelineData((inv as InventoryTimelineResponse | null) ?? null);
         const logArr = Array.isArray(sim) ? (sim as SimLogRow[]) : [];
         setSimulationLog(logArr);
-        setFeasibilityWarnings(Array.isArray(warn) ? warn : []);
+        setFeasibilityWarnings(
+          Array.isArray(warn)
+            ? (warn as Array<{ key: string; severity: "amber" | "red"; message: string }>)
+            : []
+        );
         setHasRun(slotList.length > 0 || logArr.length > 0);
+        const configs = Array.isArray(cfgRes) ? cfgRes : [];
+        setConfig(configs[0] ?? null);
+        if (window.schedulerAPI.getTweakState) {
+          const state = await window.schedulerAPI.getTweakState();
+          if (mounted) {
+            setTweakState({
+              hasBaseline: state.hasBaseline,
+              canUndo: state.canUndo,
+              needsReplay: state.needsReplay,
+              isTweaked: state.isTweaked,
+              slotTweaks: state.slotTweaks
+            });
+            setBaselineSlots((state.baselineSlots as Slot[]) ?? []);
+            if (state.isTweaked) setScheduleModifyMode(true);
+          }
+        }
+        if (window.schedulerAPI.getStochasticState) {
+          const stoch = await window.schedulerAPI.getStochasticState();
+          if (mounted && stoch.active && stoch.run) {
+            setStochasticRun(stoch.run as SerializedStochasticRun);
+          }
+        }
       } catch {
         if (mounted) {
           setSlots([]);
@@ -418,28 +569,290 @@ export default function GanttChart() {
     return () => { mounted = false; };
   }, []);
 
+  const refreshTweakState = useCallback(async () => {
+    if (!window.schedulerAPI?.getTweakState) return;
+    const state = await window.schedulerAPI.getTweakState();
+    setTweakState({
+      hasBaseline: state.hasBaseline,
+      canUndo: state.canUndo,
+      needsReplay: state.needsReplay,
+      isTweaked: state.isTweaked,
+      slotTweaks: state.slotTweaks
+    });
+    setBaselineSlots((state.baselineSlots as Slot[]) ?? []);
+    if (!state.hasBaseline) setShowBaselineOverlay(false);
+  }, []);
+
+  const viewingStochastic = scheduleView === "stochastic";
+
+  const displaySlots = useMemo((): Slot[] => {
+    if (viewingStochastic && stochasticRun?.slots?.length) {
+      return stochasticRun.slots;
+    }
+    return slots;
+  }, [viewingStochastic, stochasticRun, slots]);
+
+  const chartSimulationLog = useMemo((): SimLogRow[] => {
+    if (viewingStochastic && stochasticRun?.simulationLog?.length) {
+      return stochasticRun.simulationLog;
+    }
+    return simulationLog;
+  }, [viewingStochastic, stochasticRun, simulationLog]);
+
+  const chartTimelineData = useMemo((): InventoryTimelineResponse | null => {
+    if (viewingStochastic && stochasticRun?.inventoryTimeline) {
+      return {
+        timeline: stochasticRun.inventoryTimeline,
+        startDate: timelineData?.startDate ?? config?.startDate ?? null,
+        totalStorageCapacity: timelineData?.totalStorageCapacity ?? config?.totalStorageCapacity
+      };
+    }
+    return timelineData;
+  }, [viewingStochastic, stochasticRun, timelineData, config]);
+
+  const chartFeasibilityWarnings = useMemo(() => {
+    if (viewingStochastic && stochasticRun) {
+      return stochasticRun.feasibilityWarnings;
+    }
+    return feasibilityWarnings;
+  }, [viewingStochastic, stochasticRun, feasibilityWarnings]);
+
+  const stochasticGhostSlots = useMemo((): Slot[] => {
+    if (!viewingStochastic || !showStochasticCompare || !stochasticRun) return [];
+    return stochasticRun.ghostSlots ?? [];
+  }, [viewingStochastic, showStochasticCompare, stochasticRun]);
+
+  const baselineMatchesWorking = useMemo(
+    () => tweakState.hasBaseline && slotsShareTiming(baselineSlots, slots),
+    [tweakState.hasBaseline, baselineSlots, slots]
+  );
+
+  const stochasticHasSlotShifts = useMemo(() => {
+    if (!stochasticRun) return false;
+    if ((stochasticRun.slotAdjustments?.length ?? 0) > 0) return true;
+    return !slotsShareTiming(stochasticRun.slots ?? [], stochasticRun.ghostSlots ?? []);
+  }, [stochasticRun]);
+
+  const delayHoursBySlotId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const adj of stochasticRun?.slotAdjustments ?? []) {
+      if (adj.deltaStartMs > 0) m.set(adj.slotId, adj.deltaStartMs / HOUR_MS);
+    }
+    return m;
+  }, [stochasticRun]);
+
+  const immobilisationConflictSlotIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const w of chartFeasibilityWarnings) {
+      if (w.key === "stochastic_immobilisation_conflict") {
+        const slotId = (w as { meta?: { slotId?: string } }).meta?.slotId;
+        if (slotId) ids.add(slotId);
+      }
+    }
+    return ids;
+  }, [chartFeasibilityWarnings]);
+
+  const handleSampleStochastic = useCallback(async () => {
+    if (!window.schedulerAPI?.sampleStochastic) return;
+    setIsSampling(true);
+    setStochasticError(null);
+    try {
+      const res = await window.schedulerAPI.sampleStochastic();
+      if (!res.ok) {
+        setStochasticError(res.error);
+        return;
+      }
+      if (res.run) {
+        setStochasticRun(res.run as SerializedStochasticRun);
+        setShowStochasticCompare(false);
+        setScheduleView("stochastic");
+      }
+    } catch (e) {
+      setStochasticError(String(e));
+    } finally {
+      setIsSampling(false);
+    }
+  }, []);
+
+  const handleClearStochastic = useCallback(async () => {
+    if (window.schedulerAPI?.clearStochastic) {
+      await window.schedulerAPI.clearStochastic();
+    }
+    setStochasticRun(null);
+    setShowStochasticCompare(false);
+    setScheduleView("working");
+    setStochasticError(null);
+  }, []);
+
+  const refreshSchedulerOutputs = useCallback(async () => {
+    if (!window.schedulerAPI) return;
+    const [slotsRes, inv, sim, warn] = await Promise.all([
+      window.schedulerAPI.getSlots(),
+      window.schedulerAPI.getInventoryTimeline(),
+      window.schedulerAPI.getSimulationLog(),
+      window.schedulerAPI.getFeasibilityWarnings()
+    ]);
+    const slotList = (slotsRes as Slot[]) ?? [];
+    setSlots(slotList);
+    setTimelineData((inv as InventoryTimelineResponse | null) ?? null);
+    const logArr = Array.isArray(sim) ? (sim as SimLogRow[]) : [];
+    setSimulationLog(logArr);
+    setFeasibilityWarnings(
+      Array.isArray(warn)
+        ? (warn as Array<{ key: string; severity: "amber" | "red"; message: string }>)
+        : []
+    );
+    setHasRun(slotList.length > 0 || logArr.length > 0);
+    await refreshTweakState();
+    setLastSchedulerRun();
+  }, [refreshTweakState]);
+
   const handleRunScheduler = async () => {
     if (!window.schedulerAPI || !window.dbAPI) return;
     setIsRunning(true);
+    setTweakError(null);
     try {
-      const runResult = await window.schedulerAPI.run();
-      const [slotsRes, inv, sim] = await Promise.all([
-        window.schedulerAPI.getSlots(),
-        window.schedulerAPI.getInventoryTimeline(),
-        window.schedulerAPI.getSimulationLog()
-      ]);
-      setSlots(slotsRes as Slot[]);
-      setTimelineData(inv as InventoryTimelineResponse | null);
-      setSimulationLog(Array.isArray(sim) ? (sim as SimLogRow[]) : []);
-      const fw = runResult?.feasibilityWarnings;
-      const warnList = Array.isArray(fw) ? fw : [];
-      setFeasibilityWarnings(warnList);
-      setHasRun(true);
-      setLastSchedulerRun();
+      await window.schedulerAPI.run();
+      setScheduleModifyMode(false);
+      setStochasticRun(null);
+      setShowStochasticCompare(false);
+      setScheduleView("working");
+      await refreshSchedulerOutputs();
     } finally {
       setIsRunning(false);
     }
   };
+
+  const handleUpdateSimulation = async () => {
+    if (!window.schedulerAPI?.updateSimulation) return;
+    setIsReplaying(true);
+    setTweakError(null);
+    try {
+      const res = await window.schedulerAPI.updateSimulation();
+      if (!res.ok) {
+        setTweakError(res.error);
+        return;
+      }
+      await refreshSchedulerOutputs();
+    } finally {
+      setIsReplaying(false);
+    }
+  };
+
+  const handleRestoreBaseline = async () => {
+    if (!window.schedulerAPI?.restoreBaseline) return;
+    setIsReplaying(true);
+    setTweakError(null);
+    try {
+      const res = await window.schedulerAPI.restoreBaseline();
+      if (!res.ok) {
+        setTweakError(res.error);
+        return;
+      }
+      setScheduleModifyMode(false);
+      await refreshSchedulerOutputs();
+    } finally {
+      setIsReplaying(false);
+    }
+  };
+
+  const handleUndo = async () => {
+    if (!window.schedulerAPI?.undo) return;
+    setIsReplaying(true);
+    setTweakError(null);
+    try {
+      const res = await window.schedulerAPI.undo();
+      if (!res.ok) {
+        setTweakError(res.error);
+        return;
+      }
+      await refreshSchedulerOutputs();
+    } finally {
+      setIsReplaying(false);
+    }
+  };
+
+  const deleteSlotById = useCallback(
+    async (slotId: string) => {
+      if (!hasRun || !tweakState.hasBaseline || !window.schedulerAPI?.deleteSlot) return;
+      setTweakError(null);
+      const res = await window.schedulerAPI.deleteSlot(slotId);
+      if (!res.ok) {
+        setTweakError(res.error);
+        return;
+      }
+      setHoverSlot(null);
+      setSelectedSlotId((id) => (id === slotId ? null : id));
+      await refreshSchedulerOutputs();
+    },
+    [hasRun, tweakState.hasBaseline, refreshSchedulerOutputs]
+  );
+
+  const handleDeleteHoverSlot = useCallback(async () => {
+    if (!hoverSlot) return;
+    await deleteSlotById(hoverSlot.id);
+  }, [hoverSlot, deleteSlotById]);
+
+  const exitModifySchedule = useCallback(() => {
+    cancelPendingHoverClear();
+    setScheduleModifyMode(false);
+    setHoverSlot(null);
+    setInvChartTooltip(null);
+    setSelectedSlotId(null);
+    dragRef.current = null;
+    setActiveDrag(null);
+    setDragPreview(null);
+  }, [cancelPendingHoverClear]);
+
+  const toggleModifySchedule = useCallback(() => {
+    if (modifySchedule) {
+      exitModifySchedule();
+      return;
+    }
+    cancelPendingHoverClear();
+    setHoverSlot(null);
+    setInvChartTooltip(null);
+    setSelectedSlotId(null);
+    setScheduleModifyMode(true);
+  }, [modifySchedule, cancelPendingHoverClear, exitModifySchedule]);
+
+  useEffect(() => {
+    if (!hasRun || !tweakState.hasBaseline) exitModifySchedule();
+  }, [hasRun, tweakState.hasBaseline, exitModifySchedule]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      if (e.key === "Escape" && modifySchedule) {
+        e.preventDefault();
+        exitModifySchedule();
+        return;
+      }
+
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+
+      if (modifySchedule && selectedSlotId) {
+        e.preventDefault();
+        void deleteSlotById(selectedSlotId);
+        return;
+      }
+      if (!modifySchedule && hoverSlot) {
+        e.preventDefault();
+        void handleDeleteHoverSlot();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    modifySchedule,
+    selectedSlotId,
+    hoverSlot,
+    handleDeleteHoverSlot,
+    deleteSlotById,
+    exitModifySchedule
+  ]);
 
   const applyWheelZoom = useCallback(
     (clientX: number, deltaY: number) => {
@@ -509,6 +922,17 @@ export default function GanttChart() {
     storageMode: "fixed_band"
   };
   const simStart = new Date(cfg.startDate).getTime();
+  const simEndMs = new Date(cfg.endDate).getTime();
+  const canTweakSchedule = hasRun && tweakState.hasBaseline;
+  const canEditSlots = canTweakSchedule && modifySchedule;
+  const tweakSummary = useMemo(() => {
+    const tweaks = Object.values(tweakState.slotTweaks);
+    return {
+      added: tweaks.filter((k) => k === "added").length,
+      modified: tweaks.filter((k) => k === "modified").length,
+      total: tweaks.length
+    };
+  }, [tweakState.slotTweaks]);
   const terminalStorageCap = cfg.totalStorageCapacity ?? timelineData?.totalStorageCapacity ?? 100000;
   const periodHoursSafe = Math.max(
     (new Date(cfg.endDate).getTime() - new Date(cfg.startDate).getTime()) / HOUR_MS,
@@ -608,6 +1032,308 @@ export default function GanttChart() {
 
   const customerById = useMemo(() => new Map(customers.map((c) => [c.id, c])), [customers]);
 
+  const flowRateForSlot = useCallback(
+    (
+      customerId: string,
+      direction: string,
+      mode: string,
+      legKey?: string | null,
+      volume = 1000
+    ): number => {
+      const c = customerById.get(customerId);
+      if (!c) return 500;
+      const temp: ScheduledSlot = {
+        id: "",
+        customerId,
+        resourceId: "",
+        direction: direction as ScheduledSlot["direction"],
+        mode: mode as ScheduledSlot["mode"],
+        legKey: legKey ?? null,
+        volume,
+        start: new Date(),
+        end: new Date(),
+        reservationStart: null,
+        reservationEnd: null,
+        status: "manual_override",
+        conflictReason: null
+      };
+      const rate = mepsForScheduledSlot(c as EngineCustomer, temp);
+      return rate > 0 ? rate : 500;
+    },
+    [customerById]
+  );
+
+  const commitSlotUpsert = useCallback(
+    async (
+      draft: SlotEditorDraft,
+      isNew: boolean,
+      legKey?: string | null
+    ): Promise<boolean> => {
+      if (!window.schedulerAPI?.upsertSlot) return false;
+      setTweakError(null);
+      const res = await window.schedulerAPI.upsertSlot({
+        slot: {
+          id: draft.id,
+          customerId: draft.customerId,
+          resourceId: draft.resourceId,
+          direction: draft.direction,
+          mode: draft.mode,
+          volume: draft.volume,
+          start: new Date(draft.startMs).toISOString(),
+          end: new Date(draft.endMs).toISOString(),
+          legKey:
+            legKey ??
+            defaultLegKey(draft.customerId, draft.direction, draft.mode)
+        },
+        isNew
+      });
+      if (!res.ok) {
+        setTweakError(res.error);
+        return false;
+      }
+      await refreshSchedulerOutputs();
+      return true;
+    },
+    [refreshSchedulerOutputs]
+  );
+
+  const finishDrag = useCallback(
+    async (drag: GanttDragState, startMs: number, endMs: number) => {
+      const engineCfg = cfg as EngineSimulationConfig;
+      if (drag.kind === "create") {
+        const resource = resources.find((r) => r.id === drag.resourceId);
+        const defaultCustomer = customers[0];
+        if (!resource || !defaultCustomer) return;
+        const mode = defaultModeForResource(resource as EngineResource);
+        const direction: "inbound" | "outbound" = "inbound";
+        const flowRate = flowRateForSlot(defaultCustomer.id, direction, mode);
+        const volume = volumeForDrag(startMs, endMs, flowRate, engineCfg, 1000);
+        const normalizedEnd = endMsForVolume(startMs, volume, flowRate, engineCfg);
+        setSlotEditor({
+          isNew: true,
+          draft: {
+            customerId: defaultCustomer.id,
+            resourceId: drag.resourceId,
+            direction,
+            mode,
+            volume,
+            startMs,
+            endMs: normalizedEnd
+          }
+        });
+        return;
+      }
+
+      const slot = slots.find((s) => s.id === drag.slotId);
+      if (!slot) return;
+      const flowRate = flowRateForSlot(
+        slot.customerId,
+        slot.direction,
+        slot.mode,
+        slot.legKey ?? null,
+        slot.volume
+      );
+      let volume = slot.volume;
+      let finalStart = startMs;
+      let finalEnd = endMs;
+      if (drag.kind === "move") {
+        finalEnd = endMsForVolume(finalStart, volume, flowRate, engineCfg);
+      } else {
+        // Resize: wall time is authoritative; volume follows loading hours (partial if < MEPS).
+        volume = volumeFromOccupation(
+          new Date(finalStart),
+          new Date(finalEnd),
+          flowRate,
+          engineCfg
+        );
+      }
+      const dir = parseSlotDirection(slot.direction);
+      if (!dir) return;
+      const mode = slot.mode as "ship" | "barge" | "train";
+      await commitSlotUpsert(
+        {
+          id: slot.id,
+          customerId: slot.customerId,
+          resourceId: slot.resourceId,
+          direction: dir,
+          mode,
+          volume,
+          startMs: finalStart,
+          endMs: finalEnd
+        },
+        false,
+        slot.legKey ?? null
+      );
+    },
+    [cfg, resources, customers, slots, flowRateForSlot, commitSlotUpsert]
+  );
+
+  const beginSlotDrag = useCallback(
+    (e: React.MouseEvent, kind: GanttDragKind, resourceId: string, slot?: Slot) => {
+      if (!canEditSlots || e.button !== 0 || !scrollRef.current) return;
+      e.stopPropagation();
+      e.preventDefault();
+      cancelPendingHoverClear();
+      setHoverSlot(null);
+      const pointerMs = clientXToContentMs(
+        e.clientX,
+        scrollRef.current,
+        pixelsPerDay,
+        simStart
+      );
+      const startMs = slot ? new Date(slot.start).getTime() : pointerMs;
+      const endMs = slot ? new Date(slot.end).getTime() : pointerMs;
+      const drag: GanttDragState = {
+        kind,
+        slotId: slot?.id,
+        resourceId,
+        pointerAnchorMs: pointerMs,
+        startMs,
+        endMs,
+        originStartMs: startMs,
+        originEndMs: endMs
+      };
+      dragRef.current = drag;
+      setActiveDrag(drag);
+      setDragPreview({ startMs, endMs, resourceId });
+      const pointerStartX = e.clientX;
+      let dragMoved = false;
+
+      const onMove = (ev: MouseEvent) => {
+        if (Math.abs(ev.clientX - pointerStartX) > 3) dragMoved = true;
+        const d = dragRef.current;
+        if (!d || !scrollRef.current) return;
+        const ptr = clientXToContentMs(
+          ev.clientX,
+          scrollRef.current,
+          pixelsPerDay,
+          simStart
+        );
+        const next = applyDrag(d, ptr, simStart, simEndMs, cfg as EngineSimulationConfig);
+        setDragPreview({ ...next, resourceId: d.resourceId });
+      };
+
+      const onUp = (ev: MouseEvent) => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        const d = dragRef.current;
+        dragRef.current = null;
+        setActiveDrag(null);
+        setDragPreview(null);
+        if (!d || !scrollRef.current) return;
+        const ptr = clientXToContentMs(
+          ev.clientX,
+          scrollRef.current,
+          pixelsPerDay,
+          simStart
+        );
+        const { startMs: s, endMs: en } = applyDrag(
+          d,
+          ptr,
+          simStart,
+          simEndMs,
+          cfg as EngineSimulationConfig
+        );
+        if (!dragMoved && d.kind !== "create" && d.slotId) {
+          setSelectedSlotId(d.slotId);
+          return;
+        }
+        setSelectedSlotId(null);
+        void finishDrag(d, s, en);
+      };
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [
+      canEditSlots,
+      pixelsPerDay,
+      simStart,
+      simEndMs,
+      cfg,
+      cancelPendingHoverClear,
+      finishDrag
+    ]
+  );
+
+  const handleRowCreateMouseDown = useCallback(
+    (e: React.MouseEvent, resourceId: string) => {
+      if (!canEditSlots || e.button !== 0) return;
+      if ((e.target as HTMLElement).closest("[data-slot-bar]")) return;
+      setSelectedSlotId(null);
+      beginSlotDrag(e, "create", resourceId);
+    },
+    [canEditSlots, beginSlotDrag]
+  );
+
+  const handleSlotBarMouseDown = useCallback(
+    (e: React.MouseEvent, slot: Slot) => {
+      if (!canEditSlots) return;
+      const bar = e.currentTarget as HTMLElement;
+      const rect = bar.getBoundingClientRect();
+      const localX = e.clientX - rect.left;
+      let kind: GanttDragKind = "move";
+      if (localX <= SLOT_RESIZE_HANDLE_PX) kind = "resize-start";
+      else if (localX >= rect.width - SLOT_RESIZE_HANDLE_PX) kind = "resize-end";
+      beginSlotDrag(e, kind, slot.resourceId, slot);
+    },
+    [canEditSlots, beginSlotDrag]
+  );
+
+  const openSlotEditor = useCallback((slot: Slot) => {
+    const dir = parseSlotDirection(slot.direction);
+    if (!dir) return;
+    setSlotEditor({
+      isNew: false,
+      draft: {
+        id: slot.id,
+        customerId: slot.customerId,
+        resourceId: slot.resourceId,
+        direction: dir,
+        mode: slot.mode as "ship" | "barge" | "train",
+        volume: slot.volume,
+        startMs: new Date(slot.start).getTime(),
+        endMs: new Date(slot.end).getTime()
+      },
+      legKey: slot.legKey ?? null
+    });
+  }, []);
+
+  const selectedSlot = useMemo(
+    () => (selectedSlotId ? slots.find((s) => s.id === selectedSlotId) ?? null : null),
+    [selectedSlotId, slots]
+  );
+
+  const handleEditSelectedSlot = useCallback(() => {
+    if (selectedSlot) openSlotEditor(selectedSlot);
+  }, [selectedSlot, openSlotEditor]);
+
+  const handleSlotEditorSave = useCallback(
+    async (draft: SlotEditorDraft) => {
+      if (!slotEditor) return;
+      const flowRate = flowRateForSlot(
+        draft.customerId,
+        draft.direction,
+        draft.mode,
+        slotEditor.legKey,
+        draft.volume
+      );
+      const syncedVolume = volumeFromOccupation(
+        new Date(draft.startMs),
+        new Date(draft.endMs),
+        flowRate,
+        cfg as EngineSimulationConfig
+      );
+      const ok = await commitSlotUpsert(
+        { ...draft, volume: syncedVolume },
+        slotEditor.isNew,
+        slotEditor.legKey
+      );
+      if (ok) setSlotEditor(null);
+    },
+    [slotEditor, commitSlotUpsert, flowRateForSlot, cfg]
+  );
+
   useEffect(() => {
     if (customers.length === 0) return;
     setEnabledCustomers((prev) => {
@@ -631,7 +1357,7 @@ export default function GanttChart() {
     [customers]
   );
 
-  const hasTimeShareConfig = (cfg.storageMode ?? "fixed_band") === "time_shared_storage";
+  const hasTimeShareConfig = false;
 
   const hasStorageCapConfig = terminalStorageCap > 0;
 
@@ -739,16 +1465,18 @@ export default function GanttChart() {
   }, []);
 
   /**
-   * Per berth: one bar per scheduled slot with roundtrip > 0 at that slot’s start.
-   * `lane` is per customer so multiple visits sit on one row (side by side in time), not stacked vertically.
+   * Per berth: one bar per visit with roundtrip > 0 from visit start (pre-ops) for `hours`.
+   * Lanes are per transport leg (customer + direction + mode + lane) so multiple legs stack vertically.
    */
   const berthRoundtripLegendsByResource = useMemo(() => {
+    const simStartMs = new Date(cfg.startDate).getTime();
     const map = new Map<
       string,
       Array<{
         slotId: string;
         customerId: string;
         direction: "inbound" | "outbound";
+        legKey: string;
         hours: number;
         anchorStartMs: number;
         lane: number;
@@ -760,6 +1488,7 @@ export default function GanttChart() {
         slotId: string;
         customerId: string;
         direction: "inbound" | "outbound";
+        legKey: string;
         hours: number;
         anchorStartMs: number;
       }> = [];
@@ -768,46 +1497,47 @@ export default function GanttChart() {
         const dir = parseSlotDirection(slot.direction as string);
         if (!dir) continue;
         const c = customerById.get(slot.customerId);
-        const h =
-          dir === "inbound"
-            ? c?.inboundRoundtripHours ?? 0
-            : c?.outboundRoundtripHours ?? 0;
+        if (!c) continue;
+        const h = roundtripHoursForScheduledSlot(c as EngineCustomer, {
+          direction: dir,
+          mode: slot.mode as ScheduledSlot["mode"],
+          legKey: slot.legKey ?? null
+        });
         if (h <= 0) continue;
+        const legKey = roundtripLaneKeyForSlot(c as EngineCustomer, {
+          direction: dir,
+          mode: slot.mode as ScheduledSlot["mode"],
+          legKey: slot.legKey ?? null
+        });
         raw.push({
           slotId: slot.id,
           customerId: slot.customerId,
           direction: dir,
+          legKey,
           hours: h,
-          anchorStartMs: new Date(slot.start).getTime()
+          anchorStartMs: simStartMs + roundtripCooldownStartHour(slot, simStartMs) * HOUR_MS
         });
       }
-      raw.sort((a, b) => {
-        const dt = a.anchorStartMs - b.anchorStartMs;
-        if (dt !== 0) return dt;
-        return a.slotId.localeCompare(b.slotId);
-      });
       if (raw.length === 0) continue;
-      const uniqCustomers = [...new Set(raw.map((e) => e.customerId))];
-      uniqCustomers.sort((a, b) => {
-        const na = customerById.get(a)?.name ?? a;
-        const nb = customerById.get(b)?.name ?? b;
-        return na.localeCompare(nb);
-      });
-      const laneByCustomer = new Map(uniqCustomers.map((id, i) => [id, i]));
-      const entries = raw.map((e) => ({
-        ...e,
-        lane: laneByCustomer.get(e.customerId) ?? 0
-      }));
-      map.set(r.id, entries);
+      const entries = assignRoundtripBarLanes(raw);
+      map.set(r.id, entries.map((e) => ({
+        slotId: e.slotId,
+        customerId: e.customerId,
+        direction: e.direction,
+        legKey: e.legKey,
+        hours: e.hours,
+        anchorStartMs: e.anchorStartMs,
+        lane: e.lane
+      })));
     }
     return map;
-  }, [resources, slots, customerById]);
+  }, [resources, slots, customerById, cfg.startDate]);
 
   const berthLegendExtraHeight = (resourceId: string) => {
     if (!showRoundtrip) return 0;
     const leg = berthRoundtripLegendsByResource.get(resourceId);
     if (!leg?.length) return 0;
-    const nLanes = new Set(leg.map((e) => e.customerId)).size;
+    const nLanes = Math.max(...leg.map((e) => e.lane)) + 1;
     return (
       RT_LEGEND_PAD_BOTTOM +
       RT_LEGEND_PAD_TOP +
@@ -831,66 +1561,45 @@ export default function GanttChart() {
     return m;
   }, [simulationLog]);
 
-  const slotsForResource = (resourceId: string) => slots.filter((s) => s.resourceId === resourceId);
+  const slotsForResource = (resourceId: string) => displaySlots.filter((s) => s.resourceId === resourceId);
+
+  const baselineSlotsForResource = (resourceId: string) =>
+    baselineSlots.filter((s) => s.resourceId === resourceId);
+
+  const stochasticGhostSlotsForResource = (resourceId: string) =>
+    stochasticGhostSlots.filter((s) => s.resourceId === resourceId);
 
   /** Prefer simulation log customer inventories / terminalTotal so Gantt matches Simulation Log UI. */
-  const ganttInventorySeries = useMemo(() => {
-    if (!timelineData?.timeline || Object.keys(timelineData.timeline).length === 0) {
-      return {
-        byCustomer: new Map<string, number[]>(),
-        terminalByHour: [] as number[],
-        maxHours: 0
-      };
-    }
-    const ids = Object.keys(timelineData.timeline);
-    const fromTimelineLen = Math.max(...ids.map((id) => timelineData.timeline[id]?.length ?? 0));
-    if (
-      simulationLog.length > 0 &&
-      simulationLogIsHourAligned(simulationLog) &&
-      fromTimelineLen > 0 &&
-      simulationLog.length === fromTimelineLen
-    ) {
-      const byCustomer = new Map<string, number[]>();
-      for (const id of ids) {
-        byCustomer.set(
-          id,
-          simulationLog.map((row) => row.customerInventories?.[id] ?? 0)
-        );
-      }
-      const terminalByHour = simulationLog.map((row) => {
-        if (row.terminalTotal != null && Number.isFinite(row.terminalTotal)) return row.terminalTotal;
-        return ids.reduce((s, id) => s + (row.customerInventories?.[id] ?? 0), 0);
-      });
-      return { byCustomer, terminalByHour, maxHours: simulationLog.length };
-    }
-    const byCustomer = new Map<string, number[]>();
-    for (const id of ids) {
-      byCustomer.set(id, timelineData.timeline[id] ? [...timelineData.timeline[id]!] : []);
-    }
-    const maxHours = fromTimelineLen;
-    const terminalByHour = new Array<number>(maxHours).fill(0);
-    for (const id of ids) {
-      const arr = byCustomer.get(id);
-      if (!arr) continue;
-      for (let h = 0; h < arr.length; h++) terminalByHour[h] += arr[h] ?? 0;
-    }
-    return { byCustomer, terminalByHour, maxHours };
-  }, [timelineData, simulationLog]);
+  const ganttInventorySeries = useMemo(
+    () => buildGanttInventorySeries(chartTimelineData?.timeline, chartSimulationLog),
+    [chartTimelineData, chartSimulationLog]
+  );
+
+  /** Working-schedule inventory shown as dashed overlay when Compare is on. */
+  const workingInventoryGhostSeries = useMemo((): GanttInventorySeries | null => {
+    if (!showStochasticCompare || !viewingStochastic) return null;
+    const series = buildGanttInventorySeries(timelineData?.timeline, simulationLog);
+    return series.maxHours > 0 ? series : null;
+  }, [showStochasticCompare, viewingStochastic, timelineData, simulationLog]);
 
   /** Y-axis = strict min/max over terminal inventory (all hours) and every customer's inventory (all hours). */
   const ganttInvYAxis = useMemo(() => {
-    const { byCustomer, terminalByHour } = ganttInventorySeries;
+    const seriesList = [ganttInventorySeries, workingInventoryGhostSeries].filter(
+      (s): s is GanttInventorySeries => s != null && s.maxHours > 0
+    );
     let minV = Infinity;
     let maxV = -Infinity;
-    for (const arr of byCustomer.values()) {
-      for (const v of arr) {
-        if (v < minV) minV = v;
-        if (v > maxV) maxV = v;
+    for (const { byCustomer, terminalByHour } of seriesList) {
+      for (const arr of byCustomer.values()) {
+        for (const v of arr) {
+          if (v < minV) minV = v;
+          if (v > maxV) maxV = v;
+        }
       }
-    }
-    for (const t of terminalByHour) {
-      if (t < minV) minV = t;
-      if (t > maxV) maxV = t;
+      for (const t of terminalByHour) {
+        if (t < minV) minV = t;
+        if (t > maxV) maxV = t;
+      }
     }
     if (!Number.isFinite(minV) || !Number.isFinite(maxV)) {
       return { lo: 0, hi: 1, maxHours: ganttInventorySeries.maxHours };
@@ -901,7 +1610,7 @@ export default function GanttChart() {
     let hi = Math.max(0, Math.ceil(maxV / step) * step);
     if (hi <= lo) hi = lo + step;
     return { lo, hi, maxHours: ganttInventorySeries.maxHours };
-  }, [ganttInventorySeries]);
+  }, [ganttInventorySeries, workingInventoryGhostSeries]);
 
   const hoverSlotMeta = useMemo(() => {
     if (!hoverSlot) return null;
@@ -918,7 +1627,11 @@ export default function GanttChart() {
     const nThroughPrev = loadsStartedThroughHour(H - 1, hoverSlot, slots, simStart);
     const paceTarget =
       target > 0 ? pacerContinuousTarget(H, periodHoursSafe, target, dir, cfg as EngineSimulationConfig) : 0;
-    const rt = dir === "outbound" ? c?.outboundRoundtripHours ?? 0 : c?.inboundRoundtripHours ?? 0;
+    const rt = roundtripHoursForScheduledSlot(c as EngineCustomer, {
+      direction: dir,
+      mode: hoverSlot.mode as ScheduledSlot["mode"],
+      legKey: hoverSlot.legKey ?? null
+    });
     const meps = dir === "outbound" ? c?.outboundMEPS ?? 0 : c?.inboundMEPS ?? 0;
     const logHour = slotLoadHourMap.get(hoverSlot.id);
     const resName = resources.find((r) => r.id === hoverSlot.resourceId)?.name;
@@ -951,7 +1664,17 @@ export default function GanttChart() {
     const w = slotWidth(slot.start, slot.end);
     if (w < 50) return "";
     const c = customerById.get(slot.customerId);
-    return `${c?.name ?? slot.customerId}`;
+    const name = c?.name ?? slot.customerId;
+    const meps = flowRateForSlot(
+      slot.customerId,
+      slot.direction,
+      slot.mode,
+      slot.legKey ?? null,
+      slot.volume
+    );
+    const partial = meps > 0 && slot.volume + 0.5 < meps;
+    if (w < 90) return partial ? "partial" : "";
+    return partial ? `${name} · partial` : name;
   };
 
   const inventoryPoints = useCallback(
@@ -959,7 +1682,7 @@ export default function GanttChart() {
       const data = ganttInventorySeries.byCustomer.get(customerId);
       if (!data || data.length === 0) return "";
       const { lo, hi } = ganttInvYAxis;
-      const hours = collectImportantInventoryHours(data.length, slots, simStart, customerId);
+      const hours = collectImportantInventoryHours(data.length, displaySlots, simStart, customerId);
       return hours
         .map((h) => {
           const x = (h / 24) * pixelsPerDay;
@@ -968,7 +1691,7 @@ export default function GanttChart() {
         })
         .join(" ");
     },
-    [ganttInventorySeries.byCustomer, ganttInvYAxis, simStart, pixelsPerDay, slots]
+    [ganttInventorySeries.byCustomer, ganttInvYAxis, simStart, pixelsPerDay, displaySlots]
   );
 
   const terminalTotalPoints = useCallback((): string => {
@@ -976,7 +1699,7 @@ export default function GanttChart() {
     if (terminalByHour.length === 0) return "";
     const maxHours = terminalByHour.length;
     const { lo, hi } = ganttInvYAxis;
-    const hours = collectImportantInventoryHours(maxHours, slots, simStart, null);
+    const hours = collectImportantInventoryHours(maxHours, displaySlots, simStart, null);
     return hours
       .map((h) => {
         const total = terminalByHour[h] ?? 0;
@@ -985,7 +1708,32 @@ export default function GanttChart() {
         return `${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
-  }, [ganttInventorySeries.terminalByHour, ganttInvYAxis, simStart, pixelsPerDay, slots]);
+  }, [ganttInventorySeries.terminalByHour, ganttInvYAxis, simStart, pixelsPerDay, displaySlots]);
+
+  const inventorySeriesPoints = useCallback(
+    (
+      series: GanttInventorySeries,
+      customerId: string | null,
+      slotList: Slot[]
+    ): string => {
+      const data =
+        customerId != null
+          ? series.byCustomer.get(customerId)
+          : series.terminalByHour;
+      if (!data || data.length === 0) return "";
+      const { lo, hi } = ganttInvYAxis;
+      const hours = collectImportantInventoryHours(data.length, slotList, simStart, customerId);
+      return hours
+        .map((h) => {
+          const v = data[h] ?? 0;
+          const x = (h / 24) * pixelsPerDay;
+          const y = invY(v, lo, hi);
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        })
+        .join(" ");
+    },
+    [ganttInvYAxis, simStart, pixelsPerDay]
+  );
 
   const terminalTotalByHour = useMemo((): number[] => {
     return ganttInventorySeries.terminalByHour.length > 0
@@ -993,7 +1741,11 @@ export default function GanttChart() {
       : [];
   }, [ganttInventorySeries]);
 
-  interface PipelineSegment { startH: number; endH: number; status: "flowing" | "tank_top" | "tank_bottom" }
+  interface PipelineSegment {
+    startH: number;
+    endH: number;
+    status: "flowing" | "tank_top" | "tank_bottom" | "stochastic_stop" | "stochastic_reduced";
+  }
 
   const buildPipelineSegments = useCallback(
     (direction: "inbound" | "outbound"): PipelineSegment[] => {
@@ -1003,13 +1755,21 @@ export default function GanttChart() {
       const segments: PipelineSegment[] = [];
       let curStatus: PipelineSegment["status"] | null = null;
       let segStart = 0;
+      const useStochasticLog = viewingStochastic && chartSimulationLog.length > 0;
       for (let h = 0; h < terminalTotalByHour.length; h++) {
         const terminalBefore =
           h === 0
             ? (terminalTotalByHour[0] ?? 0)
             : (terminalTotalByHour[h - 1] ?? 0);
         let status: PipelineSegment["status"];
-        if (direction === "inbound") {
+        const hourEvents = chartSimulationLog[h]?.stochasticEvents ?? [];
+        const pipeStop = hourEvents.some((e) => e.kind === "pipeline_stop");
+        const pipeReduced = hourEvents.some((e) => e.kind === "pipeline_reduction");
+        if (useStochasticLog && pipeStop) {
+          status = "stochastic_stop";
+        } else if (useStochasticLog && pipeReduced) {
+          status = "stochastic_reduced";
+        } else if (direction === "inbound") {
           status = terminalBefore >= cap - EPS ? "tank_top" : "flowing";
         } else {
           status = terminalBefore <= EPS ? "tank_bottom" : "flowing";
@@ -1025,7 +1785,7 @@ export default function GanttChart() {
       }
       return segments;
     },
-    [terminalTotalByHour, cfg]
+    [terminalTotalByHour, cfg, viewingStochastic, chartSimulationLog]
   );
 
   const inboundPipelineSegments = useMemo(
@@ -1118,11 +1878,11 @@ export default function GanttChart() {
     return pts.join(" ");
   }, [selectedPacingOption, pacingYAxis, pacingByCustomerMode, pixelsPerDay]);
 
-  const hasInventoryData = timelineData?.timeline && Object.keys(timelineData.timeline).length > 0;
+  const hasInventoryData = chartTimelineData?.timeline && Object.keys(chartTimelineData.timeline).length > 0;
 
   const timeSharedOverlayTriangles = useMemo(() => {
     if (!showTimeshared) return [];
-    if ((cfg.storageMode ?? "fixed_band") !== "time_shared_storage") return [];
+    return [];
     if (!hasInventoryData) return [];
     const { lo, hi } = ganttInvYAxis;
     const out: Array<{ slotId: string; points: string; fill: string; title: string }> = [];
@@ -1201,26 +1961,54 @@ export default function GanttChart() {
   const dateRangeLabel = `${formatDDMMYYYY(new Date(cfg.startDate))} – ${formatDDMMYYYY(new Date(cfg.endDate))}`;
 
   const scheduleSummary = useMemo(() => {
-    const inboundSlots = slots.filter((s) => s.direction === "inbound").length;
-    const outboundSlots = slots.filter((s) => s.direction === "outbound").length;
-    const inboundVolume = slots
+    const viewSlots = displaySlots;
+    const inboundSlots = viewSlots.filter((s) => s.direction === "inbound").length;
+    const outboundSlots = viewSlots.filter((s) => s.direction === "outbound").length;
+    const inboundVolume = viewSlots
       .filter((s) => s.direction === "inbound")
       .reduce((sum, s) => sum + s.volume, 0);
-    const outboundVolume = slots
+    const outboundVolume = viewSlots
       .filter((s) => s.direction === "outbound")
       .reduce((sum, s) => sum + s.volume, 0);
     return {
-      totalSlots: slots.length,
+      totalSlots: viewSlots.length,
       inboundSlots,
       outboundSlots,
       inboundVolume,
       outboundVolume,
       totalVolume: inboundVolume + outboundVolume
     };
-  }, [slots]);
+  }, [displaySlots]);
 
   const legendEntries = useMemo((): LegendEntry[] => {
     const entries: LegendEntry[] = [];
+    if (tweakState.isTweaked) {
+      if (tweakSummary.added > 0) {
+        entries.push({
+          id: "tweak-added",
+          label: "Manual addition",
+          kind: "rect",
+          color: "#16a34a"
+        });
+      }
+      if (tweakSummary.modified > 0) {
+        entries.push({
+          id: "tweak-modified",
+          label: "Manual change",
+          kind: "rect",
+          color: "#d97706"
+        });
+      }
+    }
+    if (showBaselineOverlay && tweakState.hasBaseline) {
+      entries.push({
+        id: "baseline-overlay",
+        label: "Original schedule (baseline)",
+        kind: "dashed-line",
+        color: "#94a3b8",
+        dashArray: "4 4"
+      });
+    }
     if (showInventory && hasInventoryData) {
       for (const c of legendCustomers) {
         if (!enabledCustomers.has(c.id)) continue;
@@ -1328,6 +2116,52 @@ export default function GanttChart() {
         color: "#ef4444"
       });
     }
+    if (stochasticRun && viewingStochastic && showStochasticCompare) {
+      entries.push({
+        id: "stoch-ghost",
+        label: "Pre-delay position (ghost)",
+        kind: "dashed-line",
+        color: "#64748b",
+        dashArray: "4 4"
+      });
+      if (hasInventoryData) {
+        entries.push({
+          id: "inv-ghost",
+          label: "Working inventory (compare)",
+          kind: "dashed-line",
+          color: "#94a3b8",
+          dashArray: "6 4"
+        });
+      }
+    }
+    if (stochasticRun && viewingStochastic) {
+      entries.push({
+        id: "stoch-delay",
+        label: "Arrival delay (shifted slot)",
+        kind: "rect",
+        color: "#a855f7"
+      });
+    }
+    if (stochasticRun && viewingStochastic) {
+      entries.push({
+        id: "stoch-pipe-reduced",
+        label: "Pipeline reduced (stochastic)",
+        kind: "rect",
+        color: "#f59e0b"
+      });
+      entries.push({
+        id: "stoch-pipe-stop",
+        label: "Pipeline interrupted (stochastic)",
+        kind: "rect",
+        color: "#ef4444"
+      });
+      entries.push({
+        id: "stoch-immob",
+        label: "Terminal immobilised",
+        kind: "rect",
+        color: "#ec4899"
+      });
+    }
     if (constraintRowVisible) {
       for (const def of SCHEDULING_CONSTRAINTS) {
         if (!enabledConstraints.has(def.key)) continue;
@@ -1366,7 +2200,16 @@ export default function GanttChart() {
     constraintRowVisible,
     enabledConstraints,
     constraintData.activeConstraintKeys,
-    customerColor
+    customerColor,
+    tweakState.isTweaked,
+    tweakSummary.added,
+    tweakSummary.modified,
+    showBaselineOverlay,
+    tweakState.hasBaseline,
+    stochasticRun,
+    viewingStochastic,
+    showStochasticCompare,
+    stochasticHasSlotShifts
   ]);
 
   const renderPipelineRow = (
@@ -1395,13 +2238,24 @@ export default function GanttChart() {
             {segments.map((seg, i) => {
               const x = (seg.startH / 24) * pixelsPerDay;
               const w = Math.max(1, ((seg.endH - seg.startH) / 24) * pixelsPerDay);
-              const fill = seg.status === "flowing" ? "#d1d5db" : "#ef4444";
+              const fill =
+                seg.status === "flowing"
+                  ? "#d1d5db"
+                  : seg.status === "stochastic_stop"
+                    ? "#ef4444"
+                    : seg.status === "stochastic_reduced"
+                      ? "#f59e0b"
+                      : "#ef4444";
               const label =
                 seg.status === "tank_top"
                   ? "Tank top — pipeline blocked"
                   : seg.status === "tank_bottom"
                     ? "Tank bottom — pipeline blocked"
-                    : "Flowing";
+                    : seg.status === "stochastic_stop"
+                      ? "Pipeline stop (stochastic)"
+                      : seg.status === "stochastic_reduced"
+                        ? "Pipeline flow reduced (stochastic)"
+                        : "Flowing";
               return (
                 <rect key={i} x={x} y={8} width={w} height={12} fill={fill} fillOpacity={0.85} rx={2}>
                   <title>{label}</title>
@@ -1455,11 +2309,11 @@ export default function GanttChart() {
             {hasRun && (
               <Link
                 to="/analytics"
-                className={`badge ${feasibilityWarnings.length ? "badge-amber" : "badge-green"}`}
+                className={`badge ${chartFeasibilityWarnings.length ? "badge-amber" : "badge-green"}`}
                 style={{ textDecoration: "none", alignSelf: "center" }}
               >
-                {feasibilityWarnings.length
-                  ? `${feasibilityWarnings.length} feasibility warning${feasibilityWarnings.length === 1 ? "" : "s"}`
+                {chartFeasibilityWarnings.length
+                  ? `${chartFeasibilityWarnings.length} feasibility warning${chartFeasibilityWarnings.length === 1 ? "" : "s"}`
                   : "No feasibility warnings"}
               </Link>
             )}
@@ -1474,8 +2328,90 @@ export default function GanttChart() {
         </div>
       </div>
 
+      {stochasticError && (
+        <div className="schedule-modified-alert" role="alert" style={{ borderColor: "#fca5a5" }}>
+          <strong>Stochastic sample failed</strong>
+          <span>{stochasticError}</span>
+        </div>
+      )}
+
+      {stochasticRun && (
+        <div className="schedule-modified-alert schedule-stochastic-banner" role="status">
+          <strong>Stochastic scenario</strong>
+          <span>
+            {scheduleView === "working"
+              ? "Sample loaded — switch to Stochastic to view the scenario."
+              : showStochasticCompare
+                ? stochasticHasSlotShifts
+                  ? "Compare on — dashed = working schedule & inventory; solid = sampled scenario."
+                  : "Compare on — no slot shifts; inventory may still differ from pipeline/disruption effects."
+                : stochasticHasSlotShifts
+                  ? `Viewing sampled scenario${stochasticRun.stochasticSeed != null ? ` (seed ${stochasticRun.stochasticSeed})` : ""}. Turn on Compare to see pre-delay positions.`
+                  : `Sampled scenario (seed ${stochasticRun.stochasticSeed ?? "—"}) — no arrival delays this draw; pipeline/inventory effects may still apply.`}
+          </span>
+        </div>
+      )}
+
+      {showBaselineOverlay && tweakState.hasBaseline && baselineMatchesWorking && scheduleView === "working" && (
+        <div className="schedule-modified-alert" role="status" style={{ background: "#f1f5f9", borderColor: "#cbd5e1" }}>
+          <strong>Original schedule</strong>
+          <span>Baseline matches the working schedule — enable manual edits or re-run the scheduler to see a difference.</span>
+        </div>
+      )}
+
+      {tweakState.isTweaked && (
+        <div className="schedule-modified-alert" role="status">
+          <strong>Modified schedule</strong>
+          <span>
+            {tweakSummary.added > 0 && (
+              <>
+                {tweakSummary.added} slot{tweakSummary.added === 1 ? "" : "s"} added
+              </>
+            )}
+            {tweakSummary.added > 0 && tweakSummary.modified > 0 && " · "}
+            {tweakSummary.modified > 0 && (
+              <>
+                {tweakSummary.modified} slot{tweakSummary.modified === 1 ? "" : "s"} changed
+              </>
+            )}
+            {tweakSummary.total === 0 && "Manual edits pending"}
+            {tweakSummary.total > 0 && " — highlighted on the chart"}
+            {tweakState.needsReplay && ". Update simulation to refresh inventory and feasibility."}
+          </span>
+        </div>
+      )}
+
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <button className="btn btn-primary" disabled={isRunning} onClick={handleRunScheduler}>
+        {hasRun && (
+          <>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={isRunning || isReplaying || isSampling}
+              onClick={handleSampleStochastic}
+              title="Sample one stochastic scenario from the current schedule"
+            >
+              {isSampling ? (
+                <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+              ) : (
+                <Dices size={16} strokeWidth={2} />
+              )}
+              Sample once
+            </button>
+            {stochasticRun && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={isRunning || isReplaying}
+                onClick={handleClearStochastic}
+              >
+                <X size={16} strokeWidth={2} />
+                Clear stochastic
+              </button>
+            )}
+          </>
+        )}
+        <button className="btn btn-primary" disabled={isRunning || isReplaying} onClick={handleRunScheduler}>
           {isRunning ? (
             <>
               <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
@@ -1488,6 +2424,83 @@ export default function GanttChart() {
             </>
           )}
         </button>
+        {canTweakSchedule && (
+          <button
+            type="button"
+            className={`btn ${modifySchedule ? "btn-primary" : "btn-secondary"}`}
+            disabled={isRunning || isReplaying}
+            onClick={toggleModifySchedule}
+            title={
+              modifySchedule
+                ? "Exit edit mode and restore slot detail pop-ups"
+                : "Enable drag-create, move, and resize on the Gantt chart"
+            }
+          >
+            <Pencil size={16} strokeWidth={2} />
+            {modifySchedule ? "Done editing" : "Modify schedule"}
+          </button>
+        )}
+        {modifySchedule && (
+          <>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={isRunning || isReplaying || !tweakState.needsReplay}
+              onClick={handleUpdateSimulation}
+              title="Recompute inventory and feasibility from the current slot list"
+            >
+              {isReplaying ? (
+                <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+              ) : (
+                <RefreshCw size={16} strokeWidth={2} />
+              )}
+              Update simulation
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={isRunning || isReplaying || !tweakState.canUndo}
+              onClick={handleUndo}
+            >
+              <Undo2 size={16} strokeWidth={2} />
+              Undo
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={isRunning || isReplaying || !tweakState.isTweaked}
+              onClick={handleRestoreBaseline}
+            >
+              <RotateCcw size={16} strokeWidth={2} />
+              Restore original
+            </button>
+            {selectedSlotId && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={isRunning || isReplaying}
+                onClick={handleEditSelectedSlot}
+              >
+                <Pencil size={16} strokeWidth={2} />
+                Edit slot
+              </button>
+            )}
+          </>
+        )}
+        {modifySchedule && tweakState.needsReplay && (
+          <span className="badge badge-amber" style={{ fontSize: 12 }}>
+            Schedule changed — update simulation
+          </span>
+        )}
+        {tweakError && (
+          <span style={{ fontSize: 13, color: "#b91c1c" }}>{tweakError}</span>
+        )}
+        {modifySchedule && (
+          <span style={{ fontSize: 12, color: "#1d4ed8" }}>
+            Edit mode — drag empty row to create · drag slot to move · edges to resize · click to
+            select then Edit slot · Del removes selected · Esc exits
+          </span>
+        )}
         <button
           type="button"
           className="btn btn-secondary chart-hour-zoom-btn"
@@ -1516,6 +2529,47 @@ export default function GanttChart() {
               >
                 Inventory
               </button>
+            )}
+            {tweakState.hasBaseline && (
+              <button
+                type="button"
+                className={`metric-toggle${showBaselineOverlay ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowBaselineOverlay((v) => !v)}
+                title="Show the last scheduler run as a dashed overlay on top of the current schedule"
+              >
+                Original schedule
+              </button>
+            )}
+            {stochasticRun && (
+              <>
+                <button
+                  type="button"
+                  className={`metric-toggle${scheduleView === "working" ? " metric-toggle--on" : ""}`}
+                  onClick={() => setScheduleView("working")}
+                >
+                  Working
+                </button>
+                <button
+                  type="button"
+                  className={`metric-toggle${scheduleView === "stochastic" ? " metric-toggle--on" : ""}`}
+                  onClick={() => setScheduleView("stochastic")}
+                >
+                  Stochastic
+                </button>
+                <button
+                  type="button"
+                  className={`metric-toggle${showStochasticCompare ? " metric-toggle--on" : ""}`}
+                  disabled={scheduleView !== "stochastic"}
+                  onClick={() => setShowStochasticCompare((v) => !v)}
+                  title={
+                    scheduleView !== "stochastic"
+                      ? "Switch to Stochastic view first"
+                      : "Overlay pre-delay slot positions on the sampled scenario"
+                  }
+                >
+                  Compare
+                </button>
+              </>
             )}
             {hasRoundtripConfig && (
               <button
@@ -1679,6 +2733,7 @@ export default function GanttChart() {
 
       {/* Main chart area */}
       <div
+        className={modifySchedule ? "gantt-chart gantt-chart--modify-mode" : "gantt-chart"}
         style={{
           display: "flex",
           flexDirection: "column",
@@ -1960,11 +3015,13 @@ export default function GanttChart() {
               return (
                 <div
                   key={r.id}
+                  onMouseDown={(e) => handleRowCreateMouseDown(e, r.id)}
                   style={{
                     height: rowH,
                     position: "relative",
                     background: ri % 2 === 0 ? "#ffffff" : "#f8fafc",
-                    borderBottom: "1px solid #f1f5f9"
+                    borderBottom: "1px solid #f1f5f9",
+                    cursor: canEditSlots && !activeDrag ? "crosshair" : undefined
                   }}
                 >
                   {monthMarkers.map((m) => (
@@ -1979,40 +3036,206 @@ export default function GanttChart() {
                       }}
                     />
                   ))}
+                  {showStochasticCompare &&
+                    stochasticGhostSlotsForResource(r.id).map((slot) => {
+                      const col = customerColor(slot.customerId);
+                      return (
+                        <div
+                          key={`stoch-ghost-${slot.id}`}
+                          className="gantt-slot-ghost"
+                          title="Pre-delay position"
+                          style={{
+                            position: "absolute",
+                            left: slotX(slot.start),
+                            width: slotWidth(slot.start, slot.end),
+                            top: slotTop,
+                            height: slotBandH,
+                            background: rgbaFromHex(col, 0.12),
+                            border: `2px dashed ${rgbaFromHex(col, 0.7)}`,
+                            borderRadius: 6,
+                            pointerEvents: "none",
+                            zIndex: 1
+                          }}
+                        />
+                      );
+                    })}
+                  {viewingStochastic &&
+                    r.type?.startsWith("berth") &&
+                    (stochasticRun?.immobilisationWindows ?? []).map((w, wi) => {
+                      if (w.resourceId && w.resourceId !== r.id) return null;
+                      return (
+                        <div
+                          key={`immob-${r.id}-${wi}`}
+                          className="gantt-immobilisation-hatch"
+                          title={w.label}
+                          style={{
+                            position: "absolute",
+                            left: slotX(new Date(w.startMs).toISOString()),
+                            width: slotWidth(
+                              new Date(w.startMs).toISOString(),
+                              new Date(w.endMs).toISOString()
+                            ),
+                            top: 0,
+                            bottom: 0,
+                            pointerEvents: "none",
+                            zIndex: 1
+                          }}
+                        />
+                      );
+                    })}
                   {slotsForResource(r.id).map((slot) => {
                     const col = customerColor(slot.customerId);
+                    const berthMode = (config as { berthReservationMode?: string } | null)
+                      ?.berthReservationMode;
+                    const hasReservation =
+                      berthMode &&
+                      berthMode !== "none" &&
+                      slot.reservationStart &&
+                      slot.reservationEnd;
+                    const isDragging = activeDrag?.slotId === slot.id;
+                    const isSelected = modifySchedule && selectedSlotId === slot.id;
+                    const tweakKind = tweakState.slotTweaks[slot.id];
+                    const delayH = delayHoursBySlotId.get(slot.id);
+                    const immobConflict = immobilisationConflictSlotIds.has(slot.id);
+                    const tweakRing =
+                      !isSelected && tweakKind === "added"
+                        ? "0 0 0 2px #16a34a"
+                        : !isSelected && tweakKind === "modified"
+                          ? "0 0 0 2px #d97706"
+                          : undefined;
                     return (
-                      <div
-                        key={slot.id}
-                        onMouseEnter={() => {
-                          cancelPendingHoverClear();
-                          setHoverSlot(slot);
-                        }}
-                        onMouseLeave={scheduleHoverClear}
-                        style={{
-                          position: "absolute",
-                          left: slotX(slot.start),
-                          width: slotWidth(slot.start, slot.end),
-                          top: slotTop,
-                          height: slotBandH,
-                          background: rgbaFromHex(col, 0.2),
-                          border: `1px solid ${rgbaFromHex(col, 0.45)}`,
-                          borderRadius: 6,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 10,
-                          fontWeight: 600,
-                          color: "#0f172a",
-                          overflow: "hidden",
-                          cursor: "pointer",
-                          zIndex: 1
-                        }}
-                      >
-                        {slotLabel(slot)}
+                      <div key={slot.id} style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+                        {hasReservation && (
+                          <div
+                            onMouseEnter={
+                              modifySchedule
+                                ? undefined
+                                : () => {
+                                    if (activeDrag) return;
+                                    cancelPendingHoverClear();
+                                    setHoverSlot(slot);
+                                  }
+                            }
+                            onMouseLeave={modifySchedule ? undefined : scheduleHoverClear}
+                            style={{
+                              position: "absolute",
+                              left: slotX(slot.reservationStart!),
+                              width: slotWidth(slot.reservationStart!, slot.reservationEnd!),
+                              top: slotTop,
+                              height: slotBandH,
+                              background: rgbaFromHex(col, 0.12),
+                              border: `1px dashed ${rgbaFromHex(col, 0.4)}`,
+                              borderRadius: 6,
+                              pointerEvents: modifySchedule || isDragging ? "none" : "auto",
+                              cursor: modifySchedule ? undefined : "pointer",
+                              zIndex: 1,
+                              opacity: isDragging ? 0.35 : 1
+                            }}
+                            title={modifySchedule ? undefined : "Reservation (WoA / laycan)"}
+                          />
+                        )}
+                        <div
+                          data-slot-bar
+                          onMouseEnter={
+                            modifySchedule
+                              ? undefined
+                              : () => {
+                                  if (activeDrag) return;
+                                  cancelPendingHoverClear();
+                                  setHoverSlot(slot);
+                                }
+                          }
+                          onMouseLeave={modifySchedule ? undefined : scheduleHoverClear}
+                          onMouseDown={(e) => handleSlotBarMouseDown(e, slot)}
+                          style={{
+                            position: "absolute",
+                            left: slotX(slot.start),
+                            width: slotWidth(slot.start, slot.end),
+                            top: slotTop + (hasReservation ? 3 : 0),
+                            height: hasReservation ? Math.max(8, slotBandH - 6) : slotBandH,
+                            background: rgbaFromHex(
+                              col,
+                              hasReservation ? 0.5 : tweakKind ? 0.32 : 0.2
+                            ),
+                            border: `1px solid ${
+                              immobConflict
+                                ? "#dc2626"
+                                : tweakKind === "added"
+                                  ? "#16a34a"
+                                  : tweakKind === "modified"
+                                    ? "#d97706"
+                                    : rgbaFromHex(col, hasReservation ? 0.75 : 0.45)
+                            }`,
+                            borderLeft:
+                              delayH != null && delayH > 0 && viewingStochastic
+                                ? "3px solid #a855f7"
+                                : undefined,
+                            borderRadius: 6,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: 10,
+                            fontWeight: 600,
+                            color: hasReservation ? "#f8fafc" : "#0f172a",
+                            overflow: "hidden",
+                            cursor: canEditSlots ? "grab" : "pointer",
+                            pointerEvents: "auto",
+                            zIndex: 2,
+                            opacity: isDragging ? 0.35 : showBaselineOverlay ? 0.55 : 1,
+                            boxShadow: isSelected ? "0 0 0 2px #3b82f6" : tweakRing
+                          }}
+                        >
+                          {delayH != null && delayH > 0 && viewingStochastic
+                            ? `+${delayH.toFixed(0)}h `
+                            : ""}
+                          {slotLabel(slot)}
+                        </div>
                       </div>
                     );
                   })}
+                  {showBaselineOverlay &&
+                    baselineSlotsForResource(r.id).map((slot) => {
+                      const col = customerColor(slot.customerId);
+                      const c = customerById.get(slot.customerId);
+                      return (
+                        <div
+                          key={`baseline-${slot.id}`}
+                          title={`Original schedule · ${c?.name ?? slot.customerId} · ${slot.volume.toLocaleString()} t`}
+                          style={{
+                            position: "absolute",
+                            left: slotX(slot.start),
+                            width: slotWidth(slot.start, slot.end),
+                            top: slotTop,
+                            height: slotBandH,
+                            background: rgbaFromHex(col, 0.08),
+                            border: "2px dashed #475569",
+                            borderRadius: 6,
+                            pointerEvents: "none",
+                            zIndex: 4
+                          }}
+                        />
+                      );
+                    })}
+                  {dragPreview && dragPreview.resourceId === r.id && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: msToContentLeft(dragPreview.startMs, simStart, pixelsPerDay),
+                        width: msToContentWidth(
+                          dragPreview.startMs,
+                          dragPreview.endMs,
+                          pixelsPerDay
+                        ),
+                        top: slotTop,
+                        height: slotBandH,
+                        background: "rgba(59,130,246,0.2)",
+                        border: "2px dashed #3b82f6",
+                        borderRadius: 6,
+                        pointerEvents: "none",
+                        zIndex: 5
+                      }}
+                    />
+                  )}
                   {showRoundtrip && rtLegend.length > 0 && (
                     <div
                       style={{
@@ -2024,7 +3247,8 @@ export default function GanttChart() {
                         paddingTop: RT_LEGEND_PAD_TOP,
                         paddingBottom: RT_LEGEND_PAD_BOTTOM,
                         boxSizing: "border-box",
-                        pointerEvents: "none"
+                        pointerEvents: "none",
+                        overflow: "visible"
                       }}
                     >
                       {rtLegend.map((e) => {
@@ -2035,7 +3259,7 @@ export default function GanttChart() {
                         return (
                           <div
                             key={`${e.slotId}-rt`}
-                            title={`${nm} · ${e.direction} roundtrip · ${e.hours} h · this visit (length follows zoom)`}
+                            title={`${nm} · ${e.direction} roundtrip · ${e.hours} h from visit start (pre-ops)`}
                             style={{
                               position: "absolute",
                               left: leftPx,
@@ -2120,14 +3344,14 @@ export default function GanttChart() {
             <div
               role="img"
               aria-label="Inventory timeline — hover for values by date"
-              onMouseMove={handleInvChartMouseMove}
-              onMouseLeave={handleInvChartMouseLeave}
+              onMouseMove={modifySchedule ? undefined : handleInvChartMouseMove}
+              onMouseLeave={modifySchedule ? undefined : handleInvChartMouseLeave}
               style={{
                 height: CHART_HEIGHT,
                 position: "relative",
                 borderTop: "1px solid #e2e8f0",
                 background: "#ffffff",
-                cursor: hasInventoryData ? "crosshair" : "default"
+                cursor: hasInventoryData && !modifySchedule ? "crosshair" : "default"
               }}
             >
               {monthMarkers.map((m) => (
@@ -2173,8 +3397,37 @@ export default function GanttChart() {
                   );
                 })()}
                 {showInventory &&
+                  workingInventoryGhostSeries &&
+                  Object.keys(chartTimelineData!.timeline)
+                    .filter((cid) => enabledCustomers.has(cid))
+                    .map((cid) => {
+                      const pts = inventorySeriesPoints(workingInventoryGhostSeries, cid, slots);
+                      if (!pts) return null;
+                      return (
+                        <polyline
+                          key={`inv-ghost-${cid}`}
+                          points={pts}
+                          fill="none"
+                          stroke={customerColor(cid)}
+                          strokeWidth={2}
+                          strokeDasharray="6 4"
+                          strokeOpacity={0.55}
+                        />
+                      );
+                    })}
+                {showInventory && workingInventoryGhostSeries && (
+                  <polyline
+                    points={inventorySeriesPoints(workingInventoryGhostSeries, null, slots)}
+                    fill="none"
+                    stroke="#94a3b8"
+                    strokeWidth={1.5}
+                    strokeDasharray="6 4"
+                    strokeOpacity={0.7}
+                  />
+                )}
+                {showInventory &&
                   hasInventoryData &&
-                  Object.keys(timelineData!.timeline)
+                  Object.keys(chartTimelineData!.timeline)
                     .filter((cid) => enabledCustomers.has(cid))
                     .map((cid) => (
                       <polyline
@@ -2314,12 +3567,39 @@ export default function GanttChart() {
             ref={minimapRef}
             onMouseDown={handleMinimapMouseDown}
           >
-            {slots.map((slot) => {
+            {showBaselineOverlay &&
+              baselineSlots.map((slot) => {
+                const x = (dayOffset(slot.start) / totalDays) * 100;
+                const w = Math.max(
+                  0.3,
+                  ((dayOffset(slot.end) - dayOffset(slot.start)) / totalDays) * 100
+                );
+                return (
+                  <div
+                    key={`minimap-baseline-${slot.id}`}
+                    style={{
+                      position: "absolute",
+                      left: `${x}%`,
+                      width: `${w}%`,
+                      top: 5,
+                      height: 10,
+                      background: "transparent",
+                      border: "2px dashed #475569",
+                      borderRadius: 2,
+                      opacity: 1,
+                      boxSizing: "border-box",
+                      zIndex: 2
+                    }}
+                  />
+                );
+              })}
+            {displaySlots.map((slot) => {
               const x = (dayOffset(slot.start) / totalDays) * 100;
               const w = Math.max(
                 0.3,
                 ((dayOffset(slot.end) - dayOffset(slot.start)) / totalDays) * 100
               );
+              const tweakKind = tweakState.slotTweaks[slot.id];
               return (
                 <div
                   key={slot.id}
@@ -2331,7 +3611,14 @@ export default function GanttChart() {
                     height: 10,
                     background: customerColor(slot.customerId),
                     borderRadius: 2,
-                    opacity: 0.7
+                    opacity: showBaselineOverlay ? 0.55 : 0.85,
+                    boxShadow:
+                      tweakKind === "added"
+                        ? "0 0 0 1px #16a34a"
+                        : tweakKind === "modified"
+                          ? "0 0 0 1px #d97706"
+                          : undefined,
+                    zIndex: 1
                   }}
                 />
               );
@@ -2356,7 +3643,7 @@ export default function GanttChart() {
 
       <TimelineChartLegend entries={legendEntries} />
 
-      {invChartTooltip && hasInventoryData && timelineData?.timeline && (
+      {invChartTooltip && !modifySchedule && hasInventoryData && timelineData?.timeline && (
         <div
           role="tooltip"
           style={{
@@ -2421,7 +3708,7 @@ export default function GanttChart() {
         </div>
       )}
 
-      {hoverSlot && hoverSlotMeta && (
+      {hoverSlot && hoverSlotMeta && !modifySchedule && (
         <div
           className="schedule-slot-tooltip"
           role="tooltip"
@@ -2453,10 +3740,19 @@ export default function GanttChart() {
             </dd>
             <dt>Berth</dt>
             <dd>{hoverSlotMeta.resName ?? hoverSlot.resourceId}</dd>
-            <dt>Window</dt>
+            <dt>Operation</dt>
             <dd>
               {formatDDMMYYYY(new Date(hoverSlot.start))} → {formatDDMMYYYY(new Date(hoverSlot.end))}
             </dd>
+            {hoverSlot.reservationStart && hoverSlot.reservationEnd && (
+              <>
+                <dt>Reservation</dt>
+                <dd>
+                  {formatDDMMYYYY(new Date(hoverSlot.reservationStart))} →{" "}
+                  {formatDDMMYYYY(new Date(hoverSlot.reservationEnd))}
+                </dd>
+              </>
+            )}
             {hoverSlotMeta.invAtStart != null && (
               <>
                 <dt>Inventory @ start</dt>
@@ -2519,6 +3815,17 @@ export default function GanttChart() {
             Open simulation log at hour {hoverSlotMeta.startHour}
           </button>
         </div>
+      )}
+
+      {slotEditor && (
+        <SlotEditorModal
+          open
+          title={slotEditor.isNew ? "New slot" : "Edit slot"}
+          draft={slotEditor.draft}
+          customers={customers.map((c) => ({ id: c.id, name: c.name }))}
+          onClose={() => setSlotEditor(null)}
+          onSave={handleSlotEditorSave}
+        />
       )}
     </div>
   );

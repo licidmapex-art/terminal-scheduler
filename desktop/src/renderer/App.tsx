@@ -8,7 +8,9 @@ import {
   Bug,
   CalendarDays,
   ClipboardList,
+  Dices,
   Download,
+  Folders,
   Play,
   Settings,
   Upload,
@@ -24,6 +26,8 @@ import SimulationLog from "./pages/SimulationLog";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Simulation from "./pages/Simulation";
 import Config from "./pages/Config";
+import Stochastics from "./pages/Stochastics";
+import Scenarios from "./pages/Scenarios";
 import Introduction from "./pages/Introduction";
 import Debugging from "./pages/Debugging";
 
@@ -170,6 +174,18 @@ export default function App() {
               </NavIcon>
               Terminal
             </NavLink>
+            <NavLink to="/scenarios" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+              <NavIcon>
+                <Folders size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Scenarios
+            </NavLink>
+            <NavLink to="/stochastics" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+              <NavIcon>
+                <Dices size={NAV_ICON_SIZE} strokeWidth={2} />
+              </NavIcon>
+              Stochastics
+            </NavLink>
           </nav>
 
           {isBrowser && (
@@ -229,6 +245,8 @@ export default function App() {
             )}
             <Route path="/introduction" element={<Introduction />} />
             <Route path="/config" element={<Config />} />
+            <Route path="/scenarios" element={<Scenarios />} />
+            <Route path="/stochastics" element={<Stochastics />} />
           </Routes>
         </main>
       </div>

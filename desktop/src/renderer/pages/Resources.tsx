@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import ResourceForm from "../components/ResourceForm";
+import TransportPoolsPanel from "../components/TransportPoolsPanel";
 import TankFarmPanel from "../components/TankFarmPanel";
 import BerthAllocationPanel from "../components/BerthAllocationPanel";
 import { PageTitleWithHelp } from "../components/HelpPopover";
@@ -53,6 +54,8 @@ export default function Resources() {
       </div>
 
       <TankFarmPanel />
+
+      <TransportPoolsPanel />
 
       <BerthAllocationPanel
         hasLargeBerth={resources.some((r) => r.type === "berth_large")}

@@ -47,7 +47,7 @@ const TIE_BREAKER_DEFS: { key: TieBreakerKey; label: string; title: string }[] =
   {
     key: "fulfillment",
     label: "Fulfilment %",
-    title: "Leg slots ÷ annual target at hour start (lower = tried earlier in pooled legs)"
+    title: "Tonnes delivered ÷ leg target tonnes at hour start (lower = tried earlier in pooled legs)"
   },
   {
     key: "sortMetric",
@@ -914,188 +914,209 @@ export default function SimulationLog() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>CUSTOMERS</span>
-        {customers.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            className={`btn ${activeCustomers.has(c.id) ? "btn-primary" : "btn-secondary"}`}
-            style={{ padding: "4px 12px", fontSize: 12 }}
-            onClick={() => toggleCustomer(c.id)}
-          >
-            {c.name}
-          </button>
-        ))}
-      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+        <div className="filter-toolbar">
+          <div className="filter-toolbar-group">
+            <span className="filter-toolbar-label">Customers</span>
+            <div className="filter-toolbar-toggles">
+              {customers.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`metric-toggle${activeCustomers.has(c.id) ? " metric-toggle--on" : ""}`}
+                  onClick={() => toggleCustomer(c.id)}
+                >
+                  {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>MODES</span>
-        {availableModes.map((m) => (
-          <button
-            key={modeKey(m)}
-            type="button"
-            className={`btn ${activeModes.has(modeKey(m)) ? "btn-primary" : "btn-secondary"}`}
-            style={{ padding: "4px 12px", fontSize: 12 }}
-            onClick={() => toggleMode(modeKey(m))}
-          >
-            {m.mode} {m.direction === "inbound" ? "↓" : "↑"}
-          </button>
-        ))}
-      </div>
+        <div className="filter-toolbar">
+          <div className="filter-toolbar-group">
+            <span className="filter-toolbar-label">Modes</span>
+            <div className="filter-toolbar-toggles">
+              {availableModes.map((m) => (
+                <button
+                  key={modeKey(m)}
+                  type="button"
+                  className={`metric-toggle${activeModes.has(modeKey(m)) ? " metric-toggle--on" : ""}`}
+                  onClick={() => toggleMode(modeKey(m))}
+                >
+                  {m.mode} {m.direction === "inbound" ? "↓" : "↑"}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>FILTER BY CONSTRAINT</span>
-        <HelpPopover
-          label="Constraint filter help"
-          content={
-            <>
-              Toggle a constraint to add <strong>leg columns</strong> (per customer + mode) and filter rows to hours where
-              that leg was idle for that reason. With no constraint selected, the grid shows inventory only.{" "}
-              <strong>Tie-breakers</strong> overlay merit-order values on leg cells when columns are visible.
-            </>
-          }
-          size={14}
-        />
-        <button
-          type="button"
-          className={`btn ${activeConstraints.size === 0 ? "btn-primary" : "btn-secondary"}`}
-          style={{ padding: "4px 12px", fontSize: 12 }}
-          onClick={() => {
-            setForceLegColumnsFromLink(false);
-            setActiveConstraints(new Set());
-          }}
-        >
-          Inventory only
-        </button>
-        {SCHEDULING_CONSTRAINTS.map((def) => {
-          const total = constraintCounts.get(def.key) ?? 0;
-          const inactive = total === 0;
-          const on = activeConstraints.has(def.key);
-          return (
-            <button
-              key={def.key}
-              type="button"
-              disabled={inactive}
-              className={`constraint-toggle-chip${on ? " constraint-toggle-chip--on" : ""}${
-                inactive ? " constraint-toggle-chip--inactive" : ""
-              }`}
-              style={
-                on && !inactive ? ({ "--chip-color": def.color } as CSSProperties) : undefined
-              }
-              onClick={() => !inactive && toggleConstraint(def.key)}
-            >
-              <span className="constraint-toggle-chip-icon">
-                <ConstraintIcon constraintKey={def.key} size={13} />
-              </span>
-              {def.label}
-              <span className="constraint-toggle-chip-count">{total}</span>
-            </button>
-          );
-        })}
-        {uncategorisedIdleCount > 0 && (
-          <button
-            type="button"
-            className={`constraint-toggle-chip${
-              activeConstraints.has("uncategorised") ? " constraint-toggle-chip--on" : ""
-            }`}
-            style={
-              activeConstraints.has("uncategorised")
-                ? ({ "--chip-color": "#94a3b8" } as CSSProperties)
-                : undefined
-            }
-            onClick={() => toggleConstraint("uncategorised")}
-          >
-            <span className="constraint-toggle-chip-icon">
-              <UncategorisedConstraintIcon size={13} />
+        <div className="filter-toolbar">
+          <div className="filter-toolbar-group">
+            <span className="filter-toolbar-label">
+              Filter by constraint
+              <HelpPopover
+                label="Constraint filter help"
+                content={
+                  <>
+                    Toggle a constraint to add <strong>leg columns</strong> (per customer + mode) and filter rows to hours where
+                    that leg was idle for that reason. With no constraint selected, the grid shows inventory only.{" "}
+                    <strong>Tie-breakers</strong> overlay merit-order values on leg cells when columns are visible.
+                  </>
+                }
+                size={14}
+              />
             </span>
-            Uncategorised idle
-            <span className="constraint-toggle-chip-count">{uncategorisedIdleCount}</span>
-          </button>
-        )}
+            <div className="filter-toolbar-toggles">
+              <button
+                type="button"
+                className={`metric-toggle${activeConstraints.size === 0 ? " metric-toggle--on" : ""}`}
+                onClick={() => {
+                  setForceLegColumnsFromLink(false);
+                  setActiveConstraints(new Set());
+                }}
+              >
+                Inventory only
+              </button>
+              {SCHEDULING_CONSTRAINTS.map((def) => {
+                const total = constraintCounts.get(def.key) ?? 0;
+                const inactive = total === 0;
+                const on = activeConstraints.has(def.key);
+                return (
+                  <button
+                    key={def.key}
+                    type="button"
+                    disabled={inactive}
+                    className={`constraint-toggle-chip${on ? " constraint-toggle-chip--on" : ""}${
+                      inactive ? " constraint-toggle-chip--inactive" : ""
+                    }`}
+                    style={
+                      on && !inactive ? ({ "--chip-color": def.color } as CSSProperties) : undefined
+                    }
+                    onClick={() => !inactive && toggleConstraint(def.key)}
+                  >
+                    <span className="constraint-toggle-chip-icon">
+                      <ConstraintIcon constraintKey={def.key} size={13} />
+                    </span>
+                    {def.label}
+                    <span className="constraint-toggle-chip-count">{total}</span>
+                  </button>
+                );
+              })}
+              {uncategorisedIdleCount > 0 && (
+                <button
+                  type="button"
+                  className={`constraint-toggle-chip${
+                    activeConstraints.has("uncategorised") ? " constraint-toggle-chip--on" : ""
+                  }`}
+                  style={
+                    activeConstraints.has("uncategorised")
+                      ? ({ "--chip-color": "#94a3b8" } as CSSProperties)
+                      : undefined
+                  }
+                  onClick={() => toggleConstraint("uncategorised")}
+                >
+                  <span className="constraint-toggle-chip-icon">
+                    <UncategorisedConstraintIcon size={13} />
+                  </span>
+                  Uncategorised idle
+                  <span className="constraint-toggle-chip-count">{uncategorisedIdleCount}</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
       {activeConstraints.size === 0 && !forceLegColumnsFromLink ? (
-        <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b" }}>
+        <p className="filter-toolbar-hint">
           Inventory columns only — toggle a constraint above to show leg columns for the selected customers and modes.
         </p>
       ) : null}
       {constraintFilterLabel ? (
-        <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b" }}>
+        <p className="filter-toolbar-hint">
           Showing rows where at least one visible leg was idle due to:{" "}
           <strong>{constraintFilterLabel}</strong>
         </p>
       ) : null}
 
       {showLegColumns ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>TIE-BREAKERS</span>
-          {TIE_BREAKER_DEFS.map((def) => {
-            const on = activeTieBreakers.has(def.key);
-            return (
-              <button
-                key={def.key}
-                type="button"
-                title={def.title}
-                className={`btn ${on ? "btn-primary" : "btn-secondary"}`}
-                style={{ padding: "4px 12px", fontSize: 12 }}
-                onClick={() => toggleTieBreaker(def.key)}
-              >
-                {def.label}
-              </button>
-            );
-          })}
+        <div className="filter-toolbar" style={{ marginBottom: 12 }}>
+          <div className="filter-toolbar-group">
+            <span className="filter-toolbar-label">Tie-breakers</span>
+            <div className="filter-toolbar-toggles">
+              {TIE_BREAKER_DEFS.map((def) => {
+                const on = activeTieBreakers.has(def.key);
+                return (
+                  <button
+                    key={def.key}
+                    type="button"
+                    title={def.title}
+                    className={`metric-toggle${on ? " metric-toggle--on" : ""}`}
+                    onClick={() => toggleTieBreaker(def.key)}
+                  >
+                    {def.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       ) : null}
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>VIEW</span>
-        {(["daily", "events", "all"] as const).map((v) => (
-          <span key={v} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-            <button
-              type="button"
-              className={`btn ${viewMode === v ? "btn-primary" : "btn-secondary"}`}
-              style={{ padding: "4px 12px", fontSize: 12 }}
-              onClick={() => setViewMode(v)}
-            >
-              {v === "daily" ? "Daily summary" : v === "events" ? "Events only" : "All hours"}
-            </button>
-            {v === "daily" && (
-              <HelpPopover
-                label="Daily summary help"
-                content={
-                  <>
-                    <strong>Daily mode columns:</strong> the number is how many <strong>loads started</strong> that day
-                    for that single leg lane (customer + direction + mode + lane). A green check appears only when that
-                    count is greater than zero. <strong>0</strong> means no visit started on that leg — hover the cell for
-                    roll-up text. Row tint still highlights the worst idle reason seen that day across visible legs
-                    (inventory, berth, pace, etc.).
-                  </>
-                }
-                size={14}
-              />
-            )}
-          </span>
-        ))}
+      <div className="filter-toolbar" style={{ marginBottom: 16 }}>
+        <div className="filter-toolbar-group">
+          <span className="filter-toolbar-label">View</span>
+          <div className="filter-toolbar-toggles">
+            {(["daily", "events", "all"] as const).map((v) => (
+              <span key={v} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <button
+                  type="button"
+                  className={`metric-toggle${viewMode === v ? " metric-toggle--on" : ""}`}
+                  onClick={() => setViewMode(v)}
+                >
+                  {v === "daily" ? "Daily summary" : v === "events" ? "Events only" : "All hours"}
+                </button>
+                {v === "daily" && (
+                  <HelpPopover
+                    label="Daily summary help"
+                    content={
+                      <>
+                        <strong>Daily mode columns:</strong> the number is how many <strong>loads started</strong> that day
+                        for that single leg lane (customer + direction + mode + lane). A green check appears only when that
+                        count is greater than zero. <strong>0</strong> means no visit started on that leg — hover the cell for
+                        roll-up text. Row tint still highlights the worst idle reason seen that day across visible legs
+                        (inventory, berth, pace, etc.).
+                      </>
+                    }
+                    size={14}
+                  />
+                )}
+              </span>
+            ))}
+          </div>
+        </div>
       </div>
       {showLegColumns ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>LEG COLUMNS</span>
-          <input
-            type="number"
-            min={1}
-            max={64}
-            className="form-input"
-            style={{ width: 90, padding: "4px 8px", fontSize: 12 }}
-            value={maxLegColumns}
-            onChange={(e) => setMaxLegColumns(Math.max(1, Math.min(64, parseInt(e.target.value || "1", 10))))}
-          />
-          <span style={{ fontSize: 12, color: "#64748b" }}>
-            Showing top {visibleLegColumns.length} leg columns
-          </span>
+        <div className="filter-toolbar" style={{ marginBottom: 12 }}>
+          <div className="filter-toolbar-group">
+            <span className="filter-toolbar-label">Leg columns</span>
+            <div className="filter-toolbar-toggles" style={{ alignItems: "center" }}>
+              <input
+                type="number"
+                min={1}
+                max={64}
+                className="form-input"
+                style={{ width: 90, padding: "4px 8px", fontSize: 12 }}
+                value={maxLegColumns}
+                onChange={(e) => setMaxLegColumns(Math.max(1, Math.min(64, parseInt(e.target.value || "1", 10))))}
+              />
+              <span className="text-muted-sm">Showing top {visibleLegColumns.length} leg columns</span>
+            </div>
+          </div>
         </div>
       ) : null}
 
-      <div style={{ marginBottom: 8, fontSize: 13, color: "#64748b" }}>
+      <div className="text-muted-sm" style={{ marginBottom: 8 }}>
         {rowCountLabel}
         {activeConstraints.size > 0 && displayRows.length === 0 ? " — no rows match this constraint filter" : ""}
       </div>

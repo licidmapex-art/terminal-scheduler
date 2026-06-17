@@ -16,7 +16,7 @@ export interface Customer {
   pipelineOutboundPerHour?: number;
   // Inbound transport
   declaredInboundThroughput: number; // tonnes of inbound transport units per period (0 if none)
-  /** Preferred multi-mode model: up to 3 rows with share split. */
+  /** Multi-mode legs: same mode may appear more than once (different cargo sizes). */
   inboundTransports?: CustomerTransportConfig[];
   /** Legacy single-row fields (kept for backward compatibility). */
   inboundMEPS: number; // max expected parcel size inbound (0 if none)
@@ -24,7 +24,7 @@ export interface Customer {
   /** Hours before inbound vessel can return; 0 = space evenly across period */
   inboundRoundtripHours: number;
   // Outbound transport
-  /** Preferred multi-mode model: up to 3 rows with share split. */
+  /** Multi-mode legs: same mode may appear more than once (different cargo sizes). */
   outboundTransports?: CustomerTransportConfig[];
   /** Legacy single-row fields (kept for backward compatibility). */
   outboundMEPS: number; // max expected parcel size outbound (0 if none)
@@ -37,15 +37,43 @@ export interface Customer {
   timeSharedDuration: number;
   /** Optional hex color (#rrggbb) for charts, Gantt, and simulation map; omitted/null uses palette by customer order. */
   chartColor?: string | null;
+  /** Grade mass balancing: share of all flows attributed to each grade (must sum to 100 when enabled). */
+  gradeGreenPct?: number;
+  gradeBluePct?: number;
+  gradeGreyPct?: number;
   // outbound throughput is CALCULATED, never declared
 }
 
+export type SustainabilityGrade = "green" | "blue" | "grey";
+
+export type PoolInventoryAllocation = "attributed" | "proportional";
+
+export type BerthTransportMode = "ship" | "barge" | "train";
+
+/** Inventory club — name only; physical settings live on customer transport legs. */
+export interface TransportPool {
+  id: string;
+  name: string;
+  /** @deprecated Legacy DB columns — not shown in UI. */
+  mode?: BerthTransportMode;
+  roundtripHours?: number;
+  meps?: number;
+  inventoryAllocation?: PoolInventoryAllocation;
+}
+
 export interface CustomerTransportConfig {
-  mode: "ship" | "barge" | "train";
+  /** `pool` = inventory-only club membership (no berth scheduling). */
+  mode: BerthTransportMode | "pool";
   /** 0..100; shares across active rows in a direction should sum to 100. */
   sharePct: number;
+  /** When true, share stays fixed while other movable legs are adjusted. */
+  shareFixed?: boolean;
   meps: number;
   roundtripHours: number;
+  /** References a shared {@link TransportPool}; null = private leg. */
+  poolId?: string | null;
+  /** WoA / laycan window length (hours) for this leg when terminal reservation mode is enabled. */
+  reservationWindowHours?: number;
 }
 
 export type StorageMode =
@@ -82,6 +110,9 @@ export interface ScheduledSlot {
   volume: number;
   start: Date;
   end: Date;
+  /** WoA / laycan reservation window (light bar); null when mode is none. */
+  reservationStart?: Date | null;
+  reservationEnd?: Date | null;
   status: ScheduledSlotStatus;
   conflictReason: string | null;
   /** Scheduler leg key; distinguishes multiple lanes with same mode/direction/customer. */
@@ -101,6 +132,14 @@ export interface SimulationConfig {
    * Outbound blocked when (attributed inv − MEPS) would be below −x. x = 0 means attributed inv cannot go negative.
    */
   sharedInventoryCustomerDeficitLimitTonnes: number;
+  /** Enable grade-aware mass-balance accounting (RED-style bookkeeping by quarter). */
+  gradeMassBalancingEnabled?: boolean;
+  /** Allowed temporary grade deficit within a quarter (tonnes or % of quarter inbound). */
+  gradeMassBalanceDeficitMode?: "tonnes" | "percent";
+  /** Deficit limit in tonnes when mode is tonnes. */
+  gradeMassBalanceDeficitLimitTonnes?: number;
+  /** Deficit limit as % of quarter inbound when mode is percent. */
+  gradeMassBalanceDeficitLimitPct?: number;
   /** Inbound: decile (1–9) — round up to next slot once fractional pace reaches decile/10. */
   pacerInboundRoundAtDecile?: number;
   /** Inbound offset (slots) added to the linear pace tracker; may be negative to delay starts. */
@@ -118,6 +157,19 @@ export interface SimulationConfig {
   optimizerRelativeDocMultiplier?: number;
   /** Yield when leg fulfilment % exceeds this × pool average (shared shipping / shared inventory inbound). 0 = off. */
   optimizerRelativeFulfillmentMultiplier?: number;
+  /**
+   * Feasibility warnings configuration (UI filters + thresholds).
+   * When omitted, defaults are applied in the engine.
+   */
+  feasibilityWarnings?: Record<
+    string,
+    {
+      enabled?: boolean;
+      severity?: "amber" | "red";
+      /** Optional numeric threshold; interpretation depends on warning key (usually percent). */
+      threshold?: number;
+    }
+  >;
   minSlotIntervalHours: number; // minimum hours between consecutive slots on the same resource (default: 0)
   /** Hours alongside before cargo transfer (mooring / line-up). Occupies berth; no inventory flow. */
   preOpsHours: number;
@@ -134,6 +186,118 @@ export interface SimulationConfig {
    * - prefer_small: use small berths when free; otherwise large
    */
   bargeBerthAllocation?: "alternate" | "small_only" | "prefer_small";
+  /** Berth reservation model for scheduled slots: none, window of arrival, or laycan. */
+  berthReservationMode?: BerthReservationMode;
+  /**
+   * Shared mode: which grades enforce the −x borrowing floor on outbound moves.
+   * Default `all` matches legacy total-attributed floor behaviour.
+   */
+  borrowingGradeScope?: "all" | "same_grade" | "selected_grades";
+  /** When scope is `selected_grades`, only these grades are floor-checked. */
+  selectedBorrowingGrades?: SustainabilityGrade[];
+  /** Optional per-grade −x limit (t); omitted grades use global x apportioned by grade share. */
+  perGradeDeficitLimitTonnes?: Partial<Record<SustainabilityGrade, number>>;
+  /** Optional stochastic scenario parameters (Phase 2+). */
+  stochasticConfig?: StochasticConfig;
+}
+
+export type BerthReservationMode = "none" | "window_of_arrival" | "laycan";
+
+/** Distribution for stochastic sampling (hours, multipliers, etc.). */
+export type DistributionSpec =
+  | { kind: "fixed"; value: number }
+  | { kind: "uniform"; min: number; max: number }
+  | { kind: "triangular"; min: number; mode: number; max: number };
+
+export type StochasticEventKind =
+  | "arrival_delay"
+  | "pipeline_reduction"
+  | "pipeline_stop"
+  | "immobilisation";
+
+/** One resolved stochastic event for UI / simulation log. */
+export interface StochasticEvent {
+  id: string;
+  kind: StochasticEventKind;
+  hourStart: number;
+  hourEnd: number;
+  customerId?: string;
+  slotId?: string;
+  legKey?: string | null;
+  resourceId?: string;
+  magnitude?: number;
+  label: string;
+}
+
+export interface StochasticLegDelayConfig {
+  customerId: string;
+  direction: "inbound" | "outbound";
+  legKey?: string | null;
+  /** Fraction of matching slots that receive a delay (0–1). Default 1 when omitted (legacy). */
+  delayProbability?: number;
+  delayHours: DistributionSpec;
+}
+
+export type StochasticDisruptionKind = "terminal" | "pipeline";
+
+export type StochasticDisruptionImpact =
+  | { kind: "full_stop" }
+  | { kind: "partial"; multiplier: DistributionSpec };
+
+/** Terminal immobilisation or pipeline stop/reduction during the simulation period. */
+export interface StochasticDisruptionEvent {
+  kind: StochasticDisruptionKind;
+  label?: string;
+  /** Probability this event occurs once per simulation period (0–1). Default 1 when omitted (legacy). */
+  occurrenceProbability?: number;
+  durationHours?: DistributionSpec;
+  /** Fixed start hour from simulation start (legacy). */
+  startHour?: number;
+  /** Random start window: sample start hour in [startHourMin, startHourMax). */
+  startHourMin?: number;
+  startHourMax?: number;
+  impact?: StochasticDisruptionImpact;
+  /** Terminal only: when omitted, all berth resources are affected. */
+  resourceId?: string;
+}
+
+/** @deprecated use StochasticDisruptionEvent */
+export type StochasticImmobilisationSpec = StochasticDisruptionEvent;
+
+/** User-configured stochastic parameters (scenario / simulation config). */
+export interface StochasticConfig {
+  enabled: boolean;
+  seed?: number;
+  legDelays: StochasticLegDelayConfig[];
+  pipeline: {
+    /** Hourly multiplier on nominal pipeline t/h (triangular / uniform). */
+    flowMultiplier: DistributionSpec;
+  };
+  immobilisation: {
+    events: StochasticDisruptionEvent[];
+  };
+}
+
+export interface SlotTimeAdjustment {
+  slotId: string;
+  deltaStartMs: number;
+  deltaEndMs: number;
+  reason: string;
+}
+
+export interface ImmobilisationWindow {
+  resourceId?: string;
+  startMs: number;
+  endMs: number;
+  label: string;
+}
+
+/** Resolved overrides for one stochastic iteration (replay). */
+export interface SimulationOverrides {
+  slotAdjustments: SlotTimeAdjustment[];
+  /** Simulation hour → customerId → pipeline rate multiplier (0 = stop). */
+  pipelineMultiplierByHour: Record<number, Record<string, number>>;
+  immobilisationWindows: ImmobilisationWindow[];
 }
 
 /** Persisted inventory audit row (database). */

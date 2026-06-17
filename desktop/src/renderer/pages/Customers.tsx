@@ -5,6 +5,7 @@ import UnsavedChangesDialog from "../components/UnsavedChangesDialog";
 import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import { buildCustomerThroughputOverview } from "../lib/customerThroughputOverview";
+import { parseStorageMode } from "../../lib/storageMode";
 import type { Customer as EngineCustomer, SimulationConfig as EngineSimulationConfig } from "../../types";
 
 interface Customer {
@@ -33,19 +34,6 @@ interface SimulationConfig {
 }
 
 type PendingEditorAction = { type: "edit"; customer: Customer } | { type: "add" };
-
-function parseStorageMode(raw: unknown): EngineSimulationConfig["storageMode"] {
-  if (raw === "commingled") return "shared_shipping";
-  if (
-    raw === "fixed_band" ||
-    raw === "shared_shipping" ||
-    raw === "time_shared_storage" ||
-    raw === "shared_inventory"
-  ) {
-    return raw;
-  }
-  return "fixed_band";
-}
 
 function toEngineConfig(config: SimulationConfig): EngineSimulationConfig {
   return {

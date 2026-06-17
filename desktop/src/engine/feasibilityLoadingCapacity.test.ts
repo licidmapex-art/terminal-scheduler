@@ -85,7 +85,7 @@ describe("runFeasibilityChecks outbound vs inbound capacity", () => {
 
     const warnings = runFeasibilityChecks([customer], [], [], config);
     expect(
-      warnings.some((w) => w.includes("outbound loading/unloading capacity") && w.includes("110%"))
+      warnings.some((w) => w.message.includes("outbound loading/unloading capacity") && w.message.includes("110%"))
     ).toBe(true);
   });
 
@@ -103,7 +103,7 @@ describe("runFeasibilityChecks outbound vs inbound capacity", () => {
     expect(outboundCap).toBeGreaterThanOrEqual(1.1 * 10_000);
 
     const warnings = runFeasibilityChecks([customer], [], [], config);
-    expect(warnings.some((w) => w.includes("outbound loading/unloading capacity"))).toBe(false);
+    expect(warnings.some((w) => w.message.includes("outbound loading/unloading capacity"))).toBe(false);
   });
 
   it("includes inbound pipeline in throughput comparison", () => {
@@ -121,6 +121,6 @@ describe("runFeasibilityChecks outbound vs inbound capacity", () => {
     expect(inbound).toBe(10_000);
 
     const warnings = runFeasibilityChecks([customer], [], [], config);
-    expect(warnings.some((w) => w.includes("outbound loading/unloading capacity"))).toBe(true);
+    expect(warnings.some((w) => w.message.includes("outbound loading/unloading capacity"))).toBe(true);
   });
 });

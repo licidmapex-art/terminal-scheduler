@@ -59,6 +59,36 @@ export function hourOverlapsIntervalMs(
   return hs < intervalEndMs && he > intervalStartMs;
 }
 
+/** Fraction of simulation hour h overlapping [cargoStartMs, cargoEndMs), in hours. */
+export function cargoOverlapHoursInSimulationHour(
+  h: number,
+  simStartMs: number,
+  cargoStartMs: number,
+  cargoEndMs: number
+): number {
+  const hs = simStartMs + h * HOUR_MS;
+  const he = hs + HOUR_MS;
+  const overlapStart = Math.max(hs, cargoStartMs);
+  const overlapEnd = Math.min(he, cargoEndMs);
+  if (overlapEnd <= overlapStart) return 0;
+  return (overlapEnd - overlapStart) / HOUR_MS;
+}
+
+/** Tonnes moved in simulation hour h at constant rate across the cargo window. */
+export function cargoTonnesInSimulationHour(
+  h: number,
+  simStartMs: number,
+  cargoStartMs: number,
+  cargoEndMs: number,
+  totalTonnes: number
+): number {
+  const loadingHours = (cargoEndMs - cargoStartMs) / HOUR_MS;
+  if (loadingHours <= 0 || totalTonnes <= 0) return 0;
+  const overlapHours = cargoOverlapHoursInSimulationHour(h, simStartMs, cargoStartMs, cargoEndMs);
+  if (overlapHours <= 0) return 0;
+  return (totalTonnes / loadingHours) * overlapHours;
+}
+
 /** Smallest hour index whose clock hour overlaps [cargoStartMs, cargoEndMs). */
 export function firstHourOverlappingCargo(
   simStartMs: number,

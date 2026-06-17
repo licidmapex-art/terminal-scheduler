@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { ClipboardList, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import TerminalMapSvg from "../components/TerminalMapSvg";
-import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
+import { PageTitleWithHelp } from "../components/HelpPopover";
 import {
   useSimulationData,
   isAnyOperationActive,
@@ -122,7 +122,10 @@ export default function Simulation() {
     return (
       <div>
         <div className="page-header">
-          <h1 className="page-title">Visualization</h1>
+          <PageTitleWithHelp
+            title="Visualization"
+            help="Animated playback of inventory and berth activity from the saved scheduler run."
+          />
         </div>
         <div className="alert alert-error">{loadError ?? "Add a simulation configuration under Terminal."}</div>
       </div>
@@ -133,13 +136,10 @@ export default function Simulation() {
     <div>
       <div className="page-header">
         <div>
-          <div className="page-title-row">
-            <h1 className="page-title">Terminal visualization</h1>
-            <HelpPopover
-              label="Visualization help"
-              content="Playback from saved inventory timeline and scheduled berth slots."
-            />
-          </div>
+          <PageTitleWithHelp
+            title="Visualization"
+            help="Playback from saved inventory timeline and scheduled berth slots."
+          />
           {(timelineStart || operationActive) && (
             <p className="page-subtitle" style={{ marginTop: 4 }}>
               {timelineStart ? `From ${new Date(timelineStart).toLocaleDateString("en-GB")}` : ""}
@@ -150,7 +150,7 @@ export default function Simulation() {
         </div>
       </div>
 
-      <div className="card" style={{ padding: 0, marginBottom: 24, overflow: "hidden" }}>
+      <div className="card mb-24" style={{ padding: 0, overflow: "hidden" }}>
         {/* Terminal map */}
         <div style={{ width: "100%", aspectRatio: "1200 / 700", position: "relative", background: "#0047AB" }}>
           <TerminalMapSvg
