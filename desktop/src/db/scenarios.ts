@@ -2,7 +2,6 @@
  * Named scenario snapshots: customers, resources (incl. blackouts), and simulation config.
  */
 
-import { randomUUID } from "crypto";
 import { getDatabase } from "./database";
 import { getAllCustomers, createCustomer } from "./customers";
 import { getAllResources, createResource } from "./resources";
@@ -18,6 +17,7 @@ import {
 } from "./simulationConfigs";
 import type { Customer, Resource, SimulationConfig, TransportPool } from "../types";
 
+const randomUUID = () => globalThis.crypto.randomUUID();
 const DATA_VERSION = 1;
 
 export interface ScenarioListRow {

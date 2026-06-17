@@ -1,7 +1,8 @@
-import { randomUUID } from "crypto";
 import { getDatabase } from "./database";
 import type { SimulationConfig, StorageMode, SustainabilityGrade, StochasticConfig } from "../types";
 import { normalizeBargeBerthAllocation } from "../engine/resourceAllocation";
+
+const randomUUID = () => globalThis.crypto.randomUUID();
 
 const STORAGE_MODES: readonly StorageMode[] = [
   "fixed_band",
