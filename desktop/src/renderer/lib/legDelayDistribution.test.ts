@@ -55,7 +55,7 @@ describe("legDelayConfigFromFields", () => {
       delayHours: { kind: "triangular" as const, min: 0, mode: 6, max: 18 }
     };
     const fields = legDelayFieldsFromConfig(cfg);
-    expect(fields.probability).toBe("0.3");
+    expect(fields.probability).toBe("30");
     expect(legDelayConfigFromFields(fields, meta)).toEqual(cfg);
   });
 });

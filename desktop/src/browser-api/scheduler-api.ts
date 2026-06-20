@@ -5,6 +5,7 @@
 
 import { runScheduler } from "../engine/scheduler";
 import { replaySimulation } from "../engine/replaySimulation";
+import { runMonteCarloAsync, runSingleStochasticReplay } from "../engine/stochastic/runMonteCarlo";
 import { validateScheduledSlots } from "../engine/validateScheduledSlots";
 import { finalizeManualSlot } from "../engine/manualSlot";
 import type { SimulationConfig, ScheduledSlot } from "../types";
@@ -18,7 +19,8 @@ import {
   cloneSlots,
   computeSlotTweaks,
   buildStochasticRunSnapshot,
-  type SimulationRunSnapshot
+  type SimulationRunSnapshot,
+  type MonteCarloSnapshot
 } from "../lib/simulationRunState";
 
 // ── Last-run state (mirrors main/index.ts module-level vars) ──────────────────
@@ -66,6 +68,34 @@ function buildSnapshot(slots: ScheduledSlot[]): SimulationRunSnapshot {
   };
 }
 
+function serializeMonteCarloSnapshot(snapshot: MonteCarloSnapshot | null) {
+  if (!snapshot) return null;
+  return {
+    iterations: snapshot.iterations,
+    selectedIndex: snapshot.selectedIndex,
+    baseSeed: snapshot.baseSeed,
+    runSeeds: snapshot.runSeeds,
+    aggregates: snapshot.aggregates,
+    customerSummaries: snapshot.customerSummaries,
+    hasFullRuns: (snapshot.runs?.length ?? 0) > 0
+  };
+}
+
+function serializeStochasticRunForApi(run: ReturnType<typeof runState.getStochasticRun>) {
+  if (!run) return null;
+  return {
+    stochasticSeed: run.stochasticSeed,
+    slots: run.slots.map(serializeSlot),
+    ghostSlots: run.ghostSlots.map(serializeSlot),
+    simulationLog: run.simulationLog,
+    inventoryTimeline: run.inventoryTimeline,
+    feasibilityWarnings: run.feasibilityWarnings,
+    slotAdjustments: run.slotAdjustments,
+    immobilisationWindows: run.immobilisationWindows,
+    stochasticEvents: run.stochasticEvents ?? []
+  };
+}
+
 function mergeSlotValidationWarnings(
   result: ReturnType<typeof runScheduler>,
   slots: ScheduledSlot[],
@@ -85,6 +115,16 @@ function mergeSlotValidationWarnings(
       }))
     ]
   };
+}
+
+function replayFromCurrentSlots(): void {
+  const customers = _store.customers;
+  const resources = resolveResources();
+  const config = resolveConfig();
+  let result = replaySimulation(customers, resources, config, lastSlots, _store.transportPools);
+  result = mergeSlotValidationWarnings(result, lastSlots, resources, config);
+  applyRunResult(result, config);
+  runState.setLastReplayed(lastSlots);
 }
 
 function resolveResources() {
@@ -262,6 +302,116 @@ export const browserSchedulerApi = {
     return Promise.resolve({ ok: true as const });
   },
 
+  runMonteCarlo: async (payload: { iterations?: number; baseSeed?: number }) => {
+    const customers = _store.customers;
+    const resources = resolveResources();
+    if (customers.length === 0 || resources.length === 0 || lastSlots.length === 0) {
+      return { ok: false as const, error: "Run the scheduler first and keep at least one slot." };
+    }
+    const config = resolveConfig();
+    if (!config.stochasticConfig?.enabled) {
+      return {
+        ok: false as const,
+        error: "Enable stochastics under Configuration → Stochastics, then save."
+      };
+    }
+    runState.clearMonteCarlo();
+    const snapshot = await runMonteCarloAsync(
+      {
+        workingSlots: lastSlots,
+        customers,
+        resources,
+        config,
+        stochasticConfig: config.stochasticConfig,
+        transportPools: _store.transportPools,
+        mergeValidation: (r) => mergeSlotValidationWarnings(r, lastSlots, resources, config)
+      },
+      {
+        iterations: payload.iterations ?? 50,
+        baseSeed: payload.baseSeed,
+        shouldCancel: () => runState.shouldCancelMonteCarlo()
+      }
+    );
+    if (snapshot.iterations === 0) {
+      return { ok: false as const, error: "Monte Carlo run was cancelled." };
+    }
+    runState.setMonteCarlo(snapshot);
+    if (!snapshot.runs?.length && snapshot.runSeeds[0] != null) {
+      let result = runSingleStochasticReplay(
+        {
+          workingSlots: lastSlots,
+          customers,
+          resources,
+          config,
+          stochasticConfig: config.stochasticConfig,
+          transportPools: _store.transportPools,
+          mergeValidation: (r) => mergeSlotValidationWarnings(r, lastSlots, resources, config)
+        },
+        snapshot.runSeeds[0]
+      );
+      runState.attachMonteCarloRun(0, buildStochasticRunSnapshot(lastSlots, result));
+    }
+    return {
+      ok: true as const,
+      snapshot: serializeMonteCarloSnapshot(runState.getMonteCarlo())!,
+      run: serializeStochasticRunForApi(runState.getStochasticRun())!
+    };
+  },
+
+  getMonteCarloState: () => {
+    return Promise.resolve({
+      active: runState.hasMonteCarlo(),
+      snapshot: serializeMonteCarloSnapshot(runState.getMonteCarlo()),
+      run: serializeStochasticRunForApi(runState.getStochasticRun())
+    });
+  },
+
+  setMonteCarloIteration: async (index: number) => {
+    const mc = runState.getMonteCarlo();
+    if (!mc) return { ok: false as const, error: "No Monte Carlo run active." };
+    const clamped = Math.max(0, Math.min(mc.iterations - 1, Math.floor(index)));
+    const seed = mc.runSeeds[clamped];
+    if (seed == null) return { ok: false as const, error: "Invalid iteration index." };
+
+    if (mc.runs?.[clamped]) {
+      runState.setMonteCarloSelectedIndex(clamped);
+    } else {
+      const config = resolveConfig();
+      const resources = resolveResources();
+      let result = runSingleStochasticReplay(
+        {
+          workingSlots: lastSlots,
+          customers: _store.customers,
+          resources,
+          config,
+          stochasticConfig: config.stochasticConfig!,
+          transportPools: _store.transportPools,
+          mergeValidation: (r) => mergeSlotValidationWarnings(r, lastSlots, resources, config)
+        },
+        seed
+      );
+      runState.attachMonteCarloRun(clamped, buildStochasticRunSnapshot(lastSlots, result));
+    }
+
+    return {
+      ok: true as const,
+      snapshot: serializeMonteCarloSnapshot(runState.getMonteCarlo())!,
+      run: serializeStochasticRunForApi(runState.getStochasticRun())!
+    };
+  },
+
+  clearMonteCarlo: () => {
+    runState.clearMonteCarlo();
+    return Promise.resolve({ ok: true as const });
+  },
+
+  cancelMonteCarlo: () => {
+    runState.requestMonteCarloCancel();
+    return Promise.resolve({ ok: true as const });
+  },
+
+  onMonteCarloProgress: undefined,
+
   updateSimulation: (): Promise<
     | {
         ok: true;
@@ -344,6 +494,7 @@ export const browserSchedulerApi = {
     result = mergeSlotValidationWarnings(result, prev, resources, config);
     applyRunResult(result, config);
     runState.setLastReplayed(prev);
+    runState.clearStochasticRun();
     return Promise.resolve({
       ok: true,
       scheduledSlots: prev.map(serializeSlot),
@@ -360,7 +511,8 @@ export const browserSchedulerApi = {
     }
     runState.pushUndo(lastSlots);
     lastSlots = lastSlots.filter((s) => s.id !== id);
-    runState.markDirty();
+    replayFromCurrentSlots();
+    runState.clearStochasticRun();
     return Promise.resolve({ ok: true, slotId: id });
   },
 
@@ -382,7 +534,6 @@ export const browserSchedulerApi = {
     if (!customer) return Promise.resolve({ ok: false, error: "Customer not found." });
     const resources = resolveResources();
     const config = resolveConfig();
-    runState.pushUndo(lastSlots);
 
     const draft: ScheduledSlot = {
       id: payload.slot.id ?? crypto.randomUUID(),
@@ -403,12 +554,14 @@ export const browserSchedulerApi = {
     const built = finalizeManualSlot(draft, customer, resources, config, others);
     if (!built.ok) return Promise.resolve({ ok: false, error: built.error });
 
+    runState.pushUndo(lastSlots);
     if (payload.isNew || !lastSlots.some((s) => s.id === built.slot.id)) {
       lastSlots = [...lastSlots, built.slot];
     } else {
       lastSlots = lastSlots.map((s) => (s.id === built.slot.id ? built.slot : s));
     }
-    runState.markDirty();
+    replayFromCurrentSlots();
+    runState.clearStochasticRun();
     return Promise.resolve({ ok: true, slot: serializeSlot(built.slot) });
   },
 

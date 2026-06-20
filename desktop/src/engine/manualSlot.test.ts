@@ -42,10 +42,28 @@ describe("manualSlot helpers", () => {
     expect(snapMsToHour(ms, simStartMs)).toBe(simStartMs + 2 * 60 * 60 * 1000);
   });
 
-  it("derives volume from occupation wall time and MEPS", () => {
+  it("derives volume from occupation wall time and berth flow rate (not MEPS)", () => {
     const start = new Date("2025-01-01T00:00:00.000Z");
     const end = new Date("2025-01-01T07:00:00.000Z");
-    expect(volumeFromOccupation(start, end, 500, config)).toBe(1500);
+    const berthFlowRateTph = 500;
+    const meps = 5000;
+    const volume = volumeFromOccupation(start, end, berthFlowRateTph, config);
+    expect(volume).toBe(1500);
+    expect(volume).toBeLessThan(meps);
+  });
+
+  it("shortening a full-load slot yields partial cargo at berth rate, not MEPS-as-rate", () => {
+    const start = new Date("2025-01-01T00:00:00.000Z");
+    const fullEnd = new Date("2025-01-01T14:00:00.000Z");
+    const shortEnd = new Date("2025-01-01T07:00:00.000Z");
+    const berthFlowRateTph = 500;
+    const meps = 5000;
+    const fullVolume = volumeFromOccupation(start, fullEnd, berthFlowRateTph, config);
+    const shortVolume = volumeFromOccupation(start, shortEnd, berthFlowRateTph, config);
+    expect(fullVolume).toBe(5000);
+    expect(shortVolume).toBe(1500);
+    expect(shortVolume).toBeLessThan(meps);
+    expect(volumeFromOccupation(start, shortEnd, meps, config)).toBe(15000);
   });
 
   it("derives occupation end from volume", () => {

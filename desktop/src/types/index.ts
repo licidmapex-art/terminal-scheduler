@@ -152,7 +152,7 @@ export interface SimulationConfig {
   pacerRoundAtDecile?: number;
   /**
    * Relative optimizer: skip scheduling this leg when its DoC exceeds this multiple of the
-   * cross-customer average DoC at that hour (others may still book). 0 disables.
+   * combined terminal DoC at that hour (others may still book). 0 disables.
    */
   optimizerRelativeDocMultiplier?: number;
   /** Yield when leg fulfilment % exceeds this × pool average (shared shipping / shared inventory inbound). 0 = off. */
@@ -298,6 +298,33 @@ export interface SimulationOverrides {
   /** Simulation hour → customerId → pipeline rate multiplier (0 = stop). */
   pipelineMultiplierByHour: Record<number, Record<string, number>>;
   immobilisationWindows: ImmobilisationWindow[];
+}
+
+/** Per-hour inventory percentiles across Monte Carlo iterations. */
+export interface InventoryPercentileSeries {
+  p10: number[];
+  p50: number[];
+  p90: number[];
+}
+
+export interface MonteCarloCustomerSummary {
+  customerId: string;
+  minInventory: number;
+  meanInventory: number;
+  maxInventory: number;
+  pctHoursBelowZero: number;
+  warningRate: number;
+}
+
+export interface MonteCarloAggregates {
+  terminalInventory: InventoryPercentileSeries;
+  customerInventory: Record<string, InventoryPercentileSeries>;
+  /** Effective flow multiplier (0–1) per hour across iterations — inbound pipeline row. */
+  pipelineInbound: InventoryPercentileSeries;
+  /** Effective flow multiplier (0–1) per hour across iterations — outbound pipeline row. */
+  pipelineOutbound: InventoryPercentileSeries;
+  warningCounts: Record<string, number>;
+  eventHistograms: Record<StochasticEventKind, number>;
 }
 
 /** Persisted inventory audit row (database). */

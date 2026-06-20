@@ -17,6 +17,7 @@ import {
   constraintDef,
   type BlockingConstraintKey
 } from "../lib/schedulingConstraints";
+import { formatFulfillmentRatio } from "../lib/formatMetrics";
 import TransportStatusIcon, { WorstConstraintIcon } from "../components/TransportStatusIcon";
 import { ConstraintIcon, UncategorisedConstraintIcon } from "../components/ConstraintIcon";
 import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
@@ -137,11 +138,6 @@ function higherConstraint(
 function formatDaysOfCover(doc: number | null | undefined): string {
   if (doc == null || !Number.isFinite(doc)) return "∞";
   return doc >= 10 ? doc.toFixed(1) : doc.toFixed(2);
-}
-
-function formatFulfillmentRatio(ratio: number | null | undefined): string {
-  if (ratio == null || !Number.isFinite(ratio)) return "∞";
-  return `${(ratio * 100).toFixed(1)}%`;
 }
 
 function formatWaitHours(hours: number | null | undefined): string {

@@ -692,7 +692,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
 
       <div className="card config-section">
         <div className="config-section-header">
-          <span className="config-section-num">5</span>
+          <span className="config-section-num">3</span>
           <div>
             <div className="config-section-title-row">
               <div className="config-section-title">Feasibility warnings</div>
@@ -804,7 +804,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
 
       <div className="card config-section">
         <div className="config-section-header">
-          <span className="config-section-num">6</span>
+          <span className="config-section-num">4</span>
           <div>
             <div className="config-section-title-row">
               <div className="config-section-title">Operational laytime</div>
@@ -889,7 +889,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
 
       <div className="card config-section">
         <div className="config-section-header">
-          <span className="config-section-num">4</span>
+          <span className="config-section-num">5</span>
           <div>
             <div className="config-section-title-row">
               <div className="config-section-title">Grade mass balancing</div>
@@ -985,7 +985,7 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
 
       <div className="card config-section">
         <div className="config-section-header">
-          <span className="config-section-num">5</span>
+          <span className="config-section-num">6</span>
           <div>
             <div className="config-section-title-row">
               <div className="config-section-title">Pacing behavior</div>
@@ -1061,12 +1061,12 @@ export default function SimulationConfigForm({ onSaved }: SimulationConfigFormPr
             <FormLabelWithHelp
               help={
                 <>
-                  When a leg&apos;s days-of-cover exceeds this multiple of the cross-customer average at that hour,
+                  When a leg&apos;s days-of-cover exceeds this multiple of combined terminal DoC at that hour,
                   that customer yields the slot attempt (others may still book). Set 0 to disable.
                 </>
               }
             >
-              Relative optimizer (× average DoC)
+              Relative optimizer (× combined DoC)
             </FormLabelWithHelp>
             <input
               type="number"

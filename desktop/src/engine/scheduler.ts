@@ -577,7 +577,7 @@ function buildTransportStatuses(
 
   const optimizerMultiplier = normalizedOptimizerRelativeDocMultiplier(config);
   const fulfillmentOptimizerMultiplier = normalizedOptimizerRelativeFulfillmentMultiplier(config);
-  const averageDoc = averageCustomerDaysOfCoverAtHour(
+  const combinedDoc = combinedTerminalDaysOfCoverAtHour(
     customers,
     legs,
     config,
@@ -749,11 +749,11 @@ function buildTransportStatuses(
     if (
       !blockingConstraint &&
       optimizerMetricSnapshot !== null &&
-      relativeOptimizerShouldYield(optimizerMetricSnapshot, averageDoc, optimizerMultiplier)
+      relativeOptimizerShouldYield(optimizerMetricSnapshot, combinedDoc, optimizerMultiplier)
     ) {
       blockingConstraint = "optimizer_days_of_cover";
-      const avgLabel = averageDoc != null ? averageDoc.toFixed(2) : "—";
-      constraintDetail = `optimizer DoC ${optimizerMetricSnapshot.toFixed(2)} > ${optimizerMultiplier}× avg ${avgLabel} — yields slot to other customers`;
+      const combinedLabel = combinedDoc != null ? combinedDoc.toFixed(2) : "—";
+      constraintDetail = `optimizer DoC ${optimizerMetricSnapshot.toFixed(2)} > ${optimizerMultiplier}× combined ${combinedLabel} — yields slot to other customers`;
     }
 
     const lastStart = lastLegSlotStartHourForRoundtrip(
@@ -1149,7 +1149,7 @@ export function runScheduler(
           terminalInventoryForOptimizer,
           customers
         );
-        if (relativeOptimizerShouldYield(metric, averageDoc, optimizerMultiplier)) continue;
+        if (relativeOptimizerShouldYield(metric, combinedDoc, optimizerMultiplier)) continue;
       }
 
       const lastStart = lastLegSlotStartHourForRoundtrip(

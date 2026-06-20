@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Customer, StochasticConfig } from "../../types";
 import StochasticConfigForm from "../components/StochasticConfigForm";
+import MonteCarloResultsPanel from "../components/MonteCarloResultsPanel";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { PageTitleWithHelp } from "../components/HelpPopover";
 import { useStore } from "../store";
@@ -8,6 +9,7 @@ import {
   defaultStochasticConfig,
   normalizeStochasticConfig
 } from "../lib/defaultStochasticConfig";
+import { simulationPeriodHoursFromDates } from "../lib/stochasticFormUnits";
 
 function toIsoDate(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
@@ -20,13 +22,18 @@ function toIsoDate(value: unknown): string {
 
 export default function Stochastics() {
   const [formKey, setFormKey] = useState(0);
-  const [stochasticConfig, setStochasticConfig] = useState<StochasticConfig>(defaultStochasticConfig);
+  const [stochasticConfig, setStochasticConfig] = useState<StochasticConfig>(() => defaultStochasticConfig());
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [configId, setConfigId] = useState<string | null>(null);
   const [configSnapshot, setConfigSnapshot] = useState<Record<string, unknown> | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastSchedulerRun = useStore((s) => s.lastSchedulerRun);
+
+  const simulationPeriodHours = simulationPeriodHoursFromDates(
+    configSnapshot?.startDate,
+    configSnapshot?.endDate
+  );
 
   const loadAll = useCallback(async () => {
     if (!window.dbAPI?.getSimulationConfigs || !window.dbAPI.getCustomers) return;
@@ -86,7 +93,7 @@ export default function Stochastics() {
           <div>
             <PageTitleWithHelp
               title="Stochastics"
-              help="Configure random arrival delays, pipeline variation, and terminal immobilisation. Use Sample once on the Schedule Gantt to preview one scenario; the baseline schedule is not overwritten."
+              help="Configure random arrival delays, pipeline variation, and terminal immobilisation. Use Sample once or Run Monte Carlo on the Schedule / Stochastics tabs; the baseline schedule is not overwritten."
             />
           </div>
         </div>
@@ -105,32 +112,43 @@ export default function Stochastics() {
           </div>
         )}
 
-        <form onSubmit={handleSave} className="config-layout config-layout--wide">
-          <StochasticConfigForm
-            value={stochasticConfig}
-            onChange={setStochasticConfig}
+        <div className="config-layout config-layout--wide">
+          <form onSubmit={handleSave}>
+            <StochasticConfigForm
+              value={stochasticConfig}
+              onChange={setStochasticConfig}
+              customers={customers}
+              simulationPeriodHours={simulationPeriodHours}
+              headerActions={
+                <>
+                  <button type="submit" className="btn btn-primary" disabled={!configId}>
+                    Save stochastics
+                  </button>
+                  {saved && (
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        color: "#15803d",
+                        fontSize: 14,
+                        fontWeight: 500
+                      }}
+                    >
+                      Saved
+                    </span>
+                  )}
+                </>
+              }
+            />
+          </form>
+
+          <MonteCarloResultsPanel
             customers={customers}
+            stochasticsEnabled={stochasticConfig.enabled === true}
+            hasSchedulerRun={lastSchedulerRun > 0}
           />
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <button type="submit" className="btn btn-primary" disabled={!configId}>
-              Save stochastics
-            </button>
-            {saved && (
-              <span
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  color: "#15803d",
-                  fontSize: 14,
-                  fontWeight: 500
-                }}
-              >
-                Saved
-              </span>
-            )}
-          </div>
-        </form>
+        </div>
       </div>
     </ErrorBoundary>
   );

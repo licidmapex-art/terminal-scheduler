@@ -2,11 +2,20 @@
  * Baseline snapshot + undo stack for tweakable schedule (pass 1 vs working copy).
  */
 
-import type { ScheduledSlot, SimulationOverrides, StochasticEvent, ImmobilisationWindow, SlotTimeAdjustment } from "../types";
+import type {
+  ScheduledSlot,
+  SimulationOverrides,
+  StochasticEvent,
+  ImmobilisationWindow,
+  SlotTimeAdjustment,
+  MonteCarloAggregates,
+  MonteCarloCustomerSummary,
+  InventoryPercentileSeries
+} from "../types";
 import type { SimulationLogRow } from "../engine/simulationLog";
 import type { GradeLedgerTimeline } from "../engine/gradeInventoryLedger";
 
-export type GanttScheduleView = "working" | "stochastic";
+export type GanttScheduleView = "deterministic" | "stochastic";
 
 export interface StochasticRunSnapshot {
   slots: ScheduledSlot[];
@@ -21,6 +30,18 @@ export interface StochasticRunSnapshot {
   stochasticSeed?: number;
   slotAdjustments: SlotTimeAdjustment[];
   immobilisationWindows: ImmobilisationWindow[];
+}
+
+/** Monte Carlo batch result (in-memory only; not persisted to DB). */
+export interface MonteCarloSnapshot {
+  iterations: number;
+  selectedIndex: number;
+  baseSeed: number;
+  runSeeds: number[];
+  aggregates: MonteCarloAggregates;
+  customerSummaries: MonteCarloCustomerSummary[];
+  /** Full runs when iterations ≤ 50; omitted in sparse mode. */
+  runs?: StochasticRunSnapshot[];
 }
 
 export interface SimulationRunSnapshot {
@@ -131,15 +152,89 @@ export function cloneSnapshot(snap: SimulationRunSnapshot): SimulationRunSnapsho
 
 const MAX_UNDO = 40;
 
+function cloneStochasticRunSnapshot(snapshot: StochasticRunSnapshot): StochasticRunSnapshot {
+  return {
+    ...snapshot,
+    slots: cloneSlots(snapshot.slots),
+    ghostSlots: cloneSlots(snapshot.ghostSlots),
+    simulationLog: snapshot.simulationLog.map((r) => ({
+      ...r,
+      customerInventories: { ...r.customerInventories },
+      pipelineFlow: { ...r.pipelineFlow },
+      transportStatus: [...r.transportStatus],
+      stochasticEvents: r.stochasticEvents ? [...r.stochasticEvents] : undefined
+    })),
+    inventoryTimeline: Object.fromEntries(
+      Object.entries(snapshot.inventoryTimeline).map(([id, arr]) => [id, [...arr]])
+    ),
+    gradeLedgerTimeline: snapshot.gradeLedgerTimeline
+      ? Object.fromEntries(
+          Object.entries(snapshot.gradeLedgerTimeline).map(([id, grades]) => [
+            id,
+            { green: [...grades.green], blue: [...grades.blue], grey: [...grades.grey] }
+          ])
+        )
+      : null,
+    feasibilityWarnings: snapshot.feasibilityWarnings.map((w) => ({ ...w })),
+    slotAdjustments: [...snapshot.slotAdjustments],
+    immobilisationWindows: snapshot.immobilisationWindows.map((w) => ({ ...w })),
+    stochasticEvents: snapshot.stochasticEvents ? [...snapshot.stochasticEvents] : undefined
+  };
+}
+
+function clonePercentileSeries(series: InventoryPercentileSeries): InventoryPercentileSeries {
+  return {
+    p10: [...series.p10],
+    p50: [...series.p50],
+    p90: [...series.p90]
+  };
+}
+
+function cloneMonteCarloSnapshot(snapshot: MonteCarloSnapshot): MonteCarloSnapshot {
+  return {
+    ...snapshot,
+    runSeeds: [...snapshot.runSeeds],
+    customerSummaries: snapshot.customerSummaries.map((s) => ({ ...s })),
+    aggregates: {
+      terminalInventory: clonePercentileSeries(snapshot.aggregates.terminalInventory),
+      customerInventory: Object.fromEntries(
+        Object.entries(snapshot.aggregates.customerInventory).map(([id, series]) => [
+          id,
+          clonePercentileSeries(series)
+        ])
+      ),
+      pipelineInbound: clonePercentileSeries(
+        snapshot.aggregates.pipelineInbound ?? { p10: [], p50: [], p90: [] }
+      ),
+      pipelineOutbound: clonePercentileSeries(
+        snapshot.aggregates.pipelineOutbound ?? { p10: [], p50: [], p90: [] }
+      ),
+      warningCounts: { ...snapshot.aggregates.warningCounts },
+      eventHistograms: { ...snapshot.aggregates.eventHistograms }
+    },
+    runs: snapshot.runs?.map(cloneStochasticRunSnapshot)
+  };
+}
+
 export function createRunStateManager() {
   let baseline: SimulationRunSnapshot | null = null;
   let undoStack: ScheduledSlot[][] = [];
   let lastReplayedSlots: ScheduledSlot[] = [];
   let dirty = false;
   let stochasticRun: StochasticRunSnapshot | null = null;
+  let monteCarlo: MonteCarloSnapshot | null = null;
+  let monteCarloCancelRequested = false;
 
-  const clearStochastic = () => {
+  const clearStochasticBranches = () => {
     stochasticRun = null;
+    monteCarlo = null;
+    monteCarloCancelRequested = false;
+  };
+
+  const syncStochasticFromMonteCarlo = () => {
+    if (!monteCarlo?.runs?.length) return;
+    const run = monteCarlo.runs[monteCarlo.selectedIndex];
+    if (run) stochasticRun = cloneStochasticRunSnapshot(run);
   };
 
   return {
@@ -148,7 +243,7 @@ export function createRunStateManager() {
       undoStack = [];
       dirty = false;
       lastReplayedSlots = cloneSlots(snapshot.slots);
-      clearStochastic();
+      clearStochasticBranches();
     },
 
     pushUndo(slots: ScheduledSlot[]): void {
@@ -198,60 +293,18 @@ export function createRunStateManager() {
       undoStack = [];
       dirty = false;
       lastReplayedSlots = [];
-      clearStochastic();
+      clearStochasticBranches();
     },
 
     setStochasticRun(snapshot: StochasticRunSnapshot): void {
-      stochasticRun = {
-        ...snapshot,
-        slots: cloneSlots(snapshot.slots),
-        ghostSlots: cloneSlots(snapshot.ghostSlots),
-        simulationLog: snapshot.simulationLog.map((r) => ({
-          ...r,
-          customerInventories: { ...r.customerInventories },
-          pipelineFlow: { ...r.pipelineFlow },
-          transportStatus: [...r.transportStatus],
-          stochasticEvents: r.stochasticEvents ? [...r.stochasticEvents] : undefined
-        })),
-        inventoryTimeline: Object.fromEntries(
-          Object.entries(snapshot.inventoryTimeline).map(([id, arr]) => [id, [...arr]])
-        ),
-        gradeLedgerTimeline: snapshot.gradeLedgerTimeline
-          ? Object.fromEntries(
-              Object.entries(snapshot.gradeLedgerTimeline).map(([id, grades]) => [
-                id,
-                { green: [...grades.green], blue: [...grades.blue], grey: [...grades.grey] }
-              ])
-            )
-          : null,
-        feasibilityWarnings: snapshot.feasibilityWarnings.map((w) => ({ ...w })),
-        slotAdjustments: [...snapshot.slotAdjustments],
-        immobilisationWindows: snapshot.immobilisationWindows.map((w) => ({ ...w })),
-        stochasticEvents: snapshot.stochasticEvents ? [...snapshot.stochasticEvents] : undefined
-      };
+      monteCarlo = null;
+      monteCarloCancelRequested = false;
+      stochasticRun = cloneStochasticRunSnapshot(snapshot);
     },
 
     getStochasticRun(): StochasticRunSnapshot | null {
       if (!stochasticRun) return null;
-      return {
-        ...stochasticRun,
-        slots: cloneSlots(stochasticRun.slots),
-        ghostSlots: cloneSlots(stochasticRun.ghostSlots),
-        simulationLog: stochasticRun.simulationLog.map((r) => ({
-          ...r,
-          customerInventories: { ...r.customerInventories },
-          pipelineFlow: { ...r.pipelineFlow },
-          transportStatus: [...r.transportStatus],
-          stochasticEvents: r.stochasticEvents ? [...r.stochasticEvents] : undefined
-        })),
-        inventoryTimeline: Object.fromEntries(
-          Object.entries(stochasticRun.inventoryTimeline).map(([id, arr]) => [id, [...arr]])
-        ),
-        feasibilityWarnings: stochasticRun.feasibilityWarnings.map((w) => ({ ...w })),
-        slotAdjustments: [...stochasticRun.slotAdjustments],
-        immobilisationWindows: stochasticRun.immobilisationWindows.map((w) => ({ ...w })),
-        stochasticEvents: stochasticRun.stochasticEvents ? [...stochasticRun.stochasticEvents] : undefined
-      };
+      return cloneStochasticRunSnapshot(stochasticRun);
     },
 
     hasStochasticRun(): boolean {
@@ -259,7 +312,52 @@ export function createRunStateManager() {
     },
 
     clearStochasticRun(): void {
-      clearStochastic();
+      clearStochasticBranches();
+    },
+
+    setMonteCarlo(snapshot: MonteCarloSnapshot): void {
+      monteCarlo = cloneMonteCarloSnapshot(snapshot);
+      monteCarloCancelRequested = false;
+      syncStochasticFromMonteCarlo();
+    },
+
+    getMonteCarlo(): MonteCarloSnapshot | null {
+      if (!monteCarlo) return null;
+      return cloneMonteCarloSnapshot(monteCarlo);
+    },
+
+    hasMonteCarlo(): boolean {
+      return monteCarlo != null;
+    },
+
+    setMonteCarloSelectedIndex(index: number): void {
+      if (!monteCarlo) return;
+      const clamped = Math.max(0, Math.min(monteCarlo.iterations - 1, Math.floor(index)));
+      monteCarlo = { ...monteCarlo, selectedIndex: clamped };
+      syncStochasticFromMonteCarlo();
+    },
+
+    attachMonteCarloRun(index: number, run: StochasticRunSnapshot): void {
+      if (!monteCarlo) return;
+      const clamped = Math.max(0, Math.min(monteCarlo.iterations - 1, Math.floor(index)));
+      if (!monteCarlo.runs) monteCarlo.runs = [];
+      monteCarlo.runs[clamped] = cloneStochasticRunSnapshot(run);
+      monteCarlo = { ...monteCarlo, selectedIndex: clamped };
+      stochasticRun = cloneStochasticRunSnapshot(run);
+    },
+
+    clearMonteCarlo(): void {
+      monteCarlo = null;
+      monteCarloCancelRequested = false;
+      stochasticRun = null;
+    },
+
+    requestMonteCarloCancel(): void {
+      monteCarloCancelRequested = true;
+    },
+
+    shouldCancelMonteCarlo(): boolean {
+      return monteCarloCancelRequested;
     }
   };
 }

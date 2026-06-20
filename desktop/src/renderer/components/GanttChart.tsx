@@ -17,16 +17,22 @@ import {
   totalInboundPipelineTph,
   totalOutboundPipelineTph
 } from "../lib/pipelineFlows";
+import { pipelineBarHeightPx } from "../../engine/pipelineFlowMultiplier";
+import { isSharedStorageMode } from "../../lib/storageMode";
 import {
   AVERAGE_CUSTOMER_ID,
   COMBINED_TERMINAL_ID,
   buildConstraintHourData,
   buildDocTrendByCustomer,
+  buildFulfillmentTrendByCustomer,
   buildPacingByCustomerMode,
   buildPacingLegOptions,
   isRealCustomerDocId,
   SAMPLE_HOUR_STEP
 } from "../lib/timelineChartData";
+import { formatFulfillmentDeltaPp } from "../lib/formatMetrics";
+import { formatDistributionSpec } from "../lib/stochasticFormUnits";
+import { withVisibleLoading } from "../lib/withVisibleLoading";
 import {
   SCHEDULING_CONSTRAINTS,
   type BlockingConstraintKey
@@ -39,6 +45,8 @@ import {
 import { pacerContinuousTarget } from "../../engine/pacing";
 import { ConstraintIcon } from "./ConstraintIcon";
 import TimelineChartLegend, { type LegendEntry } from "./TimelineChartLegend";
+import type { SerializedMonteCarloSnapshot } from "./MonteCarloResultsPanel";
+import { normalizeMonteCarloSnapshot } from "../lib/normalizeMonteCarloSnapshot";
 import SlotEditorModal, { type SlotEditorDraft } from "./SlotEditorModal";
 import {
   applyDrag,
@@ -68,8 +76,10 @@ const SLOT_BAND_MIN_H = Math.round(16 * RESOURCE_ROW_SCALE);
 const SLOT_BAND_MIN_H_RT = Math.round(13 * RESOURCE_ROW_SCALE);
 const HOUR_MS = 60 * 60 * 1000;
 const CHART_HEIGHT = 260;
-const INV_Y_AXIS_STEP_T = 5000;
 const PIPELINE_ROW_H = 28;
+/** Event marker row matches pipeline row height; excludes pipeline variation (shown on pipeline rows). */
+const MARKER_EVENT_KINDS = ["arrival_delay", "immobilisation"] as const;
+type MarkerEventKind = (typeof MARKER_EVENT_KINDS)[number];
 /** Constraint band — taller than berth rows for readable hourly stacks. */
 const CONSTRAINT_ROW_H = 80;
 const CHART_END_PAD_PX = 16;
@@ -87,6 +97,30 @@ const ONE_DAY_MS = 1000 * 60 * 60 * 24;
 /** Delay before hiding slot tooltip so the cursor can reach the fixed panel without clearing hover. */
 const SLOT_TOOLTIP_LEAVE_MS = 400;
 const SLOT_RESIZE_HANDLE_PX = 6;
+
+const STOCH_EVENT_MARKER_COLORS: Record<MarkerEventKind, string> = {
+  arrival_delay: "#a855f7",
+  immobilisation: "#ec4899"
+};
+
+const PIPELINE_BAR_H = 12;
+const PIPELINE_BAR_Y = 8 + (16 - PIPELINE_BAR_H) / 2;
+
+function markerEventsForHour(
+  events: Array<{ kind: string; label?: string }>
+): Array<{ kind: string; label: string }> {
+  return events.filter(
+    (e): e is { kind: MarkerEventKind; label: string } =>
+      e.kind === "arrival_delay" || e.kind === "immobilisation"
+  );
+}
+
+function dominantMarkerEventKind(
+  events: Array<{ kind: string }>
+): MarkerEventKind {
+  if (events.some((e) => e.kind === "immobilisation")) return "immobilisation";
+  return "arrival_delay";
+}
 
 function formatDDMMYYYY(d: Date): string {
   const day = String(d.getDate()).padStart(2, "0");
@@ -194,7 +228,7 @@ interface SerializedStochasticRun {
   stochasticEvents: unknown[];
 }
 
-type ScheduleViewMode = "working" | "stochastic";
+type ScheduleViewMode = "deterministic" | "stochastic";
 
 function slotsShareTiming(a: Slot[], b: Slot[]): boolean {
   if (a.length !== b.length) return false;
@@ -331,10 +365,10 @@ function niceStep(rough: number): number {
 }
 
 /** Linear scale — label `top` must use invY(v) (not equal flex gaps). */
-function buildInventoryAxisTicks(lo: number, hi: number): number[] {
+function axisTicksForRange(lo: number, hi: number): number[] {
   if (!(hi > lo) || !Number.isFinite(lo) || !Number.isFinite(hi)) return [lo];
   const span = hi - lo;
-  const step = niceStep(span / 4);
+  const step = niceStep(span / 5);
   const ticks: number[] = [];
   let v = Math.floor(lo / step) * step;
   while (v < lo - 1e-9) v += step;
@@ -343,6 +377,49 @@ function buildInventoryAxisTicks(lo: number, hi: number): number[] {
   if (ticks[ticks.length - 1]! < hi - 1e-6) ticks.push(hi);
   if (lo < -1e-9 && hi > 1e-9 && !ticks.some((t) => Math.abs(t) < step * 0.02)) ticks.push(0);
   return [...new Set(ticks.map((t) => Math.round(t * 1000) / 1000))].sort((a, b) => a - b);
+}
+
+function buildInventoryYAxisFromData(
+  minV: number,
+  maxV: number,
+  fixedHi?: number
+): { lo: number; hi: number; ticks: number[] } {
+  if (!Number.isFinite(minV) || !Number.isFinite(maxV)) {
+    return { lo: 0, hi: 1, ticks: [0, 1] };
+  }
+  if (typeof fixedHi === "number" && Number.isFinite(fixedHi) && fixedHi > 0) {
+    maxV = fixedHi;
+  }
+  if (maxV === minV) maxV = minV + 1;
+  const step = niceStep((maxV - minV) / 5);
+  let lo = Math.floor(minV / step) * step;
+  let hi = Math.ceil(maxV / step) * step;
+  if (typeof fixedHi === "number" && Number.isFinite(fixedHi) && fixedHi > 0) {
+    hi = fixedHi;
+  }
+  if (hi <= lo) hi = lo + step;
+  return { lo, hi, ticks: axisTicksForRange(lo, hi) };
+}
+
+function inventoryExtremaFromSeries(
+  series: GanttInventorySeries,
+  sharedPool: boolean
+): { minV: number; maxV: number } {
+  let minV = Infinity;
+  let maxV = -Infinity;
+  const consider = (v: number) => {
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+  };
+  if (sharedPool) {
+    for (const t of series.terminalByHour) consider(t);
+  } else {
+    for (const arr of series.byCustomer.values()) {
+      for (const v of arr) consider(v);
+    }
+    for (const t of series.terminalByHour) consider(t);
+  }
+  return { minV, maxV };
 }
 
 /** Match scheduler deriveLegs target slot counts for pace hint. */
@@ -438,15 +515,20 @@ export default function GanttChart() {
   const [showTimeshared, setShowTimeshared] = useState(false);
   const [showStorageCapLine, setShowStorageCapLine] = useState(true);
   const [showDoc, setShowDoc] = useState(false);
+  const [showFulfillment, setShowFulfillment] = useState(false);
   const [showAverageDoc, setShowAverageDoc] = useState(true);
   const [showCombinedDoc, setShowCombinedDoc] = useState(true);
   const [showPacing, setShowPacing] = useState(false);
   const [showConstraints, setShowConstraints] = useState(false);
   const [showBaselineOverlay, setShowBaselineOverlay] = useState(false);
-  const [scheduleView, setScheduleView] = useState<ScheduleViewMode>("working");
-  const [showStochasticCompare, setShowStochasticCompare] = useState(false);
+  const [scheduleView, setScheduleView] = useState<ScheduleViewMode>("deterministic");
+  const [showBaselineInventoryOverlay, setShowBaselineInventoryOverlay] = useState(false);
   const [stochasticRun, setStochasticRun] = useState<SerializedStochasticRun | null>(null);
+  const [monteCarloSnapshot, setMonteCarloSnapshot] = useState<SerializedMonteCarloSnapshot | null>(null);
   const [isSampling, setIsSampling] = useState(false);
+  const [isSettingMcIteration, setIsSettingMcIteration] = useState(false);
+  const [showMonteCarloBand, setShowMonteCarloBand] = useState(true);
+  const [showStochasticEventMarkers, setShowStochasticEventMarkers] = useState(true);
   const [stochasticError, setStochasticError] = useState<string | null>(null);
   const [baselineSlots, setBaselineSlots] = useState<Slot[]>([]);
   const [enabledConstraints, setEnabledConstraints] = useState<Set<BlockingConstraintKey>>(
@@ -554,6 +636,15 @@ export default function GanttChart() {
             setStochasticRun(stoch.run as SerializedStochasticRun);
           }
         }
+        if (window.schedulerAPI.getMonteCarloState) {
+          const mc = await window.schedulerAPI.getMonteCarloState();
+          if (mounted && mc.active && mc.snapshot) {
+            setMonteCarloSnapshot(
+              normalizeMonteCarloSnapshot(mc.snapshot as SerializedMonteCarloSnapshot)
+            );
+            if (mc.run) setStochasticRun(mc.run as SerializedStochasticRun);
+          }
+        }
       } catch {
         if (mounted) {
           setSlots([]);
@@ -585,6 +676,14 @@ export default function GanttChart() {
 
   const viewingStochastic = scheduleView === "stochastic";
 
+  useEffect(() => {
+    if (viewingStochastic) {
+      setShowBaselineOverlay(false);
+    } else {
+      setShowBaselineInventoryOverlay(false);
+    }
+  }, [viewingStochastic]);
+
   const displaySlots = useMemo((): Slot[] => {
     if (viewingStochastic && stochasticRun?.slots?.length) {
       return stochasticRun.slots;
@@ -610,6 +709,13 @@ export default function GanttChart() {
     return timelineData;
   }, [viewingStochastic, stochasticRun, timelineData, config]);
 
+  const hasInventoryData = Boolean(
+    chartTimelineData?.timeline && Object.keys(chartTimelineData.timeline).length > 0
+  );
+  const monteCarloActive = monteCarloSnapshot != null;
+  const monteCarloBandVisible =
+    monteCarloActive && showMonteCarloBand && showInventory && hasInventoryData && viewingStochastic;
+
   const chartFeasibilityWarnings = useMemo(() => {
     if (viewingStochastic && stochasticRun) {
       return stochasticRun.feasibilityWarnings;
@@ -618,11 +724,11 @@ export default function GanttChart() {
   }, [viewingStochastic, stochasticRun, feasibilityWarnings]);
 
   const stochasticGhostSlots = useMemo((): Slot[] => {
-    if (!viewingStochastic || !showStochasticCompare || !stochasticRun) return [];
+    if (!viewingStochastic || !stochasticRun) return [];
     return stochasticRun.ghostSlots ?? [];
-  }, [viewingStochastic, showStochasticCompare, stochasticRun]);
+  }, [viewingStochastic, stochasticRun]);
 
-  const baselineMatchesWorking = useMemo(
+  const baselineMatchesDeterministic = useMemo(
     () => tweakState.hasBaseline && slotsShareTiming(baselineSlots, slots),
     [tweakState.hasBaseline, baselineSlots, slots]
   );
@@ -636,10 +742,35 @@ export default function GanttChart() {
   const delayHoursBySlotId = useMemo(() => {
     const m = new Map<string, number>();
     for (const adj of stochasticRun?.slotAdjustments ?? []) {
-      if (adj.deltaStartMs > 0) m.set(adj.slotId, adj.deltaStartMs / HOUR_MS);
+      if (adj.deltaStartMs !== 0) m.set(adj.slotId, adj.deltaStartMs / HOUR_MS);
     }
     return m;
   }, [stochasticRun]);
+
+  const delayTooltipBySlotId = useMemo(() => {
+    const m = new Map<string, string>();
+    const legDelays = config?.stochasticConfig?.legDelays ?? [];
+    for (const slot of stochasticRun?.slots ?? []) {
+      const delayH = delayHoursBySlotId.get(slot.id);
+      if (delayH == null || Math.abs(delayH) <= 1e-9) continue;
+      const legCfg = legDelays.find(
+        (c) =>
+          c.customerId === slot.customerId &&
+          c.direction === slot.direction &&
+          (c.legKey == null || c.legKey === slot.legKey)
+      );
+      const distLabel = legCfg ? formatDistributionSpec(legCfg.delayHours) : "configured adjustment";
+      const shiftLabel =
+        delayH >= 0
+          ? `Delayed +${delayH.toFixed(1)}h`
+          : `${Math.abs(delayH).toFixed(1)}h early`;
+      m.set(
+        slot.id,
+        `${shiftLabel} (sampled from ${distLabel}) · ${slot.direction}${slot.legKey ? ` · ${slot.legKey}` : ""}`
+      );
+    }
+    return m;
+  }, [stochasticRun, delayHoursBySlotId, config]);
 
   const immobilisationConflictSlotIds = useMemo(() => {
     const ids = new Set<string>();
@@ -657,6 +788,8 @@ export default function GanttChart() {
     setIsSampling(true);
     setStochasticError(null);
     try {
+      await window.schedulerAPI.clearMonteCarlo?.();
+      setMonteCarloSnapshot(null);
       const res = await window.schedulerAPI.sampleStochastic();
       if (!res.ok) {
         setStochasticError(res.error);
@@ -664,7 +797,7 @@ export default function GanttChart() {
       }
       if (res.run) {
         setStochasticRun(res.run as SerializedStochasticRun);
-        setShowStochasticCompare(false);
+        setShowBaselineInventoryOverlay(false);
         setScheduleView("stochastic");
       }
     } catch (e) {
@@ -678,11 +811,33 @@ export default function GanttChart() {
     if (window.schedulerAPI?.clearStochastic) {
       await window.schedulerAPI.clearStochastic();
     }
+    if (window.schedulerAPI?.clearMonteCarlo) {
+      await window.schedulerAPI.clearMonteCarlo();
+    }
     setStochasticRun(null);
-    setShowStochasticCompare(false);
-    setScheduleView("working");
+    setMonteCarloSnapshot(null);
+    setShowBaselineInventoryOverlay(false);
+    setScheduleView("deterministic");
     setStochasticError(null);
   }, []);
+
+  const handleMonteCarloIterationChange = useCallback(
+    async (index: number) => {
+      if (!window.schedulerAPI?.setMonteCarloIteration || !monteCarloSnapshot) return;
+      setIsSettingMcIteration(true);
+      try {
+        const res = await window.schedulerAPI.setMonteCarloIteration(index);
+        if (res.ok) {
+          setMonteCarloSnapshot(res.snapshot as SerializedMonteCarloSnapshot);
+          if (res.run) setStochasticRun(res.run as SerializedStochasticRun);
+          setScheduleView("stochastic");
+        }
+      } finally {
+        setIsSettingMcIteration(false);
+      }
+    },
+    [monteCarloSnapshot]
+  );
 
   const refreshSchedulerOutputs = useCallback(async () => {
     if (!window.schedulerAPI) return;
@@ -709,18 +864,23 @@ export default function GanttChart() {
 
   const handleRunScheduler = async () => {
     if (!window.schedulerAPI || !window.dbAPI) return;
-    setIsRunning(true);
     setTweakError(null);
-    try {
-      await window.schedulerAPI.run();
-      setScheduleModifyMode(false);
-      setStochasticRun(null);
-      setShowStochasticCompare(false);
-      setScheduleView("working");
-      await refreshSchedulerOutputs();
-    } finally {
-      setIsRunning(false);
-    }
+    const isBrowser =
+      typeof window !== "undefined" &&
+      !("electronAPI" in window) &&
+      typeof window.dbAPI !== "undefined";
+    await withVisibleLoading(
+      setIsRunning,
+      async () => {
+        await window.schedulerAPI!.run();
+        setScheduleModifyMode(false);
+        setStochasticRun(null);
+        setShowBaselineInventoryOverlay(false);
+        setScheduleView("deterministic");
+        await refreshSchedulerOutputs();
+      },
+      isBrowser ? 450 : 0
+    );
   };
 
   const handleUpdateSimulation = async () => {
@@ -766,6 +926,9 @@ export default function GanttChart() {
         setTweakError(res.error);
         return;
       }
+      setStochasticRun(null);
+      setShowBaselineInventoryOverlay(false);
+      setScheduleView("deterministic");
       await refreshSchedulerOutputs();
     } finally {
       setIsReplaying(false);
@@ -924,6 +1087,7 @@ export default function GanttChart() {
   const simStart = new Date(cfg.startDate).getTime();
   const simEndMs = new Date(cfg.endDate).getTime();
   const canTweakSchedule = hasRun && tweakState.hasBaseline;
+  const stochasticsEnabled = config?.stochasticConfig?.enabled === true;
   const canEditSlots = canTweakSchedule && modifySchedule;
   const tweakSummary = useMemo(() => {
     const tweaks = Object.values(tweakState.slotTweaks);
@@ -1032,7 +1196,16 @@ export default function GanttChart() {
 
   const customerById = useMemo(() => new Map(customers.map((c) => [c.id, c])), [customers]);
 
-  const flowRateForSlot = useCallback(
+  const berthFlowRateForSlot = useCallback(
+    (resourceId: string): number => {
+      const resource = resources.find((r) => r.id === resourceId);
+      const rate = resource?.flowRate ?? 0;
+      return rate > 0 ? rate : 500;
+    },
+    [resources]
+  );
+
+  const mepsForSlot = useCallback(
     (
       customerId: string,
       direction: string,
@@ -1041,7 +1214,7 @@ export default function GanttChart() {
       volume = 1000
     ): number => {
       const c = customerById.get(customerId);
-      if (!c) return 500;
+      if (!c) return 0;
       const temp: ScheduledSlot = {
         id: "",
         customerId,
@@ -1057,8 +1230,7 @@ export default function GanttChart() {
         status: "manual_override",
         conflictReason: null
       };
-      const rate = mepsForScheduledSlot(c as EngineCustomer, temp);
-      return rate > 0 ? rate : 500;
+      return mepsForScheduledSlot(c as EngineCustomer, temp);
     },
     [customerById]
   );
@@ -1106,7 +1278,7 @@ export default function GanttChart() {
         if (!resource || !defaultCustomer) return;
         const mode = defaultModeForResource(resource as EngineResource);
         const direction: "inbound" | "outbound" = "inbound";
-        const flowRate = flowRateForSlot(defaultCustomer.id, direction, mode);
+        const flowRate = berthFlowRateForSlot(drag.resourceId);
         const volume = volumeForDrag(startMs, endMs, flowRate, engineCfg, 1000);
         const normalizedEnd = endMsForVolume(startMs, volume, flowRate, engineCfg);
         setSlotEditor({
@@ -1126,13 +1298,7 @@ export default function GanttChart() {
 
       const slot = slots.find((s) => s.id === drag.slotId);
       if (!slot) return;
-      const flowRate = flowRateForSlot(
-        slot.customerId,
-        slot.direction,
-        slot.mode,
-        slot.legKey ?? null,
-        slot.volume
-      );
+      const flowRate = berthFlowRateForSlot(slot.resourceId);
       let volume = slot.volume;
       let finalStart = startMs;
       let finalEnd = endMs;
@@ -1165,7 +1331,7 @@ export default function GanttChart() {
         slot.legKey ?? null
       );
     },
-    [cfg, resources, customers, slots, flowRateForSlot, commitSlotUpsert]
+    [cfg, resources, customers, slots, berthFlowRateForSlot, commitSlotUpsert]
   );
 
   const beginSlotDrag = useCallback(
@@ -1311,13 +1477,7 @@ export default function GanttChart() {
   const handleSlotEditorSave = useCallback(
     async (draft: SlotEditorDraft) => {
       if (!slotEditor) return;
-      const flowRate = flowRateForSlot(
-        draft.customerId,
-        draft.direction,
-        draft.mode,
-        slotEditor.legKey,
-        draft.volume
-      );
+      const flowRate = berthFlowRateForSlot(draft.resourceId);
       const syncedVolume = volumeFromOccupation(
         new Date(draft.startMs),
         new Date(draft.endMs),
@@ -1331,7 +1491,7 @@ export default function GanttChart() {
       );
       if (ok) setSlotEditor(null);
     },
-    [slotEditor, commitSlotUpsert, flowRateForSlot, cfg]
+    [slotEditor, commitSlotUpsert, berthFlowRateForSlot, cfg]
   );
 
   useEffect(() => {
@@ -1351,9 +1511,17 @@ export default function GanttChart() {
 
   const hasRoundtripConfig = useMemo(
     () =>
-      customers.some(
-        (c) => (c.inboundRoundtripHours ?? 0) > 0 || (c.outboundRoundtripHours ?? 0) > 0
-      ),
+      customers.some((c) => {
+        const legRt = [
+          ...(c.inboundTransports ?? []),
+          ...(c.outboundTransports ?? [])
+        ].some((r) => (r.roundtripHours ?? 0) > 0);
+        return (
+          legRt ||
+          (c.inboundRoundtripHours ?? 0) > 0 ||
+          (c.outboundRoundtripHours ?? 0) > 0
+        );
+      }),
     [customers]
   );
 
@@ -1371,6 +1539,13 @@ export default function GanttChart() {
     [customers, pipeDir]
   );
 
+  const monteCarloPipelineBandVisible =
+    monteCarloActive &&
+    showMonteCarloBand &&
+    viewingStochastic &&
+    hasRun &&
+    (inboundPipelineTph > 0 || outboundPipelineTph > 0);
+
   const docTrendByCustomer = useMemo(
     () =>
       buildDocTrendByCustomer(
@@ -1381,6 +1556,15 @@ export default function GanttChart() {
         customerById as Map<string, EngineCustomer>
       ),
     [simulationLog, customers, timelineData, cfg, customerById]
+  );
+
+  const fulfillmentTrendByCustomer = useMemo(
+    () =>
+      buildFulfillmentTrendByCustomer(
+        simulationLog as unknown as import("../../engine/simulationLog").SimulationLogRow[],
+        customers
+      ),
+    [simulationLog, customers]
   );
 
   const pacingByCustomerMode = useMemo(
@@ -1404,6 +1588,9 @@ export default function GanttChart() {
 
   const hasDocConfig =
     simulationLog.length > 0 && Object.keys(docTrendByCustomer).length > 0;
+
+  const hasFulfillmentConfig =
+    simulationLog.length > 0 && Object.keys(fulfillmentTrendByCustomer).length > 0;
 
   useEffect(() => {
     if (!hasPacingConfig) {
@@ -1575,42 +1762,70 @@ export default function GanttChart() {
     [chartTimelineData, chartSimulationLog]
   );
 
-  /** Working-schedule inventory shown as dashed overlay when Compare is on. */
-  const workingInventoryGhostSeries = useMemo((): GanttInventorySeries | null => {
-    if (!showStochasticCompare || !viewingStochastic) return null;
-    const series = buildGanttInventorySeries(timelineData?.timeline, simulationLog);
-    return series.maxHours > 0 ? series : null;
-  }, [showStochasticCompare, viewingStochastic, timelineData, simulationLog]);
+  /** Deterministic baseline inventory — stable reference for Y-axis when scrubbing stochastic iterations. */
+  const deterministicBaselineInventorySeries = useMemo(
+    () => buildGanttInventorySeries(timelineData?.timeline, simulationLog),
+    [timelineData, simulationLog]
+  );
 
-  /** Y-axis = strict min/max over terminal inventory (all hours) and every customer's inventory (all hours). */
+  /** Deterministic inventory overlay on the chart when viewing a stochastic sample. */
+  const deterministicInventoryGhostSeries = useMemo((): GanttInventorySeries | null => {
+    if (!showBaselineInventoryOverlay || !viewingStochastic) return null;
+    return deterministicBaselineInventorySeries.maxHours > 0 ? deterministicBaselineInventorySeries : null;
+  }, [showBaselineInventoryOverlay, viewingStochastic, deterministicBaselineInventorySeries]);
+
+  /**
+   * Y-axis bounds. When viewing stochastic / MC iterations, scale is fixed from the
+   * deterministic baseline (+ MC fan band) and terminal storage cap — not the active draw.
+   */
   const ganttInvYAxis = useMemo(() => {
-    const seriesList = [ganttInventorySeries, workingInventoryGhostSeries].filter(
-      (s): s is GanttInventorySeries => s != null && s.maxHours > 0
-    );
+    const sharedPool = isSharedStorageMode(cfg.storageMode);
+    const useStableStochasticAxis =
+      viewingStochastic && deterministicBaselineInventorySeries.maxHours > 0;
+    const seriesList = useStableStochasticAxis
+      ? [deterministicBaselineInventorySeries]
+      : [ganttInventorySeries, deterministicInventoryGhostSeries].filter(
+          (s): s is GanttInventorySeries => s != null && s.maxHours > 0
+        );
+
     let minV = Infinity;
     let maxV = -Infinity;
-    for (const { byCustomer, terminalByHour } of seriesList) {
-      for (const arr of byCustomer.values()) {
-        for (const v of arr) {
-          if (v < minV) minV = v;
-          if (v > maxV) maxV = v;
-        }
-      }
-      for (const t of terminalByHour) {
-        if (t < minV) minV = t;
-        if (t > maxV) maxV = t;
-      }
+    for (const series of seriesList) {
+      const ext = inventoryExtremaFromSeries(series, sharedPool);
+      if (ext.minV < minV) minV = ext.minV;
+      if (ext.maxV > maxV) maxV = ext.maxV;
     }
     if (!Number.isFinite(minV) || !Number.isFinite(maxV)) {
-      return { lo: 0, hi: 1, maxHours: ganttInventorySeries.maxHours };
+      return { lo: 0, hi: 1, ticks: [0, 1], maxHours: ganttInventorySeries.maxHours };
     }
-    if (maxV === minV) maxV = minV + 1;
-    const step = INV_Y_AXIS_STEP_T;
-    let lo = Math.min(0, Math.floor(minV / step) * step);
-    let hi = Math.max(0, Math.ceil(maxV / step) * step);
-    if (hi <= lo) hi = lo + step;
-    return { lo, hi, maxHours: ganttInventorySeries.maxHours };
-  }, [ganttInventorySeries, workingInventoryGhostSeries]);
+    if (monteCarloBandVisible && monteCarloSnapshot) {
+      for (const v of monteCarloSnapshot.aggregates.terminalInventory.p10) {
+        if (v < minV) minV = v;
+      }
+      for (const v of monteCarloSnapshot.aggregates.terminalInventory.p90) {
+        if (v > maxV) maxV = v;
+      }
+    }
+    const cap = terminalStorageCap;
+    const fixedHi =
+      cap > 0 && (useStableStochasticAxis || sharedPool)
+        ? cap
+        : undefined;
+    if (fixedHi != null && maxV > fixedHi) {
+      maxV = fixedHi;
+    }
+    const { lo, hi, ticks } = buildInventoryYAxisFromData(minV, maxV, fixedHi);
+    return { lo, hi, ticks, maxHours: ganttInventorySeries.maxHours };
+  }, [
+    ganttInventorySeries,
+    deterministicBaselineInventorySeries,
+    deterministicInventoryGhostSeries,
+    monteCarloBandVisible,
+    monteCarloSnapshot,
+    viewingStochastic,
+    cfg.storageMode,
+    terminalStorageCap
+  ]);
 
   const hoverSlotMeta = useMemo(() => {
     if (!hoverSlot) return null;
@@ -1665,7 +1880,7 @@ export default function GanttChart() {
     if (w < 50) return "";
     const c = customerById.get(slot.customerId);
     const name = c?.name ?? slot.customerId;
-    const meps = flowRateForSlot(
+    const meps = mepsForSlot(
       slot.customerId,
       slot.direction,
       slot.mode,
@@ -1710,6 +1925,39 @@ export default function GanttChart() {
       .join(" ");
   }, [ganttInventorySeries.terminalByHour, ganttInvYAxis, simStart, pixelsPerDay, displaySlots]);
 
+  const terminalMonteCarloBandPath = useMemo((): string | null => {
+    if (!monteCarloBandVisible || !monteCarloSnapshot) return null;
+    const { p10, p90 } = monteCarloSnapshot.aggregates.terminalInventory;
+    const n = Math.min(p10.length, p90.length);
+    if (n === 0) return null;
+    const { lo, hi } = ganttInvYAxis;
+    const upper: string[] = [];
+    const lower: string[] = [];
+    for (let h = 0; h < n; h++) {
+      const x = (h / 24) * pixelsPerDay;
+      upper.push(`${x.toFixed(1)},${invY(p90[h] ?? 0, lo, hi).toFixed(1)}`);
+    }
+    for (let h = n - 1; h >= 0; h--) {
+      const x = (h / 24) * pixelsPerDay;
+      lower.push(`${x.toFixed(1)},${invY(p10[h] ?? 0, lo, hi).toFixed(1)}`);
+    }
+    return `${upper.join(" ")} ${lower.join(" ")}`;
+  }, [monteCarloBandVisible, monteCarloSnapshot, ganttInvYAxis, pixelsPerDay]);
+
+  const terminalMonteCarloP50Points = useMemo((): string => {
+    if (!monteCarloBandVisible || !monteCarloSnapshot) return "";
+    const p50 = monteCarloSnapshot.aggregates.terminalInventory.p50;
+    if (p50.length === 0) return "";
+    const { lo, hi } = ganttInvYAxis;
+    return p50
+      .map((v, h) => {
+        const x = (h / 24) * pixelsPerDay;
+        const y = invY(v, lo, hi);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  }, [monteCarloBandVisible, monteCarloSnapshot, ganttInvYAxis, pixelsPerDay]);
+
   const inventorySeriesPoints = useCallback(
     (
       series: GanttInventorySeries,
@@ -1745,6 +1993,7 @@ export default function GanttChart() {
     startH: number;
     endH: number;
     status: "flowing" | "tank_top" | "tank_bottom" | "stochastic_stop" | "stochastic_reduced";
+    multiplier?: number;
   }
 
   const buildPipelineSegments = useCallback(
@@ -1754,6 +2003,7 @@ export default function GanttChart() {
       const EPS = 1;
       const segments: PipelineSegment[] = [];
       let curStatus: PipelineSegment["status"] | null = null;
+      let curMultiplier: number | undefined;
       let segStart = 0;
       const useStochasticLog = viewingStochastic && chartSimulationLog.length > 0;
       for (let h = 0; h < terminalTotalByHour.length; h++) {
@@ -1762,6 +2012,7 @@ export default function GanttChart() {
             ? (terminalTotalByHour[0] ?? 0)
             : (terminalTotalByHour[h - 1] ?? 0);
         let status: PipelineSegment["status"];
+        let multiplier: number | undefined;
         const hourEvents = chartSimulationLog[h]?.stochasticEvents ?? [];
         const pipeStop = hourEvents.some((e) => e.kind === "pipeline_stop");
         const pipeReduced = hourEvents.some((e) => e.kind === "pipeline_reduction");
@@ -1769,19 +2020,41 @@ export default function GanttChart() {
           status = "stochastic_stop";
         } else if (useStochasticLog && pipeReduced) {
           status = "stochastic_reduced";
+          multiplier = hourEvents
+            .filter((e) => e.kind === "pipeline_reduction")
+            .reduce((m, e) => Math.min(m, e.magnitude ?? 1), 1);
         } else if (direction === "inbound") {
           status = terminalBefore >= cap - EPS ? "tank_top" : "flowing";
         } else {
           status = terminalBefore <= EPS ? "tank_bottom" : "flowing";
         }
-        if (status !== curStatus) {
-          if (curStatus !== null) segments.push({ startH: segStart, endH: h, status: curStatus });
+        const sameSegment =
+          status === curStatus &&
+          (status !== "stochastic_reduced" ||
+            Math.abs((multiplier ?? 1) - (curMultiplier ?? 1)) < 0.05);
+        if (!sameSegment) {
+          if (curStatus !== null) {
+            segments.push({
+              startH: segStart,
+              endH: h,
+              status: curStatus,
+              multiplier: curMultiplier
+            });
+          }
           curStatus = status;
+          curMultiplier = multiplier;
           segStart = h;
+        } else if (status === "stochastic_reduced" && multiplier != null) {
+          curMultiplier = Math.min(curMultiplier ?? 1, multiplier);
         }
       }
       if (curStatus !== null) {
-        segments.push({ startH: segStart, endH: terminalTotalByHour.length, status: curStatus });
+        segments.push({
+          startH: segStart,
+          endH: terminalTotalByHour.length,
+          status: curStatus,
+          multiplier: curMultiplier
+        });
       }
       return segments;
     },
@@ -1835,13 +2108,67 @@ export default function GanttChart() {
     return { lo: Math.min(0, minV * 0.9), hi: Math.max(110, maxV * 1.05) };
   }, [showPacing, selectedPacingOption, pacingByCustomerMode]);
 
+  const fulfillmentYAxis = useMemo(() => {
+    if (!showFulfillment) return null;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    for (const [cid, series] of Object.entries(fulfillmentTrendByCustomer)) {
+      if (!enabledCustomers.has(cid)) continue;
+      for (const v of series) {
+        if (v != null && Number.isFinite(v)) {
+          minV = Math.min(minV, v);
+          maxV = Math.max(maxV, v);
+        }
+      }
+    }
+    if (!Number.isFinite(minV)) return null;
+    const absMax = Math.max(Math.abs(minV), Math.abs(maxV), 5);
+    const pad = absMax * 0.12;
+    return { lo: -(absMax + pad), hi: absMax + pad };
+  }, [showFulfillment, fulfillmentTrendByCustomer, enabledCustomers]);
+
   const extraAxisWidth =
     (showDoc && docYAxis ? OVERLAY_AXIS_WIDTH : 0) +
+    (showFulfillment && fulfillmentYAxis ? OVERLAY_AXIS_WIDTH : 0) +
     (showPacing && pacingYAxis ? OVERLAY_AXIS_WIDTH : 0);
 
   const labelColumnWidth = LABEL_WIDTH + extraAxisWidth;
 
   const constraintRowVisible = hasRun && showConstraints && hasConstraintData;
+  const stochasticEventRowVisible =
+    hasRun && viewingStochastic && !!stochasticRun && showStochasticEventMarkers;
+
+  /** Merge consecutive hours with the same marker event kind (arrival delay / immobilisation only). */
+  const stochasticEventSegments = useMemo(() => {
+    if (!stochasticEventRowVisible || chartSimulationLog.length === 0) return [];
+    const segments: Array<{ startH: number; endH: number; kind: MarkerEventKind; label: string }> = [];
+    let curKind: MarkerEventKind | null = null;
+    let curStart = 0;
+    let curLabel = "";
+    for (let h = 0; h < chartSimulationLog.length; h++) {
+      const events = markerEventsForHour(chartSimulationLog[h]?.stochasticEvents ?? []);
+      if (events.length === 0) {
+        if (curKind != null) {
+          segments.push({ startH: curStart, endH: h, kind: curKind, label: curLabel });
+          curKind = null;
+        }
+        continue;
+      }
+      const kind = dominantMarkerEventKind(events);
+      const label = `Hour ${h}: ${events.map((e) => e.label).join("; ")}`;
+      if (kind === curKind) continue;
+      if (curKind != null) {
+        segments.push({ startH: curStart, endH: h, kind: curKind, label: curLabel });
+      }
+      curKind = kind;
+      curStart = h;
+      curLabel = label;
+    }
+    if (curKind != null) {
+      segments.push({ startH: curStart, endH: chartSimulationLog.length, kind: curKind, label: curLabel });
+    }
+    return segments;
+  }, [stochasticEventRowVisible, chartSimulationLog]);
 
   const docOverlayPoints = useCallback(
     (customerId: string): string => {
@@ -1861,6 +2188,24 @@ export default function GanttChart() {
     [docTrendByCustomer, docYAxis, pixelsPerDay]
   );
 
+  const fulfillmentOverlayPoints = useCallback(
+    (customerId: string): string => {
+      const series = fulfillmentTrendByCustomer[customerId];
+      const axis = fulfillmentYAxis;
+      if (!series || !axis) return "";
+      const pts: string[] = [];
+      for (let h = 0; h < series.length; h += SAMPLE_HOUR_STEP) {
+        const v = series[h];
+        if (v == null || !Number.isFinite(v)) continue;
+        const x = (h / 24) * pixelsPerDay;
+        const y = overlayY(v, axis.lo, axis.hi);
+        pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      }
+      return pts.join(" ");
+    },
+    [fulfillmentTrendByCustomer, fulfillmentYAxis, pixelsPerDay]
+  );
+
   const pacingOverlayPoints = useCallback((): string => {
     const opt = selectedPacingOption;
     const axis = pacingYAxis;
@@ -1877,8 +2222,6 @@ export default function GanttChart() {
     }
     return pts.join(" ");
   }, [selectedPacingOption, pacingYAxis, pacingByCustomerMode, pixelsPerDay]);
-
-  const hasInventoryData = chartTimelineData?.timeline && Object.keys(chartTimelineData.timeline).length > 0;
 
   const timeSharedOverlayTriangles = useMemo(() => {
     if (!showTimeshared) return [];
@@ -2057,6 +2400,25 @@ export default function GanttChart() {
         });
       }
     }
+    if (showFulfillment && fulfillmentYAxis) {
+      for (const c of legendCustomers) {
+        if (!enabledCustomers.has(c.id) || !fulfillmentTrendByCustomer[c.id]) continue;
+        entries.push({
+          id: `fulfillment-${c.id}`,
+          label: `${c.name} · fulfilment Δ`,
+          kind: "dashed-line",
+          color: customerColor(c.id),
+          dashArray: "3 5"
+        });
+      }
+      entries.push({
+        id: "fulfillment-0",
+        label: "Pool / peer average (0 pp)",
+        kind: "dashed-line",
+        color: "#94a3b8",
+        dashArray: "4 4"
+      });
+    }
     if (showPacing && pacingYAxis && selectedPacingOption) {
       entries.push({
         id: "pacing-leg",
@@ -2076,7 +2438,7 @@ export default function GanttChart() {
     if (showRoundtrip && hasRoundtripConfig) {
       entries.push({
         id: "roundtrip",
-        label: "Round-trip duration",
+        label: "Round-trip (h from visit start)",
         kind: "rect",
         color: "rgba(100,116,139,0.25)"
       });
@@ -2116,18 +2478,18 @@ export default function GanttChart() {
         color: "#ef4444"
       });
     }
-    if (stochasticRun && viewingStochastic && showStochasticCompare) {
+    if (stochasticRun && viewingStochastic) {
       entries.push({
         id: "stoch-ghost",
-        label: "Pre-delay position (ghost)",
+        label: "Pre-adjustment slot (ghost)",
         kind: "dashed-line",
         color: "#64748b",
         dashArray: "4 4"
       });
-      if (hasInventoryData) {
+      if (showBaselineInventoryOverlay && hasInventoryData) {
         entries.push({
           id: "inv-ghost",
-          label: "Working inventory (compare)",
+          label: "Baseline inventory",
           kind: "dashed-line",
           color: "#94a3b8",
           dashArray: "6 4"
@@ -2161,6 +2523,42 @@ export default function GanttChart() {
         kind: "rect",
         color: "#ec4899"
       });
+      if (showStochasticEventMarkers) {
+        entries.push({
+          id: "stoch-arrival-delay",
+          label: "Arrival delay (event row)",
+          kind: "rect",
+          color: "#a855f7"
+        });
+        entries.push({
+          id: "stoch-immob-marker",
+          label: "Immobilisation (event row)",
+          kind: "rect",
+          color: "#ec4899"
+        });
+      }
+    }
+    if (monteCarloBandVisible) {
+      entries.push({
+        id: "mc-band",
+        label: "Monte Carlo band (terminal p10–p90)",
+        kind: "rect",
+        color: "#a855f7"
+      });
+      entries.push({
+        id: "mc-p50",
+        label: "Monte Carlo median (p50)",
+        kind: "line",
+        color: "#9333ea"
+      });
+    }
+    if (monteCarloPipelineBandVisible) {
+      entries.push({
+        id: "mc-pipeline-band",
+        label: "Monte Carlo pipeline band (flow p10–p90)",
+        kind: "rect",
+        color: "#a855f7"
+      });
     }
     if (constraintRowVisible) {
       for (const def of SCHEDULING_CONSTRAINTS) {
@@ -2186,6 +2584,9 @@ export default function GanttChart() {
     docTrendByCustomer,
     showAverageDoc,
     showCombinedDoc,
+    showFulfillment,
+    fulfillmentYAxis,
+    fulfillmentTrendByCustomer,
     showPacing,
     pacingYAxis,
     selectedPacingOption,
@@ -2197,6 +2598,8 @@ export default function GanttChart() {
     hasStorageCapConfig,
     inboundPipelineTph,
     outboundPipelineTph,
+    monteCarloPipelineBandVisible,
+    monteCarloBandVisible,
     constraintRowVisible,
     enabledConstraints,
     constraintData.activeConstraintKeys,
@@ -2208,16 +2611,28 @@ export default function GanttChart() {
     tweakState.hasBaseline,
     stochasticRun,
     viewingStochastic,
-    showStochasticCompare,
+    showBaselineInventoryOverlay,
     stochasticHasSlotShifts
   ]);
 
   const renderPipelineRow = (
     segments: PipelineSegment[],
     hasFlow: boolean,
-    keyPrefix: string
+    keyPrefix: string,
+    direction: "inbound" | "outbound"
   ) => {
     if (!hasFlow) return null;
+    const mcSeries =
+      direction === "inbound"
+        ? monteCarloSnapshot?.aggregates.pipelineInbound
+        : monteCarloSnapshot?.aggregates.pipelineOutbound;
+    const mcP10 = mcSeries?.p10;
+    const mcP90 = mcSeries?.p90;
+    const mcBandHours =
+      monteCarloPipelineBandVisible && mcP10?.length && mcP90?.length
+        ? Math.min(mcP10.length, mcP90.length)
+        : 0;
+
     return (
       <div
         style={{
@@ -2233,8 +2648,37 @@ export default function GanttChart() {
             style={{ position: "absolute", left: m.x, top: 0, bottom: 0, borderLeft: "1px solid #f1f5f9" }}
           />
         ))}
-        {segments.length > 0 && (
+        {(mcBandHours > 0 || segments.length > 0) && (
           <svg style={{ position: "absolute", top: 0, left: 0 }} width={contentWidth} height={PIPELINE_ROW_H}>
+            {mcBandHours > 0 &&
+              Array.from({ length: mcBandHours }, (_, h) => {
+                const lo = mcP10![h] ?? 1;
+                const hi = mcP90![h] ?? 1;
+                if (hi >= 0.999 && lo >= hi - 0.001) return null;
+                const x = (h / 24) * pixelsPerDay;
+                const w = Math.max(1, pixelsPerDay / 24);
+                const pxLo = pipelineBarHeightPx(lo);
+                const pxHi = pipelineBarHeightPx(hi);
+                const maxH = Math.max(pxLo, pxHi);
+                const minH = Math.min(pxLo, pxHi);
+                let barH = maxH - minH;
+                if (barH < 3) barH = hi < 0.999 ? maxH : 3;
+                const barY = 8 + (16 - maxH) / 2 + (maxH - minH - barH) / 2;
+                return (
+                  <rect
+                    key={`${keyPrefix}-mc-${h}`}
+                    x={x}
+                    y={barY}
+                    width={w}
+                    height={barH}
+                    fill="#a855f7"
+                    fillOpacity={0.35}
+                    rx={1}
+                  >
+                    <title>{`Monte Carlo flow p10–p90: ${(lo * 100).toFixed(0)}%–${(hi * 100).toFixed(0)}%`}</title>
+                  </rect>
+                );
+              })}
             {segments.map((seg, i) => {
               const x = (seg.startH / 24) * pixelsPerDay;
               const w = Math.max(1, ((seg.endH - seg.startH) / 24) * pixelsPerDay);
@@ -2246,6 +2690,11 @@ export default function GanttChart() {
                     : seg.status === "stochastic_reduced"
                       ? "#f59e0b"
                       : "#ef4444";
+              const barH =
+                seg.status === "stochastic_reduced"
+                  ? 4 + 12 * Math.min(1, Math.max(0, seg.multiplier ?? 0.5))
+                  : 12;
+              const barY = 8 + (16 - barH) / 2;
               const label =
                 seg.status === "tank_top"
                   ? "Tank top — pipeline blocked"
@@ -2257,7 +2706,7 @@ export default function GanttChart() {
                         ? "Pipeline flow reduced (stochastic)"
                         : "Flowing";
               return (
-                <rect key={i} x={x} y={8} width={w} height={12} fill={fill} fillOpacity={0.85} rx={2}>
+                <rect key={i} x={x} y={barY} width={w} height={barH} fill={fill} fillOpacity={0.85} rx={2}>
                   <title>{label}</title>
                 </rect>
               );
@@ -2335,27 +2784,34 @@ export default function GanttChart() {
         </div>
       )}
 
-      {stochasticRun && (
+      {monteCarloSnapshot && (
         <div className="schedule-modified-alert schedule-stochastic-banner" role="status">
-          <strong>Stochastic scenario</strong>
+          <strong>Monte Carlo ({monteCarloSnapshot.iterations} iterations)</strong>
           <span>
-            {scheduleView === "working"
-              ? "Sample loaded — switch to Stochastic to view the scenario."
-              : showStochasticCompare
-                ? stochasticHasSlotShifts
-                  ? "Compare on — dashed = working schedule & inventory; solid = sampled scenario."
-                  : "Compare on — no slot shifts; inventory may still differ from pipeline/disruption effects."
-                : stochasticHasSlotShifts
-                  ? `Viewing sampled scenario${stochasticRun.stochasticSeed != null ? ` (seed ${stochasticRun.stochasticSeed})` : ""}. Turn on Compare to see pre-delay positions.`
-                  : `Sampled scenario (seed ${stochasticRun.stochasticSeed ?? "—"}) — no arrival delays this draw; pipeline/inventory effects may still apply.`}
+            Scrub iteration below or clear results on the Stochastics page. Inventory shows the
+            terminal p10–p90 band; pipeline rows show a purple flow p10–p90 shadow where iterations
+            diverge on interruptions.
           </span>
         </div>
       )}
 
-      {showBaselineOverlay && tweakState.hasBaseline && baselineMatchesWorking && scheduleView === "working" && (
+      {stochasticRun && !monteCarloSnapshot && (
+        <div className="schedule-modified-alert schedule-stochastic-banner" role="status">
+          <strong>Stochastic scenario</strong>
+          <span>
+            {scheduleView === "deterministic"
+              ? "Sample loaded — switch to Stochastic to view the scenario."
+              : stochasticHasSlotShifts
+                ? `Viewing sampled scenario${stochasticRun.stochasticSeed != null ? ` (seed ${stochasticRun.stochasticSeed})` : ""}. Dashed ghosts = slot timing before this draw's shifts; solid = sampled slots.`
+                : `Sampled scenario (seed ${stochasticRun.stochasticSeed ?? "—"}) — no slot timing shifts this draw; pipeline or disruption effects may still change inventory.`}
+          </span>
+        </div>
+      )}
+
+      {showBaselineOverlay && tweakState.hasBaseline && baselineMatchesDeterministic && scheduleView === "deterministic" && (
         <div className="schedule-modified-alert" role="status" style={{ background: "#f1f5f9", borderColor: "#cbd5e1" }}>
           <strong>Original schedule</strong>
-          <span>Baseline matches the working schedule — enable manual edits or re-run the scheduler to see a difference.</span>
+          <span>Baseline matches the deterministic schedule — enable manual edits or re-run the scheduler to see a difference.</span>
         </div>
       )}
 
@@ -2382,8 +2838,21 @@ export default function GanttChart() {
       )}
 
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        {hasRun && (
-          <>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button className="btn btn-primary" disabled={isRunning || isReplaying} onClick={handleRunScheduler}>
+            {isRunning ? (
+              <>
+                <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+                Scheduling...
+              </>
+            ) : (
+              <>
+                <Zap size={16} strokeWidth={2} />
+                Run Scheduler
+              </>
+            )}
+          </button>
+          {hasRun && stochasticsEnabled && (
             <button
               type="button"
               className="btn btn-secondary"
@@ -2398,32 +2867,19 @@ export default function GanttChart() {
               )}
               Sample once
             </button>
-            {stochasticRun && (
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={isRunning || isReplaying}
-                onClick={handleClearStochastic}
-              >
-                <X size={16} strokeWidth={2} />
-                Clear stochastic
-              </button>
-            )}
-          </>
-        )}
-        <button className="btn btn-primary" disabled={isRunning || isReplaying} onClick={handleRunScheduler}>
-          {isRunning ? (
-            <>
-              <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
-              Scheduling...
-            </>
-          ) : (
-            <>
-              <Zap size={16} strokeWidth={2} />
-              Run Scheduler
-            </>
           )}
-        </button>
+        </div>
+        {stochasticsEnabled && stochasticRun && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={isRunning || isReplaying}
+            onClick={handleClearStochastic}
+          >
+            <X size={16} strokeWidth={2} />
+            Clear stochastic
+          </button>
+        )}
         {canTweakSchedule && (
           <button
             type="button"
@@ -2530,12 +2986,12 @@ export default function GanttChart() {
                 Inventory
               </button>
             )}
-            {tweakState.hasBaseline && (
+            {tweakState.hasBaseline && !viewingStochastic && (
               <button
                 type="button"
                 className={`metric-toggle${showBaselineOverlay ? " metric-toggle--on" : ""}`}
                 onClick={() => setShowBaselineOverlay((v) => !v)}
-                title="Show the last scheduler run as a dashed overlay on top of the current schedule"
+                title="Show the last scheduler run as a dashed overlay on the current deterministic schedule"
               >
                 Original schedule
               </button>
@@ -2544,10 +3000,10 @@ export default function GanttChart() {
               <>
                 <button
                   type="button"
-                  className={`metric-toggle${scheduleView === "working" ? " metric-toggle--on" : ""}`}
-                  onClick={() => setScheduleView("working")}
+                  className={`metric-toggle${scheduleView === "deterministic" ? " metric-toggle--on" : ""}`}
+                  onClick={() => setScheduleView("deterministic")}
                 >
-                  Working
+                  Deterministic
                 </button>
                 <button
                   type="button"
@@ -2556,20 +3012,72 @@ export default function GanttChart() {
                 >
                   Stochastic
                 </button>
-                <button
-                  type="button"
-                  className={`metric-toggle${showStochasticCompare ? " metric-toggle--on" : ""}`}
-                  disabled={scheduleView !== "stochastic"}
-                  onClick={() => setShowStochasticCompare((v) => !v)}
-                  title={
-                    scheduleView !== "stochastic"
-                      ? "Switch to Stochastic view first"
-                      : "Overlay pre-delay slot positions on the sampled scenario"
-                  }
-                >
-                  Compare
-                </button>
+                {hasInventoryData && (
+                  <button
+                    type="button"
+                    className={`metric-toggle${showBaselineInventoryOverlay ? " metric-toggle--on" : ""}`}
+                    disabled={scheduleView !== "stochastic"}
+                    onClick={() => setShowBaselineInventoryOverlay((v) => !v)}
+                    title={
+                      scheduleView !== "stochastic"
+                        ? "Switch to Stochastic view first"
+                        : "Overlay deterministic inventory lines on the sampled scenario"
+                    }
+                  >
+                    Baseline inventory
+                  </button>
+                )}
               </>
+            )}
+            {monteCarloSnapshot && scheduleView === "stochastic" && (
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  marginLeft: 4
+                }}
+              >
+                <span style={{ fontSize: 12, color: "#64748b" }}>Iteration</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={monteCarloSnapshot.iterations}
+                  value={monteCarloSnapshot.selectedIndex + 1}
+                  disabled={isSettingMcIteration}
+                  onChange={(e) =>
+                    void handleMonteCarloIterationChange(Number(e.target.value) - 1)
+                  }
+                  style={{ width: 120 }}
+                />
+                <span style={{ fontSize: 12, color: "#475569", whiteSpace: "nowrap" }}>
+                  {monteCarloSnapshot.selectedIndex + 1} / {monteCarloSnapshot.iterations}
+                  {monteCarloSnapshot.runSeeds[monteCarloSnapshot.selectedIndex] != null &&
+                    ` · seed ${monteCarloSnapshot.runSeeds[monteCarloSnapshot.selectedIndex]}`}
+                </span>
+                {isSettingMcIteration && (
+                  <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+                )}
+              </div>
+            )}
+            {monteCarloActive && viewingStochastic && showInventory && hasInventoryData && (
+              <button
+                type="button"
+                className={`metric-toggle${showMonteCarloBand ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowMonteCarloBand((v) => !v)}
+              >
+                MC band
+              </button>
+            )}
+            {viewingStochastic && stochasticRun && (
+              <button
+                type="button"
+                className={`metric-toggle${showStochasticEventMarkers ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowStochasticEventMarkers((v) => !v)}
+              >
+                Delays &amp; immob.
+              </button>
             )}
             {hasRoundtripConfig && (
               <button
@@ -2605,6 +3113,15 @@ export default function GanttChart() {
                 onClick={() => setShowDoc((v) => !v)}
               >
                 Days of cover
+              </button>
+            )}
+            {hasFulfillmentConfig && (
+              <button
+                type="button"
+                className={`metric-toggle${showFulfillment ? " metric-toggle--on" : ""}`}
+                onClick={() => setShowFulfillment((v) => !v)}
+              >
+                Fulfilment Δ
               </button>
             )}
             {hasPacingConfig && (
@@ -2733,7 +3250,7 @@ export default function GanttChart() {
 
       {/* Main chart area */}
       <div
-        className={modifySchedule ? "gantt-chart gantt-chart--modify-mode" : "gantt-chart"}
+        className="gantt-chart"
         style={{
           display: "flex",
           flexDirection: "column",
@@ -2784,6 +3301,22 @@ export default function GanttChart() {
               }}
             >
               Constraints
+            </div>
+          )}
+          {stochasticEventRowVisible && (
+            <div
+              className="timeline-row-label"
+              style={{
+                height: PIPELINE_ROW_H,
+                display: "flex",
+                alignItems: "center",
+                padding: "0 16px",
+                borderTop: "1px solid #e2e8f0",
+                fontSize: 11,
+                color: "#64748b"
+              }}
+            >
+              Delays &amp; immob.
             </div>
           )}
           {hasRun && inboundPipelineTph > 0 && (
@@ -2855,7 +3388,7 @@ export default function GanttChart() {
                 }}
               >
                 {hasInventoryData &&
-                  buildInventoryAxisTicks(ganttInvYAxis.lo, ganttInvYAxis.hi).map((v) => (
+                  ganttInvYAxis.ticks.map((v) => (
                     <span
                       key={String(v)}
                       className="timeline-axis-tick"
@@ -2885,7 +3418,7 @@ export default function GanttChart() {
                     paddingRight: 4
                   }}
                 >
-                  {buildInventoryAxisTicks(docYAxis.lo, docYAxis.hi).map((v) => (
+                  {axisTicksForRange(docYAxis.lo, docYAxis.hi).map((v) => (
                     <span
                       key={`doc-${v}`}
                       className="timeline-axis-tick timeline-axis-tick--doc"
@@ -2898,6 +3431,37 @@ export default function GanttChart() {
                       }}
                     >
                       {v >= 10 ? v.toFixed(0) : v.toFixed(1)}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {showFulfillment && fulfillmentYAxis && (
+                <div
+                  className="timeline-overlay-axis"
+                  style={{
+                    position: "relative",
+                    width: OVERLAY_AXIS_WIDTH,
+                    flexShrink: 0,
+                    height: CHART_HEIGHT,
+                    pointerEvents: "none",
+                    borderRight: "1px solid #e2e8f0",
+                    boxSizing: "border-box",
+                    paddingRight: 4
+                  }}
+                >
+                  {axisTicksForRange(fulfillmentYAxis.lo, fulfillmentYAxis.hi).map((v) => (
+                    <span
+                      key={`ful-${v}`}
+                      className="timeline-axis-tick timeline-axis-tick--fulfillment"
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        right: 4,
+                        top: overlayY(v, fulfillmentYAxis.lo, fulfillmentYAxis.hi),
+                        transform: "translateY(-50%)"
+                      }}
+                    >
+                      {v === 0 ? "0" : v > 0 ? `+${Math.round(v)}` : `${Math.round(v)}`}
                     </span>
                   ))}
                 </div>
@@ -2915,7 +3479,7 @@ export default function GanttChart() {
                     paddingRight: 4
                   }}
                 >
-                  {buildInventoryAxisTicks(pacingYAxis.lo, pacingYAxis.hi).map((v) => (
+                  {axisTicksForRange(pacingYAxis.lo, pacingYAxis.hi).map((v) => (
                     <span
                       key={`pace-${v}`}
                       className="timeline-axis-tick timeline-axis-tick--pace"
@@ -3036,14 +3600,14 @@ export default function GanttChart() {
                       }}
                     />
                   ))}
-                  {showStochasticCompare &&
+                  {viewingStochastic &&
                     stochasticGhostSlotsForResource(r.id).map((slot) => {
                       const col = customerColor(slot.customerId);
                       return (
                         <div
                           key={`stoch-ghost-${slot.id}`}
                           className="gantt-slot-ghost"
-                          title="Pre-delay position"
+                          title="Pre-adjustment slot position"
                           style={{
                             position: "absolute",
                             left: slotX(slot.start),
@@ -3167,7 +3731,7 @@ export default function GanttChart() {
                                     : rgbaFromHex(col, hasReservation ? 0.75 : 0.45)
                             }`,
                             borderLeft:
-                              delayH != null && delayH > 0 && viewingStochastic
+                              delayH != null && Math.abs(delayH) > 1e-9 && viewingStochastic
                                 ? "3px solid #a855f7"
                                 : undefined,
                             borderRadius: 6,
@@ -3184,9 +3748,13 @@ export default function GanttChart() {
                             opacity: isDragging ? 0.35 : showBaselineOverlay ? 0.55 : 1,
                             boxShadow: isSelected ? "0 0 0 2px #3b82f6" : tweakRing
                           }}
+                          title={
+                            delayTooltipBySlotId.get(slot.id) ??
+                            (modifySchedule ? undefined : slotLabel(slot))
+                          }
                         >
-                          {delayH != null && delayH > 0 && viewingStochastic
-                            ? `+${delayH.toFixed(0)}h `
+                          {delayH != null && Math.abs(delayH) > 1e-9 && viewingStochastic
+                            ? `${delayH >= 0 ? "+" : "−"}${Math.abs(delayH).toFixed(0)}h `
                             : ""}
                           {slotLabel(slot)}
                         </div>
@@ -3194,6 +3762,7 @@ export default function GanttChart() {
                     );
                   })}
                   {showBaselineOverlay &&
+                    !viewingStochastic &&
                     baselineSlotsForResource(r.id).map((slot) => {
                       const col = customerColor(slot.customerId);
                       const c = customerById.get(slot.customerId);
@@ -3259,7 +3828,7 @@ export default function GanttChart() {
                         return (
                           <div
                             key={`${e.slotId}-rt`}
-                            title={`${nm} · ${e.direction} roundtrip · ${e.hours} h from visit start (pre-ops)`}
+                            title={`${nm} · ${e.direction} roundtrip · ${e.hours} h from visit start (pre-ops), start-to-start. Not the WoA/laycan reservation block above.`}
                             style={{
                               position: "absolute",
                               left: leftPx,
@@ -3337,8 +3906,52 @@ export default function GanttChart() {
               </div>
             )}
 
-            {renderPipelineRow(inboundPipelineSegments, inboundPipelineTph > 0, "pipe-in")}
-            {renderPipelineRow(outboundPipelineSegments, outboundPipelineTph > 0, "pipe-out")}
+            {stochasticEventRowVisible && (
+              <div
+                style={{
+                  height: PIPELINE_ROW_H,
+                  position: "relative",
+                  borderTop: "1px solid #e2e8f0",
+                  background: "#ffffff"
+                }}
+              >
+                {monthMarkers.map((m) => (
+                  <div
+                    key={`ev-${m.key}`}
+                    style={{ position: "absolute", left: m.x, top: 0, bottom: 0, borderLeft: "1px solid #f1f5f9" }}
+                  />
+                ))}
+                <svg
+                  style={{ position: "absolute", top: 0, left: 0, pointerEvents: "auto" }}
+                  width={contentWidth}
+                  height={PIPELINE_ROW_H}
+                >
+                  {stochasticEventSegments.map((seg, i) => {
+                    const x = (seg.startH / 24) * pixelsPerDay;
+                    const w = Math.max(2, ((seg.endH - seg.startH) / 24) * pixelsPerDay);
+                    return (
+                      <rect
+                        key={`ev-seg-${i}`}
+                        x={x}
+                        y={PIPELINE_BAR_Y}
+                        width={w}
+                        height={PIPELINE_BAR_H}
+                        fill={STOCH_EVENT_MARKER_COLORS[seg.kind]}
+                        fillOpacity={0.85}
+                        rx={2}
+                        style={{ cursor: "pointer" }}
+                        onClick={() => navigate(`/simulation-log?hour=${seg.startH}`)}
+                      >
+                        <title>{seg.label} — open simulation log</title>
+                      </rect>
+                    );
+                  })}
+                </svg>
+              </div>
+            )}
+
+            {renderPipelineRow(inboundPipelineSegments, inboundPipelineTph > 0, "pipe-in", "inbound")}
+            {renderPipelineRow(outboundPipelineSegments, outboundPipelineTph > 0, "pipe-out", "outbound")}
 
             {/* Inventory chart area - SVG with same coordinate system */}
             <div
@@ -3365,43 +3978,48 @@ export default function GanttChart() {
                 {(() => {
                   const lo = ganttInvYAxis.lo;
                   const hi = ganttInvYAxis.hi;
-                  const span = hi - lo;
-                  const yZero = invY(0, lo, hi);
-                  const faintYs = [0.25, 0.5, 0.75]
-                    .map((p) => invY(lo + span * p, lo, hi))
-                    .filter((y) => Math.abs(y - yZero) > 2);
                   return (
                     <>
-                      {faintYs.map((y, i) => (
-                        <line
-                          key={`gf-${i}`}
-                          x1={0}
-                          x2={contentWidth}
-                          y1={y}
-                          y2={y}
-                          stroke="#f1f5f9"
-                          strokeWidth={1}
-                        />
-                      ))}
-                      {lo <= 0 && hi >= 0 && (
-                        <line
-                          x1={0}
-                          x2={contentWidth}
-                          y1={yZero}
-                          y2={yZero}
-                          stroke="#94a3b8"
-                          strokeWidth={1}
-                        />
-                      )}
+                      {ganttInvYAxis.ticks.map((v) => {
+                        const y = invY(v, lo, hi);
+                        const isZero = Math.abs(v) < 1e-9;
+                        return (
+                          <line
+                            key={`grid-${v}`}
+                            x1={0}
+                            x2={contentWidth}
+                            y1={y}
+                            y2={y}
+                            stroke={isZero ? "#94a3b8" : "#f1f5f9"}
+                            strokeWidth={1}
+                          />
+                        );
+                      })}
                     </>
                   );
                 })()}
+                {monteCarloBandVisible && terminalMonteCarloBandPath && (
+                  <polygon
+                    points={terminalMonteCarloBandPath}
+                    fill="#a855f7"
+                    fillOpacity={0.15}
+                    stroke="none"
+                  />
+                )}
+                {monteCarloBandVisible && terminalMonteCarloP50Points && (
+                  <polyline
+                    points={terminalMonteCarloP50Points}
+                    fill="none"
+                    stroke="#9333ea"
+                    strokeWidth={2}
+                  />
+                )}
                 {showInventory &&
-                  workingInventoryGhostSeries &&
+                  deterministicInventoryGhostSeries &&
                   Object.keys(chartTimelineData!.timeline)
                     .filter((cid) => enabledCustomers.has(cid))
                     .map((cid) => {
-                      const pts = inventorySeriesPoints(workingInventoryGhostSeries, cid, slots);
+                      const pts = inventorySeriesPoints(deterministicInventoryGhostSeries, cid, slots);
                       if (!pts) return null;
                       return (
                         <polyline
@@ -3415,9 +4033,9 @@ export default function GanttChart() {
                         />
                       );
                     })}
-                {showInventory && workingInventoryGhostSeries && (
+                {showInventory && deterministicInventoryGhostSeries && (
                   <polyline
-                    points={inventorySeriesPoints(workingInventoryGhostSeries, null, slots)}
+                    points={inventorySeriesPoints(deterministicInventoryGhostSeries, null, slots)}
                     fill="none"
                     stroke="#94a3b8"
                     strokeWidth={1.5}
@@ -3494,6 +4112,36 @@ export default function GanttChart() {
                         />
                       );
                     })}
+                {showFulfillment &&
+                  fulfillmentYAxis &&
+                  Object.keys(fulfillmentTrendByCustomer)
+                    .filter((cid) => enabledCustomers.has(cid))
+                    .map((cid) => {
+                      const pts = fulfillmentOverlayPoints(cid);
+                      if (!pts) return null;
+                      return (
+                        <polyline
+                          key={`fulfillment-${cid}`}
+                          points={pts}
+                          fill="none"
+                          stroke={customerColor(cid)}
+                          strokeWidth={2}
+                          strokeDasharray="3 5"
+                          strokeOpacity={0.9}
+                        />
+                      );
+                    })}
+                {showFulfillment && fulfillmentYAxis && (
+                  <line
+                    x1={0}
+                    x2={contentWidth}
+                    y1={overlayY(0, fulfillmentYAxis.lo, fulfillmentYAxis.hi)}
+                    y2={overlayY(0, fulfillmentYAxis.lo, fulfillmentYAxis.hi)}
+                    stroke="#94a3b8"
+                    strokeWidth={1}
+                    strokeDasharray="4 4"
+                  />
+                )}
                 {showPacing && pacingYAxis && selectedPacingOption && (
                   <>
                     <line
@@ -3568,6 +4216,7 @@ export default function GanttChart() {
             onMouseDown={handleMinimapMouseDown}
           >
             {showBaselineOverlay &&
+              !viewingStochastic &&
               baselineSlots.map((slot) => {
                 const x = (dayOffset(slot.start) / totalDays) * 100;
                 const w = Math.max(
@@ -3703,6 +4352,22 @@ export default function GanttChart() {
                   )}
                 </div>
               )}
+            </>
+          )}
+          {showFulfillment && simulationLog[invChartTooltip.hourIndex] && (
+            <>
+              {Object.keys(fulfillmentTrendByCustomer)
+                .filter((cid) => enabledCustomers.has(cid))
+                .map((cid) => {
+                  const v = fulfillmentTrendByCustomer[cid]?.[invChartTooltip.hourIndex];
+                  if (v == null || !Number.isFinite(v)) return null;
+                  const name = customerById.get(cid)?.name ?? cid;
+                  return (
+                    <div key={`ful-${cid}`} style={{ opacity: 0.92 }}>
+                      {name} fulfilment: {formatFulfillmentDeltaPp(v)}
+                    </div>
+                  );
+                })}
             </>
           )}
         </div>

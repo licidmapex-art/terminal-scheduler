@@ -46,13 +46,6 @@ interface InventoryTimeline {
   startDate: string | null;
 }
 
-function isBlockingIdle(
-  action: string,
-  blockingConstraint: SimulationLogRow["transportStatus"][number]["blockingConstraint"]
-): blockingConstraint is BlockingConstraintKey {
-  return action === "idle" && blockingConstraint != null;
-}
-
 export function buildDocTrendByCustomer(
   simulationLog: SimulationLogRow[],
   customers: Array<{ id: string; name: string }>,
@@ -136,6 +129,68 @@ export function buildDocTrendByCustomer(
   return out;
 }
 
+/** Per-customer min-leg fulfilment vs average (percentage points), from simulation log. */
+export function buildFulfillmentTrendByCustomer(
+  simulationLog: SimulationLogRow[],
+  customers: Array<{ id: string; name: string }>
+): Record<string, Array<number | null>> {
+  const out: Record<string, Array<number | null>> = {};
+  if (simulationLog.length === 0) return out;
+
+  const maxHour = Math.max(...simulationLog.map((r) => r.hour));
+  for (const customer of customers) {
+    const series: Array<number | null> = [];
+    for (let h = 0; h <= maxHour; h++) {
+      const row = simulationLog.find((r) => r.hour === h);
+      if (!row) {
+        series.push(null);
+        continue;
+      }
+
+      const statuses = (row.transportStatus ?? []).filter(
+        (s) =>
+          s.customerId === customer.id &&
+          s.fulfillmentRatio != null &&
+          Number.isFinite(s.fulfillmentRatio)
+      );
+      if (statuses.length === 0) {
+        series.push(null);
+        continue;
+      }
+
+      const worst = statuses.reduce((a, b) =>
+        (a.fulfillmentRatio ?? Infinity) < (b.fulfillmentRatio ?? Infinity) ? a : b
+      );
+      const ratio = worst.fulfillmentRatio!;
+
+      const peerRatios = new Map<string, number>();
+      for (const s of row.transportStatus ?? []) {
+        if (s.fulfillmentRatio == null || !Number.isFinite(s.fulfillmentRatio)) continue;
+        const prev = peerRatios.get(s.customerId);
+        if (prev === undefined || s.fulfillmentRatio < prev) {
+          peerRatios.set(s.customerId, s.fulfillmentRatio);
+        }
+      }
+      const peerMean =
+        peerRatios.size > 0
+          ? [...peerRatios.values()].reduce((sum, v) => sum + v, 0) / peerRatios.size
+          : null;
+
+      let deltaPp: number;
+      if (worst.poolFulfillmentAvg != null && Number.isFinite(worst.poolFulfillmentAvg)) {
+        deltaPp = (ratio - worst.poolFulfillmentAvg) * 100;
+      } else if (peerMean != null) {
+        deltaPp = (ratio - peerMean) * 100;
+      } else {
+        deltaPp = (ratio - 1) * 100;
+      }
+      series.push(Math.round(deltaPp * 10) / 10);
+    }
+    if (!series.every((x) => x == null)) out[customer.id] = series;
+  }
+  return out;
+}
+
 export { isRealCustomerDocId };
 
 export function buildPacingByCustomerMode(
@@ -182,6 +237,13 @@ export function buildPacingLegOptions(
     }
   }
   return out;
+}
+
+function isBlockingIdle(
+  action: string,
+  blockingConstraint: SimulationLogRow["transportStatus"][number]["blockingConstraint"]
+): blockingConstraint is BlockingConstraintKey {
+  return action === "idle" && blockingConstraint != null;
 }
 
 export function buildConstraintHourData(

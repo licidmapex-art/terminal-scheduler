@@ -222,32 +222,27 @@ export default function App() {
           )}
         </div>
         <main className="main-content">
-          <Routes>
-            <Route path="/" element={<Navigate to="/schedule" replace />} />
-            <Route path="/schedule" element={<Schedule />} />
-            <Route path="/movements" element={<Movements />} />
-            <Route path="/customers" element={<Customers />} />
-            <Route path="/resources" element={<Resources />} />
-            <Route path="/analytics" element={<Analytics />} />
-            <Route
-              path="/simulation-log"
-              element={
-                <ErrorBoundary>
-                  <SimulationLog />
-                </ErrorBoundary>
-              }
-            />
-            {DEBUG_AND_VISUALIZATION_ENABLED && (
-              <>
-                <Route path="/simulation" element={<Simulation />} />
-                <Route path="/debugging" element={<Debugging />} />
-              </>
-            )}
-            <Route path="/introduction" element={<Introduction />} />
-            <Route path="/config" element={<Config />} />
-            <Route path="/scenarios" element={<Scenarios />} />
-            <Route path="/stochastics" element={<Stochastics />} />
-          </Routes>
+          <ErrorBoundary>
+            <Routes>
+              <Route path="/" element={<Navigate to="/schedule" replace />} />
+              <Route path="/schedule" element={<Schedule />} />
+              <Route path="/movements" element={<Movements />} />
+              <Route path="/customers" element={<Customers />} />
+              <Route path="/resources" element={<Resources />} />
+              <Route path="/analytics" element={<Analytics />} />
+              <Route path="/simulation-log" element={<SimulationLog />} />
+              {DEBUG_AND_VISUALIZATION_ENABLED && (
+                <>
+                  <Route path="/simulation" element={<Simulation />} />
+                  <Route path="/debugging" element={<Debugging />} />
+                </>
+              )}
+              <Route path="/introduction" element={<Introduction />} />
+              <Route path="/config" element={<Config />} />
+              <Route path="/scenarios" element={<Scenarios />} />
+              <Route path="/stochastics" element={<Stochastics />} />
+            </Routes>
+          </ErrorBoundary>
         </main>
       </div>
     </HashRouter>

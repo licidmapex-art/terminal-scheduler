@@ -72,7 +72,7 @@ export type CustomerFormHandle = {
   isDirty: () => boolean;
 };
 
-type SectionKey = "general" | "inbound" | "outbound" | "storage" | "gradeMix" | "timeShared";
+type SectionKey = "general" | "inbound" | "outbound" | "storage" | "gradeMix";
 
 type FormSnapshot = {
   name: string;
@@ -86,8 +86,6 @@ type FormSnapshot = {
   gradeGreenPct: string;
   gradeBluePct: string;
   gradeGreyPct: string;
-  timeSharedMinBand: string;
-  timeSharedDuration: string;
   useCustomChartColor: boolean;
   chartColorPicker: string;
 };
@@ -184,8 +182,6 @@ function snapshotFromCustomer(
     gradeGreenPct: String(customer?.gradeGreenPct ?? 0),
     gradeBluePct: String(customer?.gradeBluePct ?? 0),
     gradeGreyPct: String(customer?.gradeGreyPct ?? 0),
-    timeSharedMinBand: String(customer?.timeSharedMinBand ?? 0),
-    timeSharedDuration: String(customer?.timeSharedDuration ?? 24),
     useCustomChartColor: custom != null,
     chartColorPicker: custom ?? resolveCustomerChartColor(null, chartColorPaletteIndex)
   };
@@ -238,12 +234,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
   const [gradeGreenPct, setGradeGreenPct] = useState(String(customer?.gradeGreenPct ?? 0));
   const [gradeBluePct, setGradeBluePct] = useState(String(customer?.gradeBluePct ?? 0));
   const [gradeGreyPct, setGradeGreyPct] = useState(String(customer?.gradeGreyPct ?? 0));
-  const [timeSharedMinBand, setTimeSharedMinBand] = useState(
-    String(customer?.timeSharedMinBand ?? 0)
-  );
-  const [timeSharedDuration, setTimeSharedDuration] = useState(
-    String(customer?.timeSharedDuration ?? 24)
-  );
   const [useCustomChartColor, setUseCustomChartColor] = useState(
     normalizeChartColorHex(customer?.chartColor) != null
   );
@@ -261,8 +251,7 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     inbound: true,
     outbound: true,
     storage: true,
-    gradeMix: false,
-    timeShared: false
+    gradeMix: false
   });
 
   useEffect(() => {
@@ -369,8 +358,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       gradeGreenPct,
       gradeBluePct,
       gradeGreyPct,
-      timeSharedMinBand,
-      timeSharedDuration,
       useCustomChartColor,
       chartColorPicker
     }),
@@ -386,8 +373,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       gradeGreenPct,
       gradeBluePct,
       gradeGreyPct,
-      timeSharedMinBand,
-      timeSharedDuration,
       useCustomChartColor,
       chartColorPicker
     ]
@@ -412,8 +397,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     setGradeGreenPct(snap.gradeGreenPct);
     setGradeBluePct(snap.gradeBluePct);
     setGradeGreyPct(snap.gradeGreyPct);
-    setTimeSharedMinBand(snap.timeSharedMinBand);
-    setTimeSharedDuration(snap.timeSharedDuration);
     setUseCustomChartColor(snap.useCustomChartColor);
     setChartColorPicker(snap.chartColorPicker);
     setStorageShareTouched(false);
@@ -476,16 +459,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         return false;
       }
     }
-    const tsMin = parseFloat(timeSharedMinBand);
-    const tsDur = parseFloat(timeSharedDuration);
-    if (isNaN(tsMin) || tsMin < 0) {
-      setError("Time-shared min band (x) must be a non-negative number");
-      return false;
-    }
-    if (isNaN(tsDur) || tsDur <= 0) {
-      setError("Time-shared triangle duration (y) must be a positive number");
-      return false;
-    }
     const chartColorSaved = useCustomChartColor ? normalizeChartColorHex(chartColorPicker) : null;
     if (useCustomChartColor && !chartColorSaved) {
       setError("Chart color must be a valid #RGB or #RRGGBB value");
@@ -523,8 +496,8 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
         outboundMode: outboundPrimary.mode,
         inboundRoundtripHours: inboundPrimary.roundtripHours,
         outboundRoundtripHours: outboundPrimary.roundtripHours,
-        timeSharedMinBand: tsMin,
-        timeSharedDuration: tsDur,
+        timeSharedMinBand: customer?.timeSharedMinBand ?? 0,
+        timeSharedDuration: customer?.timeSharedDuration ?? 24,
         chartColor: chartColorSaved,
         gradeGreenPct: gradeMassBalancingEnabled ? green : 0,
         gradeBluePct: gradeMassBalancingEnabled ? blue : 0,
@@ -574,14 +547,9 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
     gradeGreenPct,
     gradeBluePct,
     gradeGreyPct,
-    timeSharedMinBand,
-    timeSharedDuration,
     useCustomChartColor,
     chartColorPicker,
     gradeMassBalancingEnabled,
-    gradeGreenPct,
-    gradeBluePct,
-    gradeGreyPct,
     onSaved
   ]);
 
@@ -706,13 +674,13 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       </section>
 
       {/* ── Inbound ─────────────────────────────────────────────────── */}
-      <section className="customer-form-section card">
+      <section className="customer-form-section card customer-form-section--inbound">
         <button
           type="button"
           className="customer-form-section-toggle"
           onClick={() => toggleSection("inbound")}
         >
-          <span>Inbound</span>
+          <span className="customer-form-section-heading">Inbound</span>
           <span>{openSections.inbound ? "Hide" : "Show"}</span>
         </button>
         {openSections.inbound && (
@@ -769,13 +737,13 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
       </section>
 
       {/* ── Outbound ────────────────────────────────────────────────── */}
-      <section className="customer-form-section card">
+      <section className="customer-form-section card customer-form-section--outbound">
         <button
           type="button"
           className="customer-form-section-toggle"
           onClick={() => toggleSection("outbound")}
         >
-          <span>Outbound</span>
+          <span className="customer-form-section-heading">Outbound</span>
           <span>{openSections.outbound ? "Hide" : "Show"}</span>
         </button>
         {openSections.outbound && (
@@ -965,56 +933,6 @@ const CustomerForm = forwardRef<CustomerFormHandle, CustomerFormProps>(function 
           )}
         </section>
       )}
-
-      {/* ── Time-shared storage ─────────────────────────────────────── */}
-      <section className="customer-form-section card">
-        <button
-          type="button"
-          className="customer-form-section-toggle"
-          onClick={() => toggleSection("timeShared")}
-        >
-          <span className="section-heading-row">
-            Time-shared storage
-            <span onClick={(e) => e.stopPropagation()}>
-              <HelpPopover
-                label="Time-shared storage help"
-                content="Used in Time-shared mode on the inventory chart. Triangle starts at cargo size (t), decreases to 0 over cargo ÷ pipeline flow (h). Min band x is stored for compatibility."
-              />
-            </span>
-          </span>
-          <span>{openSections.timeShared ? "Hide" : "Show"}</span>
-        </button>
-        {openSections.timeShared && (
-          <div className="customer-form-section-content">
-            <div className="form-grid">
-              <div className="form-group">
-                <label className="form-label">Min band x (tonnes)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  className="form-input"
-                  value={timeSharedMinBand}
-                  onChange={(e) => setTimeSharedMinBand(e.target.value)}
-                />
-              </div>
-              <div className="form-group">
-                <FormLabelWithHelp help="On the chart, duration is cargo ÷ pipeline flow; this field is kept for compatibility.">
-                  Triangle duration y (hours)
-                </FormLabelWithHelp>
-                <input
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  className="form-input"
-                  value={timeSharedDuration}
-                  onChange={(e) => setTimeSharedDuration(e.target.value)}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-      </section>
 
       <div className="customer-form-sticky-actions">
         <button type="submit" className="btn btn-primary">

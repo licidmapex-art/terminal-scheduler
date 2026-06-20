@@ -37,6 +37,18 @@ contextBridge.exposeInMainWorld("schedulerAPI", {
   sampleStochastic: (seed?: number) => ipcRenderer.invoke("scheduler:sampleStochastic", seed),
   getStochasticState: () => ipcRenderer.invoke("scheduler:getStochasticState"),
   clearStochastic: () => ipcRenderer.invoke("scheduler:clearStochastic"),
+  runMonteCarlo: (payload: { iterations?: number; baseSeed?: number }) =>
+    ipcRenderer.invoke("scheduler:runMonteCarlo", payload),
+  getMonteCarloState: () => ipcRenderer.invoke("scheduler:getMonteCarloState"),
+  setMonteCarloIteration: (index: number) => ipcRenderer.invoke("scheduler:setMonteCarloIteration", index),
+  clearMonteCarlo: () => ipcRenderer.invoke("scheduler:clearMonteCarlo"),
+  cancelMonteCarlo: () => ipcRenderer.invoke("scheduler:cancelMonteCarlo"),
+  onMonteCarloProgress: (callback: (payload: { done: number; total: number; phase: string }) => void) => {
+    const handler = (_e: unknown, payload: { done: number; total: number; phase: string }) =>
+      callback(payload);
+    ipcRenderer.on("scheduler:monteCarloProgress", handler);
+    return () => ipcRenderer.removeListener("scheduler:monteCarloProgress", handler);
+  },
   updateSimulation: () => ipcRenderer.invoke("scheduler:updateSimulation"),
   restoreBaseline: () => ipcRenderer.invoke("scheduler:restoreBaseline"),
   undo: () => ipcRenderer.invoke("scheduler:undo"),

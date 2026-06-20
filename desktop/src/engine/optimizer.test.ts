@@ -317,7 +317,7 @@ describe("relativeOptimizerShouldYield", () => {
     expect(relativeOptimizerShouldYield(10, 5, 0)).toBe(false);
   });
 
-  it("yields when leg DoC exceeds multiplier times average", () => {
+  it("yields when leg DoC exceeds multiplier times reference DoC", () => {
     expect(relativeOptimizerShouldYield(20, 10, 1)).toBe(true);
     expect(relativeOptimizerShouldYield(15, 10, 1.4)).toBe(true);
   });

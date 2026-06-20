@@ -1,10 +1,10 @@
 import { getDatabase } from "./database";
 import type { SimulationConfig, StorageMode, SustainabilityGrade, StochasticConfig } from "../types";
 import { normalizeBargeBerthAllocation } from "../engine/resourceAllocation";
-export {
-  simulationConfigFromRow,
-  type SimulationConfigRow
-} from "../lib/simulationConfigRow";
+import type { SimulationConfigRow } from "../lib/simulationConfigRow";
+import { simulationConfigFromRow } from "../lib/simulationConfigRow";
+
+export { simulationConfigFromRow, type SimulationConfigRow } from "../lib/simulationConfigRow";
 
 const randomUUID = () => globalThis.crypto.randomUUID();
 

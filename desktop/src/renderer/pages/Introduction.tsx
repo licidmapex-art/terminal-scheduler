@@ -208,7 +208,7 @@ const CONSTRAINT_DESCRIPTIONS: Record<BlockingConstraintKey, React.ReactNode> = 
   optimizer_days_of_cover: (
     <>
       <strong>Relative optimizer (days-of-cover)</strong> — optional guard that skips a start when a leg&apos;s DoC
-      exceeds <strong>× the cross-customer average</strong> that hour, so others can book the berth.
+      exceeds <strong>× combined terminal DoC</strong> that hour, so others can book the berth.
     </>
   ),
   optimizer_fulfillment: (
@@ -219,8 +219,8 @@ const CONSTRAINT_DESCRIPTIONS: Record<BlockingConstraintKey, React.ReactNode> = 
   ),
   roundtrip: (
     <>
-      <strong>Roundtrip</strong> — a minimum number of hours must pass after the previous visit on the{" "}
-      <strong>same leg</strong> ended before another start is allowed.
+      <strong>Roundtrip</strong> — a minimum number of hours from one visit <strong>start</strong> (pre-ops) to
+      the next start on the <strong>same leg</strong> (start-to-start, not from berth release).
     </>
   ),
   insufficient_inventory: (

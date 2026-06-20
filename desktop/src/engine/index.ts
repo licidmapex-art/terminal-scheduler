@@ -66,9 +66,13 @@ export {
   sampleDistribution,
   sampleSimulationOverrides,
   createRng,
-  randomSeed
+  randomSeed,
+  runMonteCarlo,
+  runMonteCarloAsync,
+  runSingleStochasticReplay,
+  MONTE_CARLO_FULL_RUNS_MAX
 } from "./stochastic";
-export type { SampleOverridesResult } from "./stochastic";
+export type { SampleOverridesResult, RunMonteCarloInput, RunMonteCarloOptions } from "./stochastic";
 export type { ReplaySimulationOptions } from "./replaySimulation";
 export {
   computeHourlyBerthTonnesByBucket,

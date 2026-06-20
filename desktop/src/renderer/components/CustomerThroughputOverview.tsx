@@ -16,20 +16,22 @@ function DirectionRows({
   total,
   modes,
   pipelineTonnes,
-  pipelineLabel
+  pipelineLabel,
+  direction
 }: {
   label: string;
   total: number;
   modes: ModeThroughputLine[];
   pipelineTonnes: number;
   pipelineLabel: string;
+  direction: "inbound" | "outbound";
 }) {
   const hasModes = modes.length > 0;
   const hasPipeline = pipelineTonnes > 0;
   const hasAny = hasModes || hasPipeline;
 
   return (
-    <div className="ct-direction">
+    <div className={`ct-direction ct-direction--${direction}`}>
       <div className="ct-direction-head">
         <span className="ct-direction-label">{label}</span>
         <span className="ct-direction-total">{fmt(total)}</span>
@@ -68,6 +70,7 @@ export default function CustomerThroughputOverviewPanel({
     <div className="ct-simple">
       <DirectionRows
         label="Inbound"
+        direction="inbound"
         total={inboundTotal}
         modes={overview.inboundModes}
         pipelineTonnes={overview.inboundPipelineTonnes}
@@ -75,6 +78,7 @@ export default function CustomerThroughputOverviewPanel({
       />
       <DirectionRows
         label="Outbound"
+        direction="outbound"
         total={outboundTotal}
         modes={overview.outboundModes}
         pipelineTonnes={overview.outboundPipelineTonnes}

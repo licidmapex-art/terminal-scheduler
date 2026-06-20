@@ -5,6 +5,7 @@ import UnsavedChangesDialog from "../components/UnsavedChangesDialog";
 import { PageTitleWithHelp, HelpPopover } from "../components/HelpPopover";
 import { resolveCustomerChartColor } from "../lib/customerChartColor";
 import { buildCustomerThroughputOverview } from "../lib/customerThroughputOverview";
+import { finalInventoryByCustomer } from "../lib/finalInventoryFromTimeline";
 import { parseStorageMode } from "../../lib/storageMode";
 import type { Customer as EngineCustomer, SimulationConfig as EngineSimulationConfig } from "../../types";
 
@@ -59,6 +60,8 @@ export default function Customers() {
   const [config, setConfig] = useState<SimulationConfig | null>(null);
   const [formDirty, setFormDirty] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingEditorAction | null>(null);
+  const [applyingEndInventory, setApplyingEndInventory] = useState(false);
+  const [endInventoryMessage, setEndInventoryMessage] = useState<string | null>(null);
   const formRef = useRef<CustomerFormHandle>(null);
 
   const load = () => {
@@ -144,6 +147,61 @@ export default function Customers() {
       ? `You have unsaved changes for ${editing?.name ?? "this customer"}. Close without saving and open ${pendingAction.customer.name}?`
       : "You have unsaved changes. Close without saving and add a new customer?";
 
+  const handleApplyEndInventoryAsStart = async () => {
+    if (!window.dbAPI?.updateCustomer || !window.schedulerAPI?.getInventoryTimeline) return;
+    if (
+      formDirty &&
+      showForm &&
+      !window.confirm("You have unsaved customer edits. Apply end inventory as start anyway?")
+    ) {
+      return;
+    }
+    if (
+      !window.confirm(
+        "Set each customer's starting inventory to the end-of-simulation value from the last scheduler run?"
+      )
+    ) {
+      return;
+    }
+
+    setApplyingEndInventory(true);
+    setEndInventoryMessage(null);
+    try {
+      const timelineData = await window.schedulerAPI.getInventoryTimeline();
+      if (!timelineData?.timeline || Object.keys(timelineData.timeline).length === 0) {
+        setEndInventoryMessage("Run or update the simulation first — no inventory timeline is available.");
+        return;
+      }
+
+      const finals = finalInventoryByCustomer(timelineData.timeline);
+      let updated = 0;
+      for (const c of customers) {
+        const endInv = finals.get(c.id);
+        if (endInv === undefined) continue;
+        await window.dbAPI.updateCustomer({
+          ...(c as EngineCustomer),
+          currentInventory: endInv
+        });
+        updated++;
+      }
+
+      if (updated === 0) {
+        setEndInventoryMessage("No matching customers found in the last simulation inventory.");
+        return;
+      }
+
+      closeEditor();
+      load();
+      setEndInventoryMessage(
+        `Updated starting inventory for ${updated} customer${updated === 1 ? "" : "s"} from the last run.`
+      );
+    } catch (err) {
+      setEndInventoryMessage(String(err));
+    } finally {
+      setApplyingEndInventory(false);
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -153,10 +211,31 @@ export default function Customers() {
             help="Manage customer profiles and storage allocations"
           />
         </div>
-        <button className="btn btn-primary" onClick={() => requestEditorAction({ type: "add" })}>
-          Add Customer
-        </button>
+        <div className="page-header-actions">
+          <button className="btn btn-primary" onClick={() => requestEditorAction({ type: "add" })}>
+            Add Customer
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={applyingEndInventory}
+            title="Copy end inventory from the current simulation into each customer's starting inventory"
+            onClick={() => void handleApplyEndInventoryAsStart()}
+          >
+            {applyingEndInventory ? "Applying…" : "Use end inventory as start"}
+          </button>
+        </div>
       </div>
+
+      {endInventoryMessage && (
+        <div
+          className="schedule-modified-alert"
+          role="status"
+          style={{ marginBottom: 16, marginTop: -12 }}
+        >
+          <span>{endInventoryMessage}</span>
+        </div>
+      )}
 
       <div className="customer-card-grid">
         {customers.map((c, idx) => {

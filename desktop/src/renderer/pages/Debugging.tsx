@@ -97,8 +97,8 @@ export default function Debugging() {
       const avg = row.averageCustomerDaysOfCover ?? null;
       const combined = row.combinedTerminalDaysOfCover ?? null;
       const relativeThreshold =
-        avg != null && Number.isFinite(avg) && optimizerMultiplier > 0
-          ? optimizerMultiplier * avg
+        combined != null && Number.isFinite(combined) && optimizerMultiplier > 0
+          ? optimizerMultiplier * combined
           : null;
       return {
         hour: row.hour,
@@ -139,9 +139,10 @@ export default function Debugging() {
                   modes.
                 </p>
                 <p style={{ margin: 0 }}>
-                  Relative optimizer blocks when optimizer DoC &gt; × average cross-customer DoC at that hour (mean of
-                  each customer&apos;s tightest leg). Combined DoC uses total terminal inventory and summed
-                  inbound/outbound pressure across all customers (minimum of drain/fill views when both apply).
+                  Relative optimizer blocks when optimizer DoC &gt; × combined terminal DoC at that hour. Combined DoC
+                  uses total terminal inventory and summed inbound/outbound pressure across all customers (minimum of
+                  drain/fill views when both apply). Average DoC is the mean of each customer&apos;s tightest leg
+                  (shown for comparison only).
                 </p>
               </>
             }
@@ -155,7 +156,7 @@ export default function Debugging() {
           <FormLabelWithHelp
             help={
               <>
-                Relative optimizer: <strong>{optimizerMultiplier.toFixed(2)}×</strong> average DoC{" "}
+                Relative optimizer: <strong>{optimizerMultiplier.toFixed(2)}×</strong> combined DoC{" "}
                 {optimizerMultiplier === 0 ? "(disabled)" : ""}
               </>
             }
@@ -213,7 +214,7 @@ export default function Debugging() {
                   <Line
                     type="monotone"
                     dataKey="relativeThreshold"
-                    name={`${optimizerMultiplier}× average`}
+                    name={`${optimizerMultiplier}× combined`}
                     stroke="#ef4444"
                     dot={false}
                     connectNulls={false}

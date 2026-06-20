@@ -4,7 +4,8 @@ import {
   buildAnalyticsAiSummary,
   summaryToPromptText,
   questionToPromptText,
-  type AnalyticsAiSummary
+  type AnalyticsAiSummary,
+  type FeasibilityWarningLike
 } from "../lib/buildAnalyticsAiSummary";
 import {
   getGeminiApiKey,
@@ -14,7 +15,7 @@ import {
   testGeminiApiConnection,
   type AiAnalysisRequestMode
 } from "../lib/geminiApi";
-import type { SimulationLogRow } from "../../engine/simulationLog";
+import type { Customer } from "../../types";
 import { HelpPopover } from "./HelpPopover";
 
 interface AiAnalysisPanelProps {
@@ -30,8 +31,22 @@ interface AiAnalysisPanelProps {
     pacerOutboundAllowance?: number;
   } | null;
   periodHours: number;
-  customers: Array<{ name: string; pipelineFlowPerHour?: number; storageShare?: number }>;
-  feasibilityWarnings: string[];
+  customers: Pick<
+    Customer,
+    | "name"
+    | "pipelineFlowPerHour"
+    | "pipelineInboundPerHour"
+    | "pipelineOutboundPerHour"
+    | "storageShare"
+    | "declaredInboundThroughput"
+    | "inboundMEPS"
+    | "outboundMEPS"
+    | "inboundMode"
+    | "outboundMode"
+    | "inboundRoundtripHours"
+    | "outboundRoundtripHours"
+  >[];
+  feasibilityWarnings: FeasibilityWarningLike[];
   simulationLog: SimulationLogRow[];
   inventorySummary: Array<{
     customerName: string;
@@ -54,7 +69,13 @@ interface AiAnalysisPanelProps {
     scheduledInboundSlots: number;
     scheduledOutboundSlots: number;
   }>;
-  tankExtremes: Array<{ customerName: string; bottomHours: number; topHours: number }>;
+  tankExtremes: Array<{
+    customerName: string;
+    bottomHours: number;
+    topHours: number;
+    refusedAtBottomTonnes?: number;
+    refusedAtTopTonnes?: number;
+  }>;
   partialLoads: Array<{
     customerName: string;
     partialInboundSlots: number;
@@ -255,18 +276,19 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
             </div>
             <HelpPopover
               label="AI analysis help"
-              content={
-                <>
-                  Click <strong>Get AI summary</strong> for a structured overview, or choose <strong>Ask a question</strong> for a bespoke answer about the same run data.
-                  Nothing is sent until you click. If you see rate-limit errors on a new key, open AI Studio → API Keys
-                  → <strong>Set up billing</strong> on that project (free tier still applies). Use{" "}
-                  <strong>Test connection</strong> after saving a key. Your key stays in this browser only (
-                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
-                    get a free key
-                  </a>
-                  ).
-                </>
-              }
+            content={
+              <>
+                Click <strong>Get AI summary</strong> for a root-cause analysis grounded in how the scheduler works
+                (constraints, capacity, roundtrip, MEPS). Choose <strong>Ask a question</strong> for a bespoke answer.
+                Nothing is sent until you click. If you see rate-limit errors on a new key, open AI Studio → API Keys
+                → <strong>Set up billing</strong> on that project (free tier still applies). Use{" "}
+                <strong>Test connection</strong> after saving a key. Your key stays in this browser only (
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
+                  get a free key
+                </a>
+                ).
+              </>
+            }
             />
           </div>
         </div>
@@ -376,13 +398,15 @@ export default function AiAnalysisPanel(props: AiAnalysisPanelProps) {
           rows={2}
           placeholder={
             requestMode === "summary"
-              ? "e.g. Customer A has priority; testing optimizer at 1.2× average DoC…"
+              ? "e.g. Customer A has priority; testing optimizer at 1.2× combined DoC…"
               : "e.g. Focus on shared-inventory mode and berth pacing…"
           }
           value={userNotes}
           onChange={(e) => setUserNotes(e.target.value)}
         />
-        <span className="form-helper">Included in the JSON sent to Gemini when you click analyse.</span>
+        <span className="form-helper">
+          Included in the JSON sent to Gemini (with scheduling rules and pre-computed diagnostic hints).
+        </span>
       </div>
 
       <div className="ai-analysis-actions">

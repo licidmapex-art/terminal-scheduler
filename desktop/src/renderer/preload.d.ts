@@ -1,5 +1,19 @@
 export {};
 
+type SerializedStochasticRun = NonNullable<
+  Awaited<ReturnType<NonNullable<Window["schedulerAPI"]>["getStochasticState"]>>["run"]
+>;
+
+type SerializedMonteCarloSnapshot = {
+  iterations: number;
+  selectedIndex: number;
+  baseSeed: number;
+  runSeeds: number[];
+  aggregates: import("../../types").MonteCarloAggregates;
+  customerSummaries: import("../../types").MonteCarloCustomerSummary[];
+  hasFullRuns: boolean;
+};
+
 declare global {
   interface Window {
     scenarioAPI?: {
@@ -56,6 +70,35 @@ declare global {
         | { ok: false; error: string }
       >;
       clearStochastic: () => Promise<{ ok: true }>;
+      runMonteCarlo: (payload: {
+        iterations?: number;
+        baseSeed?: number;
+      }) => Promise<
+        | {
+            ok: true;
+            snapshot: SerializedMonteCarloSnapshot;
+            run: NonNullable<Awaited<ReturnType<NonNullable<Window["schedulerAPI"]>["getStochasticState"]>>["run"]>;
+          }
+        | { ok: false; error: string }
+      >;
+      getMonteCarloState: () => Promise<{
+        active: boolean;
+        snapshot: SerializedMonteCarloSnapshot | null;
+        run: NonNullable<Awaited<ReturnType<NonNullable<Window["schedulerAPI"]>["getStochasticState"]>>["run"]> | null;
+      }>;
+      setMonteCarloIteration: (index: number) => Promise<
+        | {
+            ok: true;
+            snapshot: SerializedMonteCarloSnapshot;
+            run: NonNullable<Awaited<ReturnType<NonNullable<Window["schedulerAPI"]>["getStochasticState"]>>["run"]>;
+          }
+        | { ok: false; error: string }
+      >;
+      clearMonteCarlo: () => Promise<{ ok: true }>;
+      cancelMonteCarlo: () => Promise<{ ok: true }>;
+      onMonteCarloProgress?: (
+        callback: (payload: { done: number; total: number; phase: string }) => void
+      ) => () => void;
       updateSimulation: () => Promise<
         | {
             ok: true;

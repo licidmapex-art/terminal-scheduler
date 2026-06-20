@@ -52,7 +52,8 @@ import {
   cloneSlots,
   computeSlotTweaks,
   buildStochasticRunSnapshot,
-  type SimulationRunSnapshot
+  type SimulationRunSnapshot,
+  type MonteCarloSnapshot
 } from "../lib/simulationRunState";
 
 /** Reload engine modules so `npm run build` takes effect without restarting Electron. */
@@ -72,6 +73,14 @@ function reloadEngine(): {
     transportPools?: TransportPool[],
     options?: import("../engine/replaySimulation").ReplaySimulationOptions
   ) => ScheduleResult;
+  runSingleStochasticReplay: (
+    input: import("../engine/stochastic/runMonteCarlo").RunMonteCarloInput,
+    seed: number
+  ) => ScheduleResult;
+  runMonteCarloAsync: (
+    input: import("../engine/stochastic/runMonteCarlo").RunMonteCarloInput,
+    options: import("../engine/stochastic/runMonteCarlo").RunMonteCarloOptions
+  ) => Promise<import("../lib/simulationRunState").MonteCarloSnapshot>;
   validateScheduledSlots: (
     slots: ScheduledSlot[],
     resources: Resource[],
@@ -97,7 +106,9 @@ function reloadEngine(): {
     runScheduler: engine.runScheduler,
     replaySimulation: engine.replaySimulation,
     validateScheduledSlots: engine.validateScheduledSlots,
-    finalizeManualSlot: engine.finalizeManualSlot
+    finalizeManualSlot: engine.finalizeManualSlot,
+    runSingleStochasticReplay: engine.runSingleStochasticReplay,
+    runMonteCarloAsync: engine.runMonteCarloAsync
   };
 }
 
@@ -167,6 +178,19 @@ function mergeSlotValidationWarnings(
       }))
     ]
   };
+}
+
+function replayFromPersistedSlots(): void {
+  const customers = getAllCustomers();
+  const resources = getAllResources();
+  const config = resolveExportSimulationConfig();
+  const transportPools = getAllTransportPools();
+  const slots = getAllScheduledSlots();
+  const { replaySimulation } = reloadEngine();
+  let result = replaySimulation(customers, resources, config, slots, transportPools);
+  result = mergeSlotValidationWarnings(result, slots, resources, config);
+  applyRunResult(result, config);
+  runState.setLastReplayed(slots);
 }
 
 function createWindow(): void {
@@ -390,6 +414,41 @@ function serializeStochasticRun(run: ReturnType<typeof runState.getStochasticRun
   };
 }
 
+function serializeMonteCarloSnapshot(snapshot: MonteCarloSnapshot | null) {
+  if (!snapshot) return null;
+  return {
+    iterations: snapshot.iterations,
+    selectedIndex: snapshot.selectedIndex,
+    baseSeed: snapshot.baseSeed,
+    runSeeds: snapshot.runSeeds,
+    aggregates: snapshot.aggregates,
+    customerSummaries: snapshot.customerSummaries,
+    hasFullRuns: (snapshot.runs?.length ?? 0) > 0
+  };
+}
+
+function runStochasticReplayWithValidation(seed: number) {
+  const customers = getAllCustomers();
+  const resources = getAllResources();
+  const slots = getAllScheduledSlots();
+  const config = resolveExportSimulationConfig();
+  const transportPools = getAllTransportPools();
+  const { runSingleStochasticReplay } = reloadEngine();
+  let result = runSingleStochasticReplay(
+    {
+      workingSlots: slots,
+      customers,
+      resources,
+      config,
+      stochasticConfig: config.stochasticConfig!,
+      transportPools,
+      mergeValidation: (r) => mergeSlotValidationWarnings(r, slots, resources, config)
+    },
+    seed
+  );
+  return { result, slots, config };
+}
+
 ipcMain.handle("scheduler:getStochasticState", async () => {
   const run = runState.getStochasticRun();
   return {
@@ -432,6 +491,114 @@ ipcMain.handle("scheduler:sampleStochastic", async (_e, seed?: number) => {
 
 ipcMain.handle("scheduler:clearStochastic", async () => {
   runState.clearStochasticRun();
+  return { ok: true as const };
+});
+
+ipcMain.handle(
+  "scheduler:runMonteCarlo",
+  async (event, payload: { iterations?: number; baseSeed?: number }) => {
+    const customers = getAllCustomers();
+    const resources = getAllResources();
+    const slots = getAllScheduledSlots();
+
+    if (customers.length === 0 || resources.length === 0 || slots.length === 0) {
+      return { ok: false as const, error: "Run the scheduler first and keep at least one slot." };
+    }
+
+    const config = resolveExportSimulationConfig();
+    if (!config.stochasticConfig?.enabled) {
+      return {
+        ok: false as const,
+        error: "Enable stochastics under Configuration → Stochastics, then save."
+      };
+    }
+
+    runState.clearMonteCarlo();
+    const transportPools = getAllTransportPools();
+    const { runMonteCarloAsync } = reloadEngine();
+
+    const snapshot = await runMonteCarloAsync(
+      {
+        workingSlots: slots,
+        customers,
+        resources,
+        config,
+        stochasticConfig: config.stochasticConfig,
+        transportPools,
+        mergeValidation: (r) => mergeSlotValidationWarnings(r, slots, resources, config)
+      },
+      {
+        iterations: payload?.iterations ?? 50,
+        baseSeed: payload?.baseSeed,
+        onProgress: (done, total) => {
+          event.sender.send("scheduler:monteCarloProgress", { done, total, phase: "running" });
+        },
+        shouldCancel: () => runState.shouldCancelMonteCarlo()
+      }
+    );
+
+    if (snapshot.iterations === 0) {
+      return { ok: false as const, error: "Monte Carlo run was cancelled." };
+    }
+
+    runState.setMonteCarlo(snapshot);
+    if (!snapshot.runs?.length && snapshot.runSeeds[0] != null) {
+      const { result, slots } = runStochasticReplayWithValidation(snapshot.runSeeds[0]);
+      runState.attachMonteCarloRun(0, buildStochasticRunSnapshot(slots, result));
+    }
+
+    event.sender.send("scheduler:monteCarloProgress", {
+      done: snapshot.iterations,
+      total: snapshot.iterations,
+      phase: "done"
+    });
+
+    return {
+      ok: true as const,
+      snapshot: serializeMonteCarloSnapshot(runState.getMonteCarlo()),
+      run: serializeStochasticRun(runState.getStochasticRun())
+    };
+  }
+);
+
+ipcMain.handle("scheduler:getMonteCarloState", async () => {
+  const snapshot = runState.getMonteCarlo();
+  return {
+    active: snapshot != null,
+    snapshot: serializeMonteCarloSnapshot(snapshot),
+    run: serializeStochasticRun(runState.getStochasticRun())
+  };
+});
+
+ipcMain.handle("scheduler:setMonteCarloIteration", async (_e, index: number) => {
+  const mc = runState.getMonteCarlo();
+  if (!mc) return { ok: false as const, error: "No Monte Carlo run active." };
+
+  const clamped = Math.max(0, Math.min(mc.iterations - 1, Math.floor(index)));
+  const seed = mc.runSeeds[clamped];
+  if (seed == null) return { ok: false as const, error: "Invalid iteration index." };
+
+  if (mc.runs?.[clamped]) {
+    runState.setMonteCarloSelectedIndex(clamped);
+  } else {
+    const { result, slots } = runStochasticReplayWithValidation(seed);
+    runState.attachMonteCarloRun(clamped, buildStochasticRunSnapshot(slots, result));
+  }
+
+  return {
+    ok: true as const,
+    snapshot: serializeMonteCarloSnapshot(runState.getMonteCarlo()),
+    run: serializeStochasticRun(runState.getStochasticRun())
+  };
+});
+
+ipcMain.handle("scheduler:clearMonteCarlo", async () => {
+  runState.clearMonteCarlo();
+  return { ok: true as const };
+});
+
+ipcMain.handle("scheduler:cancelMonteCarlo", async () => {
+  runState.requestMonteCarloCancel();
   return { ok: true as const };
 });
 
@@ -527,6 +694,7 @@ ipcMain.handle("scheduler:undo", async () => {
   result = mergeSlotValidationWarnings(result, prev, resources, config);
   applyRunResult(result, config);
   runState.setLastReplayed(prev);
+  runState.clearStochasticRun();
 
   return {
     ok: true as const,
@@ -547,7 +715,8 @@ ipcMain.handle("scheduler:deleteSlot", async (_e, slotId: string) => {
 
   runState.pushUndo(existing);
   deleteScheduledSlot(id);
-  runState.markDirty();
+  replayFromPersistedSlots();
+  runState.clearStochasticRun();
 
   return { ok: true as const, slotId: id };
 });
@@ -576,7 +745,6 @@ ipcMain.handle("scheduler:upsertSlot", async (_e, payload: unknown) => {
   if (!customer) return { ok: false as const, error: "Customer not found." };
 
   const existing = getAllScheduledSlots();
-  runState.pushUndo(existing);
 
   const draft = deserializeSlotPayload(p.slot);
   const others = existing.filter((s) => s.id !== draft.id);
@@ -584,12 +752,15 @@ ipcMain.handle("scheduler:upsertSlot", async (_e, payload: unknown) => {
   const built = finalizeManualSlot(draft, customer, resources, config, others);
   if (!built.ok) return { ok: false as const, error: built.error };
 
+  runState.pushUndo(existing);
+
   if (p.isNew || !existing.some((s) => s.id === built.slot.id)) {
     createScheduledSlot(built.slot);
   } else {
     updateScheduledSlot(built.slot);
   }
-  runState.markDirty();
+  replayFromPersistedSlots();
+  runState.clearStochasticRun();
 
   return { ok: true as const, slot: serializeSlot(built.slot) };
 });

@@ -45,8 +45,10 @@ import { resolveCustomerPipelineRates } from "../lib/pipelineFlows";
 import {
   AVERAGE_CUSTOMER_ID,
   COMBINED_TERMINAL_ID,
-  buildDocTrendByCustomer
+  buildDocTrendByCustomer,
+  buildFulfillmentTrendByCustomer
 } from "../lib/timelineChartData";
+import { formatFulfillmentDeltaPp } from "../lib/formatMetrics";
 import { isIndividualStorageMode, isSharedStorageMode, parseStorageMode } from "../../lib/storageMode";
 
 interface Customer {
@@ -268,8 +270,8 @@ function DocSparkline({
     );
   }
   const finiteValues = finitePoints.map((p) => p.value);
-  const max = Math.max(...finiteValues, 0.01);
-  const min = Math.min(...finiteValues, 0);
+  const min = Math.min(...finiteValues);
+  const max = Math.max(...finiteValues);
   const pad = 2;
   const w = width - pad * 2;
   const h = height - pad * 2;
@@ -546,6 +548,27 @@ export default function Analytics() {
       ),
     [simulationLog, customers, timelineData, config, customerById]
   );
+
+  const fulfillmentTrendByCustomer = useMemo(
+    () => buildFulfillmentTrendByCustomer(simulationLog, customers),
+    [simulationLog, customers]
+  );
+
+  const fulfillmentFinalByCustomer = useMemo(() => {
+    const out = new Map<string, number | null>();
+    for (const [customerId, series] of Object.entries(fulfillmentTrendByCustomer)) {
+      let final: number | null = null;
+      for (let i = series.length - 1; i >= 0; i--) {
+        const v = series[i];
+        if (v != null && Number.isFinite(v)) {
+          final = Math.round(v * 10) / 10;
+          break;
+        }
+      }
+      out.set(customerId, final);
+    }
+    return out;
+  }, [fulfillmentTrendByCustomer]);
 
   const aggregateDocFinal = useMemo(() => {
     const pick = (id: string) => {
@@ -1138,8 +1161,11 @@ export default function Analytics() {
                 <strong>headroom ÷ total inbound pressure</strong> (t/d each), then the <strong>minimum</strong> when
                 both apply. <strong>Combined DoC</strong> applies the same formula to total terminal inventory and summed
                 pressures (shown in the inventory table footer when available). <strong>Average DoC</strong> is the mean
-                of each customer&apos;s tightest leg — usually different from combined. With no pipeline and no slot
-                targets, DoC is unavailable (—). Starting (t) is configured opening stock. Δ inventory and mass balance
+                of each customer&apos;s tightest leg — usually different from combined.{" "}
+                <strong>Fulfilment final / trend</strong> is the min-leg gap vs the inbound-pool average (or peer
+                mean) in percentage points — same basis as the fulfilment optimizer. Zero = on par; negative = behind
+                peers. With no pipeline and no slot targets, DoC and fulfilment are unavailable (—). Starting (t) is
+                configured opening stock. Δ inventory and mass balance
                 use final minus that opening (not the first timeline point). Inbound/outbound tonnes are pipeline from
                 the simulation log (hour 0 pipeline = 0, matching the engine) plus berth cargo summed as tonnes per
                 clock hour over the cargo window (same rule as the simulation Excel export). Tonnes are whole numbers.
@@ -1162,12 +1188,14 @@ export default function Analytics() {
               <th style={{ textAlign: "right" }}>Max</th>
               <th style={{ textAlign: "right" }}>DoC final (d)</th>
               <th style={{ minWidth: 108 }}>DoC trend</th>
+              <th style={{ textAlign: "right" }}>Fulfilment Δ (pp)</th>
+              <th style={{ minWidth: 108 }}>Fulfilment Δ trend</th>
             </tr>
           </thead>
           <tbody>
             {inventorySummary.length === 0 ? (
               <tr>
-                <td colSpan={11} style={{ textAlign: "center", color: "#94a3b8", padding: 24 }}>
+                <td colSpan={13} style={{ textAlign: "center", color: "#94a3b8", padding: 24 }}>
                   Run the scheduler first to see inventory data
                 </td>
               </tr>
@@ -1199,6 +1227,22 @@ export default function Analytics() {
                   <td style={{ verticalAlign: "middle" }}>
                     <DocSparkline
                       series={downsampleSeries(docTrendByCustomer[row.customerId] ?? [], 96)}
+                      width={104}
+                      height={32}
+                      stroke={resolveCustomerChartColor(
+                        customerById.get(row.customerId)?.chartColor,
+                        customerChartOrderIndex.get(row.customerId) ?? 0
+                      )}
+                    />
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {fulfillmentFinalByCustomer.get(row.customerId) == null
+                      ? "—"
+                      : formatFulfillmentDeltaPp(fulfillmentFinalByCustomer.get(row.customerId))}
+                  </td>
+                  <td style={{ verticalAlign: "middle" }}>
+                    <DocSparkline
+                      series={downsampleSeries(fulfillmentTrendByCustomer[row.customerId] ?? [], 96)}
                       width={104}
                       height={32}
                       stroke={resolveCustomerChartColor(
@@ -1251,6 +1295,7 @@ export default function Analytics() {
                     />
                   ) : null}
                 </td>
+                <td colSpan={2} />
               </tr>
             </tfoot>
           )}

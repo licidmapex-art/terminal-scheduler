@@ -1,6 +1,6 @@
 /**
  * Relative days-of-cover optimizer: yield a slot attempt when a leg's DoC exceeds
- * x × the cross-customer average (same hour), so other customers can use the berth.
+ * x × combined terminal DoC (same hour), so other customers can use the berth.
  */
 
 import type { Customer, ScheduledSlot, SimulationConfig } from "../types";
@@ -466,13 +466,13 @@ export function averageCustomerDaysOfCoverAtHour(
 /** True when this leg should skip scheduling this hour (others may still book). */
 export function relativeOptimizerShouldYield(
   legMetric: number,
-  averageDoc: number | null,
+  referenceDoc: number | null,
   multiplier: number
 ): boolean {
   if (multiplier <= 0) return false;
-  if (!Number.isFinite(legMetric) || averageDoc == null || !Number.isFinite(averageDoc)) return false;
-  if (averageDoc <= SORT_METRIC_EPS) return false;
-  return legMetric > multiplier * averageDoc;
+  if (!Number.isFinite(legMetric) || referenceDoc == null || !Number.isFinite(referenceDoc)) return false;
+  if (referenceDoc <= SORT_METRIC_EPS) return false;
+  return legMetric > multiplier * referenceDoc;
 }
 
 /** True when this leg is too far ahead on mass fulfilment vs the direction+mode pool average. */

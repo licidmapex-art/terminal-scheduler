@@ -133,6 +133,32 @@ describe("sampleSimulationOverrides leg delay probability", () => {
     expect(n).toBeGreaterThan(0);
     expect(n).toBeLessThan(4);
   });
+
+  it("negative fixed shift moves slots earlier", () => {
+    const result = sampleSimulationOverrides(
+      [slot("s1", "c1")],
+      customers,
+      config,
+      {
+        enabled: true,
+        seed: 1,
+        legDelays: [
+          {
+            customerId: "c1",
+            direction: "inbound",
+            delayProbability: 1,
+            delayHours: { kind: "fixed", value: -6 }
+          }
+        ],
+        pipeline: { flowMultiplier: { kind: "fixed", value: 1 } },
+        immobilisation: { events: [] }
+      },
+      1
+    );
+    expect(result.overrides.slotAdjustments).toHaveLength(1);
+    expect(result.overrides.slotAdjustments[0]!.deltaStartMs).toBe(-6 * HOUR_MS);
+    expect(result.events.some((e) => e.kind === "arrival_delay" && e.magnitude === -6)).toBe(true);
+  });
 });
 
 describe("sampleSimulationOverrides disruption events", () => {

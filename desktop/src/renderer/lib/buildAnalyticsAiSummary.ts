@@ -1,5 +1,8 @@
 import type { SimulationLogRow } from "../../engine/simulationLog";
+import { buildAiDiagnostics, type AiDiagnostics } from "./buildAiDiagnostics";
+import { getSchedulingReferenceForAi } from "./schedulingKnowledgeForAi";
 import { SCHEDULING_CONSTRAINTS } from "./schedulingConstraints";
+import { isIndividualStorageMode } from "../../lib/storageMode";
 
 export interface AiSummaryCustomer {
   name: string;
@@ -12,7 +15,17 @@ export interface AiSummaryCustomer {
   outboundTonnes: number;
   inventoryDeltaT: number;
   pipelineFlowPerHourT: number;
+  pipelineInboundTph: number;
+  pipelineOutboundTph: number;
   storageSharePct: number;
+  capacityBandT: number | null;
+  declaredInboundThroughputT: number;
+  inboundMepsT: number;
+  outboundMepsT: number;
+  inboundMode: string;
+  outboundMode: string;
+  inboundRoundtripH: number;
+  outboundRoundtripH: number;
   throughputTargetT: number;
   throughputScheduledT: number;
   throughputPasses: boolean;
@@ -40,7 +53,17 @@ export interface AiSummaryConstraintTotals {
   [constraintLabel: string]: number;
 }
 
+export type FeasibilityWarningLike =
+  | string
+  | { key?: string; severity?: string; message: string };
+
+function feasibilityWarningText(w: FeasibilityWarningLike): string {
+  return typeof w === "string" ? w : w.message;
+}
+
 export interface AnalyticsAiSummary {
+  schedulingReference: string;
+  diagnostics: AiDiagnostics;
   simulation: {
     startDate: string;
     endDate: string;
@@ -115,7 +138,16 @@ interface ResourceUtilRow {
 interface CustomerLike {
   name: string;
   pipelineFlowPerHour?: number;
+  pipelineInboundPerHour?: number;
+  pipelineOutboundPerHour?: number;
   storageShare?: number;
+  declaredInboundThroughput?: number;
+  inboundMEPS?: number;
+  outboundMEPS?: number;
+  inboundMode?: string;
+  outboundMode?: string;
+  inboundRoundtripHours?: number;
+  outboundRoundtripHours?: number;
 }
 
 interface ConfigLike {
@@ -165,7 +197,7 @@ export function buildAnalyticsAiSummary(input: {
   config: ConfigLike | null;
   periodHours: number;
   customers: CustomerLike[];
-  feasibilityWarnings: string[];
+  feasibilityWarnings: FeasibilityWarningLike[];
   simulationLog: SimulationLogRow[];
   inventorySummary: InventorySummaryRow[];
   throughputCoverage: ThroughputCoverageRow[];
@@ -181,12 +213,15 @@ export function buildAnalyticsAiSummary(input: {
   const throughputByName = new Map(input.throughputCoverage.map((r) => [r.customerName, r]));
   const tankByName = new Map(input.tankExtremes.map((r) => [r.customerName, r]));
   const partialByName = new Map(input.partialLoads.map((r) => [r.customerName, r]));
+  const totalCap = input.config.totalStorageCapacity ?? 100000;
+  const individualBands = isIndividualStorageMode(input.config.storageMode);
 
   const customers: AiSummaryCustomer[] = input.customers.map((c) => {
     const inv = invByName.get(c.name);
     const tp = throughputByName.get(c.name);
     const tank = tankByName.get(c.name);
     const partial = partialByName.get(c.name);
+    const share = c.storageShare ?? 0;
     return {
       name: c.name,
       startingInventoryT: inv?.starting ?? 0,
@@ -198,7 +233,17 @@ export function buildAnalyticsAiSummary(input: {
       outboundTonnes: inv?.massOutbound ?? 0,
       inventoryDeltaT: inv?.inventoryDelta ?? 0,
       pipelineFlowPerHourT: c.pipelineFlowPerHour ?? 0,
-      storageSharePct: c.storageShare ?? 0,
+      pipelineInboundTph: c.pipelineInboundPerHour ?? Math.max(0, c.pipelineFlowPerHour ?? 0),
+      pipelineOutboundTph: c.pipelineOutboundPerHour ?? Math.max(0, -(c.pipelineFlowPerHour ?? 0)),
+      storageSharePct: share,
+      capacityBandT: individualBands ? Math.round((share / 100) * totalCap) : null,
+      declaredInboundThroughputT: c.declaredInboundThroughput ?? 0,
+      inboundMepsT: c.inboundMEPS ?? 0,
+      outboundMepsT: c.outboundMEPS ?? 0,
+      inboundMode: c.inboundMode ?? "—",
+      outboundMode: c.outboundMode ?? "—",
+      inboundRoundtripH: c.inboundRoundtripHours ?? 0,
+      outboundRoundtripH: c.outboundRoundtripHours ?? 0,
       throughputTargetT: tp?.expectedInbound ?? 0,
       throughputScheduledT: tp?.scheduledInbound ?? 0,
       throughputPasses: tp?.passes ?? true,
@@ -217,20 +262,26 @@ export function buildAnalyticsAiSummary(input: {
 
   const { byType, byCustomer } = tallyConstraints(input.simulationLog);
 
-  return {
-    simulation: {
-      startDate: input.config.startDate,
-      endDate: input.config.endDate,
-      periodHours: Math.round(input.periodHours * 10) / 10,
-      storageMode: input.config.storageMode ?? "fixed_band",
-      totalStorageCapacityT: input.config.totalStorageCapacity ?? 100000,
-      optimizerRelativeDocMultiplier: input.config.optimizerRelativeDocMultiplier ?? 0,
-      pacerInboundRoundAtDecile: input.config.pacerInboundRoundAtDecile ?? 1,
-      pacerInboundAllowance: input.config.pacerInboundAllowance ?? 0.5,
-      pacerOutboundRoundAtDecile: input.config.pacerOutboundRoundAtDecile ?? 1,
-      pacerOutboundAllowance: input.config.pacerOutboundAllowance ?? 0.5
-    },
-    feasibilityWarnings: input.feasibilityWarnings,
+  const simulation = {
+    startDate: input.config.startDate,
+    endDate: input.config.endDate,
+    periodHours: Math.round(input.periodHours * 10) / 10,
+    storageMode: input.config.storageMode ?? "fixed_band",
+    totalStorageCapacityT: input.config.totalStorageCapacity ?? 100000,
+    optimizerRelativeDocMultiplier: input.config.optimizerRelativeDocMultiplier ?? 0,
+    pacerInboundRoundAtDecile: input.config.pacerInboundRoundAtDecile ?? 1,
+    pacerInboundAllowance: input.config.pacerInboundAllowance ?? 0.5,
+    pacerOutboundRoundAtDecile: input.config.pacerOutboundRoundAtDecile ?? 1,
+    pacerOutboundAllowance: input.config.pacerOutboundAllowance ?? 0.5
+  };
+
+  const schedulingReference = getSchedulingReferenceForAi(simulation.storageMode);
+
+  const base: AnalyticsAiSummary = {
+    schedulingReference,
+    diagnostics: { rankedFindings: [], topBlockingConstraints: [] },
+    simulation,
+    feasibilityWarnings: input.feasibilityWarnings.map(feasibilityWarningText),
     customers,
     constraintBlockHoursByType: byType,
     constraintBlockHoursByCustomer: byCustomer,
@@ -239,9 +290,7 @@ export function buildAnalyticsAiSummary(input: {
       type: r.resourceType,
       slots: r.totalSlots,
       utilizationPct: r.utilizationPct,
-      utilizationReservationPct: r.utilizationReservationPct ?? r.utilizationPct,
-      hoursOnBerth: r.totalHoursOccupied,
-      hoursReservation: r.totalHoursReservation ?? r.totalHoursOccupied
+      hoursOnBerth: r.totalHoursOccupied
     })),
     totals: {
       scheduledSlots: input.totalSlots,
@@ -250,6 +299,9 @@ export function buildAnalyticsAiSummary(input: {
         input.throughputCoverage.length > 0 && input.throughputCoverage.every((r) => r.passes)
     }
   };
+
+  base.diagnostics = buildAiDiagnostics(base);
+  return base;
 }
 
 export function summaryToPromptText(summary: AnalyticsAiSummary, userNotes?: string): string {

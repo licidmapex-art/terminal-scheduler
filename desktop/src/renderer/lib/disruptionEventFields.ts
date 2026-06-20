@@ -4,6 +4,10 @@ import type {
   StochasticDisruptionImpact
 } from "../../types";
 import {
+  parseProbabilityPercentInput,
+  probabilityFractionToPercentString
+} from "./stochasticFormUnits";
+import {
   distributionFieldsFromSpec,
   distributionSpecFromFields,
   type DistributionFields
@@ -39,7 +43,10 @@ export function disruptionEventFieldsFromConfig(ev?: StochasticDisruptionEvent):
   return {
     kind: ev.kind ?? "terminal",
     label: ev.label ?? "",
-    probability: ev.occurrenceProbability != null ? String(ev.occurrenceProbability) : "",
+    probability:
+      ev.occurrenceProbability != null
+        ? probabilityFractionToPercentString(ev.occurrenceProbability)
+        : "",
     startHourMin: String(ev.startHourMin ?? ev.startHour ?? 0),
     startHourMax: String(ev.startHourMax ?? 168),
     duration: distributionFieldsFromSpec(ev.durationHours),
@@ -55,9 +62,8 @@ export function disruptionEventFromFields(fields: DisruptionEventFields): Stocha
   const durationHours = distributionSpecFromFields(fields.duration);
   if (!durationHours) return null;
 
-  const probRaw = fields.probability.trim();
-  const occurrenceProbability =
-    probRaw === "" ? 1 : Math.min(1, Math.max(0, Number(probRaw) || 0));
+  const parsedProb = parseProbabilityPercentInput(fields.probability);
+  const occurrenceProbability = parsedProb === null ? 1 : parsedProb;
   if (occurrenceProbability <= 0) return null;
 
   let impact: StochasticDisruptionImpact = { kind: "full_stop" };

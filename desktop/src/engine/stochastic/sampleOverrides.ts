@@ -93,14 +93,18 @@ export function sampleSimulationOverrides(
     if (!legCfg) continue;
     const delayP = Math.min(1, Math.max(0, legCfg.delayProbability ?? 1));
     if (rng() >= delayP) continue;
-    const delayHours = Math.max(0, sampleDistribution(legCfg.delayHours, rng));
-    if (delayHours <= 1e-9) continue;
+    const delayHours = sampleDistribution(legCfg.delayHours, rng);
+    if (Math.abs(delayHours) <= 1e-9) continue;
     const deltaMs = Math.round(delayHours * HOUR_MS);
+    const delayLabel =
+      delayHours >= 0
+        ? `+${delayHours.toFixed(1)}h delay`
+        : `${delayHours.toFixed(1)}h early`;
     slotAdjustments.push({
       slotId: slot.id,
       deltaStartMs: deltaMs,
       deltaEndMs: deltaMs,
-      reason: `Arrival delay +${delayHours.toFixed(1)}h`
+      reason: `Arrival ${delayLabel}`
     });
     const shiftedStart = slot.start.getTime() + deltaMs;
     const { hourStart, hourEnd } = hourRangeFromMs(
@@ -118,7 +122,7 @@ export function sampleSimulationOverrides(
       slotId: slot.id,
       legKey: slot.legKey ?? null,
       magnitude: delayHours,
-      label: `+${delayHours.toFixed(1)}h delay`
+      label: delayLabel
     });
   }
 
